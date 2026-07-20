@@ -1,0 +1,30 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: du-hang-warning
+spec:
+  sourceUri: hf://test-org/test-model
+  size: 10Mi
+  env:
+    # Simulate a normal, successful download that takes a while, so the download
+    # itself never fails and the artifact should ultimately reach Ready.
+    - name: AIM_DEBUG_SIMULATE_DOWNLOAD
+      value: "true"
+    - name: AIM_DEBUG_DOWNLOAD_DURATION
+      value: "40"
+    - name: AIM_DEBUG_VERIFY_DURATION
+      value: "5"
+    # Make the progress monitor's `du` measurement hang for the whole run, i.e.
+    # simulate a stuck filesystem. This must NOT wedge the monitor, spuriously
+    # kill the (healthy) download, or stop the artifact from reaching Ready.
+    - name: AIM_DEBUG_SIMULATE_DU_HANG_SECONDS
+      value: "600"
+    - name: AIM_DEBUG_SIMULATE_DU_HANG_CALLS
+      value: "9999"
+    # Short du timeout so the "filesystem may be stuck" warning surfaces quickly.
+    - name: DU_TIMEOUT
+      value: "5"
+    - name: EXPECTED_SIZE_BYTES
+      value: "102400"
+    - name: PROGRESS_INTERVAL
+      value: "2"

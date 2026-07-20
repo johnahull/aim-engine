@@ -311,6 +311,14 @@ func (obs ServiceObservation) getProfileCacheHealth() controllerutils.ComponentH
 	health.State = constants.AIMStatusProgressing
 	health.Reason = "ProfileCacheNotReady"
 	health.Message = fmt.Sprintf("Profile cache %s is %s", pc.Name, pc.Status.Status)
+	// Carry the cache's Ready-condition detail so the root cause is visible
+	// directly on the service, mirroring how the cache folds its artifacts.
+	for _, cond := range pc.Status.Conditions {
+		if cond.Type == controllerutils.ConditionTypeReady && cond.Message != "" {
+			health.Message = fmt.Sprintf("Profile cache %s is %s: %s", pc.Name, pc.Status.Status, cond.Message)
+			break
+		}
+	}
 	return health
 }
 

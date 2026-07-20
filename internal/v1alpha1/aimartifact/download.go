@@ -103,6 +103,13 @@ func buildRoleBinding(mc *aimv1alpha1.AIMArtifact) *rbacv1.RoleBinding {
 // defaultDownloadFilter excludes subdirectory files when no explicit filter is configured.
 var defaultDownloadFilter = &aimv1alpha1.AIMDownloadFilter{Exclude: []string{"*/*"}}
 
+// downloadJobActiveDeadlineSeconds is a hard 24h wall-clock backstop on the
+// whole download Job (all pod retries). It covers the one case the progress
+// monitor can't: a wedged filesystem where the monitor is paused and can't
+// measure progress. On expiry the Job fails and is recreated (bytes persist on
+// the PVC; HF/S3 resume). Intentionally coarse and non-configurable for now.
+const downloadJobActiveDeadlineSeconds = int64(24 * 60 * 60)
+
 // resolveDownloadFilter returns the effective download filter.
 // Precedence: artifact spec > runtime config storage > default (exclude subdirs).
 // An explicit empty filter (downloadFilter: {}) on the artifact disables all filtering.
@@ -158,6 +165,9 @@ func buildDownloadJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alpha
 		{Name: "ARTIFACT_NAME", Value: mc.Name},
 		{Name: "ARTIFACT_NAMESPACE", Value: mc.Namespace},
 		{Name: "STALL_TIMEOUT", Value: "120"},
+		// Upper bound (seconds) for a single progress-monitor size measurement.
+		// Generous so slow-but-healthy storage isn't mistaken for a stuck fs.
+		{Name: "DU_TIMEOUT", Value: "300"},
 		{Name: "TARGET_DIR", Value: mountPath},
 	}
 	defaultEnv = append(defaultEnv, downloadFilterEnvVars(resolveDownloadFilter(mc, runtimeConfigSpec))...)
@@ -181,7 +191,8 @@ func buildDownloadJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alpha
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            ptr.To(int32(2)),
-			TTLSecondsAfterFinished: ptr.To(int32(60 * 10)), // Cleanup after 10min to allow status observation
+			ActiveDeadlineSeconds:   ptr.To(downloadJobActiveDeadlineSeconds), // see const doc
+			TTLSecondsAfterFinished: ptr.To(int32(60 * 10)),                   // Cleanup after 10min to allow status observation
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{

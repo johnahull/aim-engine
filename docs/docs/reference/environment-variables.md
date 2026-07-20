@@ -23,7 +23,9 @@ These are set automatically by the operator on download jobs.
 | `EXPECTED_SIZE_BYTES` | (computed) | Expected model size in bytes. |
 | `ARTIFACT_NAME` | (from resource) | Name of the AIMArtifact resource. |
 | `ARTIFACT_NAMESPACE` | (from resource) | Namespace of the AIMArtifact resource. |
-| `STALL_TIMEOUT` | `120` | Seconds to wait before considering a download stalled. |
+| `STALL_TIMEOUT` | `120` | Seconds without any byte-size growth before the progress monitor considers a download stalled and kills it (so the next protocol is tried). |
+| `PROGRESS_INTERVAL` | `5` | Seconds between progress-monitor size measurements/status updates. |
+| `DU_TIMEOUT` | `300` | Upper bound (seconds) for a single `du` size measurement. On overrun the monitor treats the filesystem as possibly stuck: it warns once, surfaces a message on `status.progress.message`, and pauses progress/stall handling (rather than blocking) until `du` returns. Kept generous so slow-but-healthy storage is not mistaken for a stall. |
 | `TMPDIR` | `/tmp/` | Temporary directory for downloads. |
 | `HF_HOME` | `/tmp/.hf` | HuggingFace cache directory. |
 
@@ -54,6 +56,10 @@ These are for testing only and should not be used in production.
 | `AIM_DEBUG_SIMULATE_HF_DOWNLOAD` | Enable HuggingFace download simulation mode. |
 | `AIM_DEBUG_SIMULATE_HF_FAIL_PROTOCOLS` | Comma-separated protocols to simulate failure (e.g., `XET,HF_TRANSFER`). |
 | `AIM_DEBUG_SIMULATE_HF_DURATION` | Sleep duration per simulated attempt (default: `2` seconds). |
+| `AIM_DEBUG_SIMULATE_HF_HANG_PROTOCOLS` | Comma-separated protocols whose simulated download hangs (via `python sleep`) so the progress monitor's stall detection must kill it. |
+| `AIM_DEBUG_SIMULATE_HF_HANG_DURATION` | Sleep duration for a hanging simulated download (default: `300` seconds). |
+| `AIM_DEBUG_SIMULATE_DU_HANG_SECONDS` | Make the progress monitor's `du` size measurement sleep this many seconds (set above `DU_TIMEOUT`) to simulate a stuck filesystem without a real wedged PVC. |
+| `AIM_DEBUG_SIMULATE_DU_HANG_CALLS` | How many of the first `du` measurements hang when `AIM_DEBUG_SIMULATE_DU_HANG_SECONDS` is set (default: `1`; use a large value to hang for the whole run). |
 | `AIM_DEBUG_SIMULATE_DOWNLOAD` | Simulate general download phases. |
 | `AIM_DEBUG_DOWNLOAD_DURATION` | Simulated download duration (default: `10` seconds). |
 | `AIM_DEBUG_VERIFY_DURATION` | Simulated verify duration (default: `10` seconds). |

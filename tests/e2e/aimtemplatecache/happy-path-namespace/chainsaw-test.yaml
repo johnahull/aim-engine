@@ -20,7 +20,12 @@ spec:
         - apply:
             file: template-cache.yaml
 
-    - name: Ensure the artifacts are created
+    - name: Ensure both artifacts are created
+      description: >
+        The template has two distinct model sources, so the cache must create two
+        separate AIMArtifacts. Match each by its stable identity (sourceUri)
+        rather than the positional template.index label, which is an unstable
+        internal detail nothing consumes.
       try:
         - assert:
             resource:
@@ -29,7 +34,6 @@ spec:
               metadata:
                 labels:
                   aim.eai.amd.com/template-cache.name: happy-path-namespace
-                  aim.eai.amd.com/template.index: "0"
                   aim.eai.amd.com/template.scope: "Namespace"
               spec:
                 sourceUri: hf://HuggingFaceTB/SmolLM2-135M
@@ -44,10 +48,9 @@ spec:
               metadata:
                 labels:
                   aim.eai.amd.com/template-cache.name: happy-path-namespace
-                  aim.eai.amd.com/template.index: "1"
                   aim.eai.amd.com/template.scope: "Namespace"
               spec:
-                sourceUri: hf://HuggingFaceTB/SmolLM2-135M
+                sourceUri: hf://sshleifer/tiny-gpt2
                 size: 4Gi
 
     # TODO add an assert to check the template cache becomes ready (once the artifact is merged)

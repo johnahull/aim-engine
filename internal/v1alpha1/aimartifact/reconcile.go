@@ -426,8 +426,9 @@ func (obs ArtifactObservation) GetComponentHealth(ctx context.Context, clientset
 
 		if obs.artifact.Status.Status != constants.AIMStatusReady {
 			if obs.downloadJob != nil {
-				health = append(health,
-					obs.downloadJob.ToDownstreamComponentHealth("DownloadJob", controllerutils.GetJobHealth))
+				jobHealth := obs.downloadJob.ToDownstreamComponentHealth("DownloadJob", controllerutils.GetJobHealth)
+				jobHealth = foldStalledFilesystemHealth(jobHealth, obs.artifact.Status.Progress)
+				health = append(health, jobHealth)
 			}
 			if obs.downloadJobPods != nil {
 				health = append(health,
@@ -437,6 +438,25 @@ func (obs ArtifactObservation) GetComponentHealth(ctx context.Context, clientset
 	}
 
 	return health
+}
+
+// foldStalledFilesystemHealth downgrades a still-running download job to Degraded
+// carrying the progress monitor's warning from status.progress.message. Folding
+// it into this always-reported component (rather than a new one) lets the signal
+// reach the artifact's Ready condition and bubble up to the cache/service, and
+// self-clear when the monitor clears the message. A terminal job is left
+// untouched so its real success/failure message wins.
+func foldStalledFilesystemHealth(jobHealth controllerutils.ComponentHealth, progress *aimv1alpha1.DownloadProgress) controllerutils.ComponentHealth {
+	if progress == nil || progress.Message == "" {
+		return jobHealth
+	}
+	if st := jobHealth.GetState(); st == constants.AIMStatusReady || st == constants.AIMStatusFailed {
+		return jobHealth
+	}
+	jobHealth.State = constants.AIMStatusDegraded
+	jobHealth.Reason = aimv1alpha1.ArtifactReasonFilesystemStalled
+	jobHealth.Message = progress.Message
+	return jobHealth
 }
 
 func (result ArtifactFetchResult) DownloadJobSucceeded() bool {

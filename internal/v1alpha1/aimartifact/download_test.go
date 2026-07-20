@@ -222,6 +222,22 @@ func TestBuildDownloadJobIncludesFilter(t *testing.T) {
 	}
 }
 
+func TestBuildDownloadJobHasActiveDeadline(t *testing.T) {
+	mc := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec:       aimv1alpha1.AIMArtifactSpec{SourceURI: "hf://org/model"},
+	}
+
+	job := buildDownloadJob(mc, nil, 1000)
+
+	if job.Spec.ActiveDeadlineSeconds == nil {
+		t.Fatal("download job missing ActiveDeadlineSeconds (hard backstop for a wedged filesystem)")
+	}
+	if got, want := *job.Spec.ActiveDeadlineSeconds, int64(24*60*60); got != want {
+		t.Errorf("ActiveDeadlineSeconds = %d, want %d (24h)", got, want)
+	}
+}
+
 func TestBothJobsGetSameFilterEnvVars(t *testing.T) {
 	mc := &aimv1alpha1.AIMArtifact{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},

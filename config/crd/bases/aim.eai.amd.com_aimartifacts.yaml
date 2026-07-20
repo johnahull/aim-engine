@@ -558,6 +558,11 @@ spec:
                       so far
                     format: int64
                     type: integer
+                  message:
+                    description: |-
+                      Message is an optional human-readable diagnostic from the progress monitor.
+                      Empty during normal progress; cleared once the download completes.
+                    type: string
                   percentage:
                     description: Percentage is the download progress as a percentage
                       (0-100)

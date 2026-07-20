@@ -47,7 +47,7 @@ stop_progress_monitor() {
         NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
         if ! kubectl patch aimartifact "$ARTIFACT_NAME" -n "$ARTIFACT_NAMESPACE" \
             --type=merge --subresource=status \
-            -p "{\"status\":{\"progress\":{\"percentage\":100,\"displayPercentage\":\"100 %\",\"downloadedBytes\":${EXPECTED_SIZE_BYTES:-0},\"totalBytes\":${EXPECTED_SIZE_BYTES:-0}}}}"; then
+            -p "{\"status\":{\"progress\":{\"percentage\":100,\"displayPercentage\":\"100 %\",\"downloadedBytes\":${EXPECTED_SIZE_BYTES:-0},\"totalBytes\":${EXPECTED_SIZE_BYTES:-0},\"message\":\"\"}}}"; then
             echo "WARN: Failed to set progress to 100%" >&2
         fi
     fi

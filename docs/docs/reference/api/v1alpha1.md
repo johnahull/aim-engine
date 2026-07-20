@@ -2469,6 +2469,7 @@ _Appears in:_
 | `downloadedBytes` _integer_ | DownloadedBytes is the number of bytes downloaded so far |  | Optional: \{\} <br /> |
 | `percentage` _integer_ | Percentage is the download progress as a percentage (0-100) |  | Maximum: 100 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `displayPercentage` _string_ | DisplayPercentage is a human-readable progress string (e.g., "45 %")<br />This field is automatically populated from Progress.Percentage |  | Optional: \{\} <br /> |
+| `message` _string_ | Message is an optional human-readable diagnostic from the progress monitor.<br />Empty during normal progress; cleared once the download completes. |  | Optional: \{\} <br /> |
 
 
 #### DownloadState

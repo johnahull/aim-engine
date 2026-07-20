@@ -1,0 +1,63 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: du-hang-warning
+spec:
+  description: >
+    Verify the progress monitor's stuck-filesystem guard. The `du` size
+    measurement is forced to hang past DU_TIMEOUT for the whole run (simulating
+    a wedged PVC). The monitor must: (1) surface a "filesystem may be stuck"
+    warning on status.progress.message without blocking, and (2) NOT spuriously
+    kill the otherwise-healthy download, so the artifact still reaches Ready.
+    If the du-hang guard blocked the monitor or broke stall detection, the
+    warning would never appear and/or the download would be killed and this
+    test would fail.
+  timeouts:
+    assert: 180s
+  steps:
+    - name: Create runtime config
+      try:
+        - apply:
+            file: runtime.yaml
+
+    - name: Create artifact whose du measurement hangs
+      try:
+        - apply:
+            file: artifact.yaml
+
+    - name: Assert the stuck-filesystem warning is surfaced and bubbled to the Ready condition
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: du-hang-warning
+              status:
+                # A wedged `du` is non-terminal but surfaced as Degraded so it
+                # propagates to consumers (profile cache / service).
+                status: Degraded
+                # The pod writes the raw diagnostic to status.progress.message and
+                # the controller folds it into the Ready condition. The
+                # FilesystemStalled reason is only set while that warning is
+                # present, so asserting it here proves the warning surfaced and
+                # bubbled up to the condition consumers aggregate on. Asserting the
+                # reason (not a contains() on the message) matches how the other
+                # condition tests work and avoids a hard JMESPath error while
+                # progress.message is still absent.
+                (conditions[?type == 'Ready']):
+                  - status: "False"
+                    reason: FilesystemStalled
+
+    - name: Assert artifact still reaches Ready despite the stuck du
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: du-hang-warning
+              status:
+                status: Ready

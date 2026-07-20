@@ -80,6 +80,11 @@ const (
 	ArtifactReasonDownloadComplete = "DownloadComplete"
 	ArtifactReasonVerifying        = "Verifying"
 	ArtifactReasonVerified         = "Verified"
+
+	// ArtifactReasonFilesystemStalled indicates the progress monitor could not
+	// measure download progress because the cache filesystem stopped responding.
+	// Surfaced as Degraded (non-terminal) so it bubbles up to consumers.
+	ArtifactReasonFilesystemStalled = "FilesystemStalled"
 )
 
 const (
@@ -251,6 +256,11 @@ type DownloadProgress struct {
 	// This field is automatically populated from Progress.Percentage
 	// +optional
 	DisplayPercentage string `json:"displayPercentage,omitempty"`
+
+	// Message is an optional human-readable diagnostic from the progress monitor.
+	// Empty during normal progress; cleared once the download completes.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // DownloadState represents the current download attempt state, updated by the downloader pod

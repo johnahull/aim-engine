@@ -10,8 +10,8 @@ spec:
     - modelId: HuggingFaceTB/SmolLM2-135M
       sourceUri: hf://HuggingFaceTB/SmolLM2-135M
       size: 2Gi
-    - modelId: HuggingFaceTB/SmolLM2-135M-copy
-      sourceUri: hf://HuggingFaceTB/SmolLM2-135M
+    - modelId: sshleifer/tiny-gpt2
+      sourceUri: hf://sshleifer/tiny-gpt2
       size: 4Gi
 status:
   status: Ready
@@ -25,6 +25,6 @@ status:
     - modelId: HuggingFaceTB/SmolLM2-135M
       sourceUri: hf://HuggingFaceTB/SmolLM2-135M
       size: 2Gi
-    - modelId: HuggingFaceTB/SmolLM2-135M-copy
-      sourceUri: hf://HuggingFaceTB/SmolLM2-135M
+    - modelId: sshleifer/tiny-gpt2
+      sourceUri: hf://sshleifer/tiny-gpt2
       size: 4Gi
