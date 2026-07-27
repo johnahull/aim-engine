@@ -1,0 +1,116 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# AcceleratorDetector E2E Test: NVIDIA GPU Detection
+#
+# Validates that the NVIDIA AcceleratorDetector DaemonSet:
+# 1. Runs successfully on NVIDIA GPU nodes
+# 2. Writes NFD feature files that result in aim-accelerator.* node labels,
+#    including the per-type vendor label aim-accelerator.vendor.GPU.NVIDIA
+#
+# Prerequisites:
+# - NFD (Node Feature Discovery) installed on the cluster (bundled with the
+#   NVIDIA GPU Operator)
+# - nvidia-container-toolkit + an "nvidia" RuntimeClass (so nvidia-smi is
+#   injected into the detector pod)
+# - NVIDIA AcceleratorDetector DaemonSet deployed (acceleratorDetector.nvidia.enable)
+# - NVIDIA GPU hardware available on at least one node
+#
+# Gated on `requires: gpu-nvidia` so it only runs on the NVIDIA GPU environment
+# (ENV=nvidia / `make test-chainsaw-nvidia`); it is excluded from the Kind and
+# AMD GPU selectors, which can't satisfy NVIDIA hardware.
+#
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: accelerator-detector-nvidia
+  labels:
+    requires: gpu-nvidia
+spec:
+  description: Verify NVIDIA AcceleratorDetector DaemonSet detects GPUs and node labels appear
+  timeouts:
+    assert: 300s
+  steps:
+    - name: Verify NVIDIA DaemonSet pods are running
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: aim-engine-accelerator-detector-nvidia
+                namespace: aim-system
+              status:
+                (numberReady > `0`): true
+
+    - name: Verify NVIDIA accelerator model label exists on at least one node
+      try:
+        - script:
+            timeout: 180s
+            content: |
+              # Wait for NFD to pick up the feature file and apply labels.
+              # Check for any of the canonical NVIDIA model tokens the detector
+              # normalizes nvidia-smi product names into. Includes common
+              # consumer/workstation tokens so a "try it" box (e.g. RTX 4090)
+              # also satisfies this assertion.
+              for i in $(seq 1 30); do
+                for model in H100 H200 GH200 B200 A100 A40 A30 A10 L40S L40 L4 V100 T4 \
+                             RTX4090 RTX4080 RTX3090 RTX3090Ti RTX3080 RTXA6000 RTXA5000 RTX6000Ada; do
+                  NODES=$(kubectl get nodes -l "feature.node.kubernetes.io/aim-accelerator.${model}" -o name 2>/dev/null)
+                  if [ -n "$NODES" ]; then
+                    echo "Found NVIDIA GPU-labeled nodes ($model): $NODES"
+                    exit 0
+                  fi
+                done
+                echo "Attempt $i/30: No NVIDIA model labels found yet, waiting 6s..."
+                sleep 6
+              done
+              echo "ERROR: No nodes found with aim-accelerator NVIDIA model labels after 180s"
+              kubectl get nodes --show-labels | grep aim-accelerator || true
+              exit 1
+
+    - name: Verify GPU family label is also present (generic AIM profiles target it)
+      description: |
+        AIM images whose embedded profile YAML declares accelerator_model: GPU
+        rely on the detector emitting a per-family label alongside the
+        per-model label. Without it, the v1alpha2 model matcher rejects all
+        GPU-only profiles as unsupported.
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              for i in $(seq 1 10); do
+                NODES=$(kubectl get nodes -l "feature.node.kubernetes.io/aim-accelerator.GPU" -o name 2>/dev/null)
+                if [ -n "$NODES" ]; then
+                  echo "Found GPU family-labeled nodes: $NODES"
+                  exit 0
+                fi
+                echo "Attempt $i/10: No aim-accelerator.GPU label yet, waiting 6s..."
+                sleep 6
+              done
+              echo "ERROR: No nodes carry the aim-accelerator.GPU family label"
+              kubectl get nodes --show-labels | grep aim-accelerator || true
+              exit 1
+
+    - name: Verify the NVIDIA vendor label is present (which-GPU gating signal)
+      description: |
+        The per-accelerator-type vendor label is what lets the resolver
+        distinguish NVIDIA nodes from AMD ones (e.g. to pick nvidia.com/gpu vs
+        amd.com/gpu). It must be published alongside the model/family labels.
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              VENDOR_LABEL="feature.node.kubernetes.io/aim-accelerator.vendor.GPU.NVIDIA"
+              for i in $(seq 1 10); do
+                NODES=$(kubectl get nodes -l "${VENDOR_LABEL}" -o name 2>/dev/null)
+                if [ -n "$NODES" ]; then
+                  echo "Found NVIDIA vendor-labeled nodes: $NODES"
+                  exit 0
+                fi
+                echo "Attempt $i/10: No ${VENDOR_LABEL} label yet, waiting 6s..."
+                sleep 6
+              done
+              echo "ERROR: No nodes carry the NVIDIA vendor label ${VENDOR_LABEL}"
+              kubectl get nodes --show-labels | grep aim-accelerator || true
+              exit 1

@@ -247,16 +247,26 @@ def _record_writes():
     return calls, orig
 
 
-def _run_cycle(detect_type, *, hw, partitions):
-    """run_detection_cycle with detect_hardware/detect_partitions stubbed."""
-    orig_detect, orig_part = mod.detect_hardware, mod.detect_partitions
+def _run_cycle(detect_type, *, hw, partitions, vendor="AMD"):
+    """run_detection_cycle with the detection backends stubbed.
+
+    `hw` stands in for whichever model backend the vendor selects
+    (detect_hardware for AMD, detect_hardware_nvidia for NVIDIA); `partitions`
+    stands in for detect_partitions (consulted only on the AMD GPU path).
+    """
+    orig_detect = mod.detect_hardware
+    orig_nvidia = mod.detect_hardware_nvidia
+    orig_part = mod.detect_partitions
     calls, orig_write = _record_writes()
     mod.detect_hardware = lambda dt: hw
+    mod.detect_hardware_nvidia = lambda: hw
     mod.detect_partitions = lambda: partitions
     try:
-        wrote = mod.run_detection_cycle(detect_type)
+        wrote = mod.run_detection_cycle(detect_type, vendor)
     finally:
-        mod.detect_hardware, mod.detect_partitions = orig_detect, orig_part
+        mod.detect_hardware = orig_detect
+        mod.detect_hardware_nvidia = orig_nvidia
+        mod.detect_partitions = orig_part
         mod.write_feature_file = orig_write
     return wrote, calls
 
@@ -302,7 +312,11 @@ def test_model_and_partition_go_to_separate_files():
     wrote, calls = _run_cycle("gpu", hw=hw, partitions=parts)
     assert wrote is True
     files = _files(calls)
-    assert files["gpu"] == {f"{mod.LABEL_PREFIX}.MI300X": "8", f"{mod.LABEL_PREFIX}.GPU": "8"}
+    assert files["gpu"] == {
+        f"{mod.LABEL_PREFIX}.MI300X": "8",
+        f"{mod.LABEL_PREFIX}.GPU": "8",
+        f"{mod.LABEL_PREFIX}.vendor.GPU.AMD": "8",
+    }
     assert files[mod.PARTITION_FILE_KIND] == {f"{PREFIX}.CPX-NPS4": "64"}
 
 
@@ -324,7 +338,11 @@ def test_partition_default_sentinel_uses_hint_when_no_entries():
     wrote, calls = _run_cycle("gpu", hw=hw, partitions=None)
     assert wrote is True
     files = _files(calls)
-    assert files["gpu"] == {f"{mod.LABEL_PREFIX}.MI300X": "8", f"{mod.LABEL_PREFIX}.GPU": "8"}
+    assert files["gpu"] == {
+        f"{mod.LABEL_PREFIX}.MI300X": "8",
+        f"{mod.LABEL_PREFIX}.GPU": "8",
+        f"{mod.LABEL_PREFIX}.vendor.GPU.AMD": "8",
+    }
     assert files[mod.PARTITION_FILE_KIND] == {f"{PREFIX}.default": "8"}
 
 
@@ -340,3 +358,219 @@ def test_partition_cycle_preserves_when_no_signal():
         mod.write_feature_file = orig_write
     assert wrote is False
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Vendor axis: build_feature_lines stamps a per-accelerator-type vendor label
+# from the DaemonSet's ACCELERATOR_VENDOR env, so cross-vendor nodes carry one
+# vendor key per type with no conflict.
+# ---------------------------------------------------------------------------
+
+
+def test_vendor_label_emitted_per_family_amd_gpu():
+    hw = [{"accelerator_type": "GPU", "accelerator_model": "MI300X", "accelerator_count": 8}]
+    labels = _labels(mod.build_feature_lines(hw, vendor="AMD"))
+    assert labels[f"{mod.LABEL_PREFIX}.vendor.GPU.AMD"] == "8"
+
+
+def test_vendor_label_emitted_per_family_amd_cpu():
+    hw = [{"accelerator_type": "CPU", "accelerator_model": "EPYC_9965", "accelerator_count": 192}]
+    labels = _labels(mod.build_feature_lines(hw, vendor="AMD"))
+    assert labels[f"{mod.LABEL_PREFIX}.vendor.CPU.AMD"] == "192"
+
+
+def test_vendor_label_emitted_per_family_nvidia():
+    hw = [{"accelerator_type": "GPU", "accelerator_model": "H100", "accelerator_count": 8}]
+    labels = _labels(mod.build_feature_lines(hw, vendor="NVIDIA"))
+    assert labels[f"{mod.LABEL_PREFIX}.vendor.GPU.NVIDIA"] == "8"
+    # Vendor count tracks the family count.
+    assert labels[f"{mod.LABEL_PREFIX}.GPU"] == "8"
+
+
+def test_no_vendor_lines_when_no_detections():
+    # Confident-empty: no families -> no vendor labels (and an empty file).
+    assert mod.build_feature_lines([], vendor="AMD") == []
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA model normalization: nvidia-smi product names -> canonical label tokens.
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_nvidia_known_models():
+    cases = {
+        "NVIDIA H100 80GB HBM3": "H100",
+        "NVIDIA H100 PCIe": "H100",
+        "NVIDIA A100-SXM4-80GB": "A100",
+        "NVIDIA A100 80GB PCIe": "A100",
+        "NVIDIA H200": "H200",
+        "NVIDIA GH200 480GB": "GH200",
+        "NVIDIA B200": "B200",
+        "NVIDIA L40S": "L40S",
+        "NVIDIA L40": "L40",
+        "NVIDIA L4": "L4",
+        "NVIDIA A10": "A10",
+        "Tesla V100-SXM2-16GB": "V100",
+        "Tesla T4": "T4",
+    }
+    for raw, expected in cases.items():
+        assert mod._normalize_nvidia_model(raw) == expected, raw
+
+
+def test_normalize_nvidia_boundary_avoids_a10_in_a100():
+    # The A10 token must not match inside "A100".
+    assert mod._normalize_nvidia_model("NVIDIA A100 80GB PCIe") == "A100"
+
+
+def test_normalize_nvidia_consumer_and_workstation():
+    # Consumer/workstation RTX cards normalize by pattern so "try it on a
+    # workstation GPU" produces clean labels (not slugs).
+    cases = {
+        "NVIDIA GeForce RTX 4090": "RTX4090",
+        "NVIDIA GeForce RTX 4080 SUPER": "RTX4080Super",
+        "NVIDIA GeForce RTX 4070 Ti SUPER": "RTX4070TiSuper",
+        "NVIDIA GeForce RTX 3090 Ti": "RTX3090Ti",
+        "NVIDIA GeForce RTX 3060": "RTX3060",
+        "NVIDIA GeForce RTX 2080 Ti": "RTX2080Ti",
+        "NVIDIA RTX A6000": "RTXA6000",
+        "NVIDIA RTX A4000": "RTXA4000",
+        "NVIDIA RTX 6000 Ada Generation": "RTX6000Ada",
+    }
+    for raw, expected in cases.items():
+        assert mod._normalize_nvidia_model(raw) == expected, raw
+
+
+def test_normalize_nvidia_consumer_labels_are_valid_keys():
+    for raw in ("NVIDIA GeForce RTX 4070 Ti SUPER", "NVIDIA RTX 6000 Ada Generation"):
+        tok = mod._normalize_nvidia_model(raw)
+        assert tok and all(c.isalnum() or c in "-_." for c in tok), raw
+
+
+def test_normalize_nvidia_unknown_is_sanitized_label_key():
+    slug = mod._normalize_nvidia_model("NVIDIA Wonder GPU 9000!!")
+    # Valid k8s label-key characters only, and non-empty.
+    assert slug and all(c.isalnum() or c in "-_." for c in slug)
+
+
+# ---------------------------------------------------------------------------
+# detect_hardware_nvidia: same None-vs-[] contract as the AMD path, plus
+# aggregation of nvidia-smi per-GPU name lines into model counts.
+# ---------------------------------------------------------------------------
+
+
+def test_detect_hardware_nvidia_aggregates_counts():
+    out = _with_run(
+        lambda *a, **k: _FakeProc(
+            returncode=0,
+            stdout="NVIDIA H100 80GB HBM3\nNVIDIA H100 80GB HBM3\nNVIDIA H100 PCIe\n",
+        ),
+        mod.detect_hardware_nvidia,
+    )
+    assert out == [{"accelerator_type": "GPU", "accelerator_model": "H100", "accelerator_count": 3}]
+
+
+def test_detect_hardware_nvidia_none_on_nonzero_exit():
+    out = _with_run(
+        lambda *a, **k: _FakeProc(returncode=9, stderr="driver/library mismatch"),
+        mod.detect_hardware_nvidia,
+    )
+    assert out is None
+
+
+def test_detect_hardware_nvidia_none_on_timeout():
+    def boom(*a, **k):
+        raise mod.subprocess.TimeoutExpired(cmd="nvidia-smi", timeout=120)
+
+    assert _with_run(boom, mod.detect_hardware_nvidia) is None
+
+
+def test_detect_hardware_nvidia_none_when_missing():
+    def missing(*a, **k):
+        raise FileNotFoundError("nvidia-smi")
+
+    assert _with_run(missing, mod.detect_hardware_nvidia) is None
+
+
+def test_detect_hardware_nvidia_empty_is_confident_empty():
+    out = _with_run(
+        lambda *a, **k: _FakeProc(returncode=0, stdout="\n"),
+        mod.detect_hardware_nvidia,
+    )
+    assert out == []
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA detection cycle: model + family + vendor labels in the model file, and
+# (MIG deferred) only the partitioning-scheme.default sentinel in the partition
+# file. amd-smi is never consulted on the NVIDIA path.
+# ---------------------------------------------------------------------------
+
+
+def test_nvidia_cycle_emits_model_family_vendor_and_default_partition():
+    hw = [{"accelerator_type": "GPU", "accelerator_model": "H100", "accelerator_count": 8}]
+    # partitions stub is intentionally a real scheme to prove it's ignored on NVIDIA.
+    parts = [{"accelerator_type": "CPX", "memory": "NPS4"} for _ in range(64)]
+    wrote, calls = _run_cycle("gpu", hw=hw, partitions=parts, vendor="NVIDIA")
+    assert wrote is True
+    files = _files(calls)
+    assert files["gpu"] == {
+        f"{mod.LABEL_PREFIX}.H100": "8",
+        f"{mod.LABEL_PREFIX}.GPU": "8",
+        f"{mod.LABEL_PREFIX}.vendor.GPU.NVIDIA": "8",
+    }
+    # MIG not parsed yet -> default sentinel only, derived from the GPU count.
+    assert files[mod.PARTITION_FILE_KIND] == {f"{PREFIX}.default": "8"}
+
+
+def test_nvidia_cycle_clears_partition_on_confident_no_gpu():
+    wrote, calls = _run_cycle("gpu", hw=[], partitions=None, vendor="NVIDIA")
+    assert wrote is True
+    files = _files(calls)
+    assert files["gpu"] == {}
+    assert files[mod.PARTITION_FILE_KIND] == {}
+
+
+def test_build_feature_lines_mixed_models_sum_family():
+    # Two GPU models on one node: each model keeps its own key; the family and
+    # vendor counts sum across them. (No vendor.*.AMD leaks on the NVIDIA path.)
+    hw = [
+        {"accelerator_type": "GPU", "accelerator_model": "H100", "accelerator_count": 4},
+        {"accelerator_type": "GPU", "accelerator_model": "A100", "accelerator_count": 4},
+    ]
+    labels = _labels(mod.build_feature_lines(hw, vendor="NVIDIA"))
+    assert labels[f"{mod.LABEL_PREFIX}.H100"] == "4"
+    assert labels[f"{mod.LABEL_PREFIX}.A100"] == "4"
+    assert labels[f"{mod.LABEL_PREFIX}.GPU"] == "8"
+    assert labels[f"{mod.LABEL_PREFIX}.vendor.GPU.NVIDIA"] == "8"
+    assert not any(k.endswith(".AMD") for k in labels)
+
+
+# ---------------------------------------------------------------------------
+# Env parsing: ACCELERATOR_VENDOR must fail fast on typos (so it can't silently
+# route to the wrong backend), and DETECT_INTERVAL must not crash the loop.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_vendor_normalizes_known_values():
+    assert mod.resolve_vendor("amd") == "AMD"
+    assert mod.resolve_vendor("nvidia") == "NVIDIA"
+    assert mod.resolve_vendor(" NVIDIA ") == "NVIDIA"
+    assert mod.resolve_vendor(None) == "AMD"
+    assert mod.resolve_vendor("") == "AMD"
+
+
+def test_resolve_vendor_rejects_typos():
+    raised = False
+    try:
+        mod.resolve_vendor("NVDA")
+    except ValueError:
+        raised = True
+    assert raised, "a vendor typo must fail fast, not silently fall back to AMD"
+
+
+def test_resolve_interval_guard():
+    assert mod.resolve_interval("30") == 30
+    assert mod.resolve_interval("abc") == 10  # unparseable -> default
+    assert mod.resolve_interval("0") == 10    # non-positive -> default
+    assert mod.resolve_interval("-5") == 10
+    assert mod.resolve_interval(None) == 10

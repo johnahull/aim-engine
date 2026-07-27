@@ -29,6 +29,8 @@ spec:
           env:
             - name: DETECT_TYPE
               value: "gpu"
+            - name: ACCELERATOR_VENDOR
+              value: "AMD"
             - name: DETECT_INTERVAL
               value: "300"
             - name: NODE_NAME

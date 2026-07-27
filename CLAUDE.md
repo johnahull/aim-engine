@@ -83,6 +83,8 @@ mise exec -- make test-chainsaw                # Run tests for current ENV (alwa
 
 Chainsaw tests are declarative YAML in `tests/e2e/*/chainsaw-test.yaml`. When `ENV=kind`, tests requiring special infrastructure (e.g., `requires=longhorn`) are excluded automatically. JSON reports are always written to `.tmp/chainsaw-reports/chainsaw-report.json`.
 
+**GPU vendor gating.** Tests needing real accelerators carry a vendor-scoped `requires` label so a run only picks up tests its hardware can satisfy ("which GPU", not just "is there a GPU"): `requires=gpu-amd` (AMD Instinct, `amd-smi`/MI*), `requires=gpu-nvidia` (NVIDIA, `nvidia-smi`/H100, A100, …), or the legacy bare `requires=gpu` (treated as AMD today; migrate to `gpu-amd` over time). Environments: `ENV=kind` excludes all GPU values; `ENV=gpu` runs AMD (`gpu`, `gpu-amd`) and excludes `gpu-nvidia`; `ENV=nvidia` (explicit, via `make test-chainsaw-nvidia`) runs only `gpu-nvidia`. NVIDIA clusters are not auto-detected from the kubectl context, so select them with `ENV=nvidia`.
+
 ### v1alpha2 test conventions
 
 v1alpha2 and v1alpha1 have different resolution models. Keep test fixtures version-pure:

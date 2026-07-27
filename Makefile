@@ -89,7 +89,9 @@ CHART_OCI_REPO ?= oci://$(CHART_OCI_REGISTRY)/$(CHART_OCI_OWNER)
 # Cluster environment configuration
 # ENV is auto-detected from kubectl context:
 #   - Context starting with "kind-" -> ENV=kind
-#   - Otherwise -> ENV=gpu
+#   - Otherwise -> ENV=gpu (AMD GPU)
+# NVIDIA GPU clusters are not auto-detected (context names don't encode vendor);
+# select them explicitly with ENV=nvidia (or `make test-chainsaw-nvidia`).
 # Can be overridden via ENV variable
 CURRENT_CONTEXT := $(shell kubectl config current-context 2>/dev/null)
 AUTO_ENV := $(if $(filter kind-%,$(CURRENT_CONTEXT)),kind,gpu)
@@ -291,7 +293,7 @@ CHAINSAW_NEEDS_SECRET_EXCLUDE := needs-secret notin (hf_token,dockerhub_pull_sec
 # reduced-mode gates the eager-runtime-projection-mode tests, which only pass
 # against an operator started with a non-default --runtime-projection-mode
 # (Reduced). The default lanes run the operator in Exhaustive, so these are
-# excluded from both selectors; run them via `make set-projection-mode MODE=...`
+# excluded from every selector; run them via `make set-projection-mode MODE=...`
 # then point CHAINSAW_TEST_DIR at the specific mode dir with the selector cleared
 # (see docs/docs/contributing/testing.md). Both mode has no dedicated e2e leg: it
 # is the additive union of Exhaustive + Reduced (covered by those legs plus the
@@ -304,32 +306,49 @@ CHAINSAW_PROJECTION_MODE_EXCLUDE := reduced-mode
 # selector to INCLUDE `requires in (<mode>-mode)`.
 CHAINSAW_PROJECTION_MODE_DIR := tests/e2e/v1alpha2/runtime-projection
 
-# Kind environment: exclude tests requiring GPU, longhorn storage, external
-# network, or an HF token. Expensive / operator-gated tests (e.g. multi-hundred-
-# GiB live model downloads) gate themselves via one of these `requires` values
-# (e.g. requires=hf_token) rather than a separate tier axis.
-CHAINSAW_SELECTOR_KIND := requires notin (gpu,longhorn,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+# GPU vendor gating. Tests that need real accelerators carry a `requires` value
+# scoped by vendor so a run only picks up tests its hardware can actually satisfy
+# ("which GPU", not just "is there a GPU"):
+#   requires=gpu         AMD GPU (legacy/back-compat value; means AMD today)
+#   requires=gpu-amd     AMD Instinct GPU (amd-smi / MI*); preferred over bare gpu
+#   requires=gpu-nvidia  NVIDIA GPU (nvidia-smi / H100, A100, ...)
+# Bare `gpu` predates the vendor split; migrate AMD-specific tests to `gpu-amd`
+# as NVIDIA coverage grows.
 
-# GPU environment: exclude tests that only work on Kind (mocked node labels) or
-# need an HF token. GPU tests are otherwise fully end-to-end. Run an excluded
-# test explicitly by invoking chainsaw directly against its dir without a selector.
-CHAINSAW_SELECTOR_GPU := requires notin (kind,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+# Kind environment: no real accelerators, so exclude every GPU-vendor value plus
+# longhorn storage, HF-token, and NFD-gated tests. Expensive / operator-gated
+# tests (e.g. multi-hundred-GiB live model downloads) gate themselves via one of
+# these `requires` values rather than a separate tier axis.
+CHAINSAW_SELECTOR_KIND := requires notin (gpu,gpu-amd,gpu-nvidia,longhorn,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+
+# AMD GPU environment: runs AMD GPU tests (gpu, gpu-amd) end-to-end. Excludes
+# Kind-only tests (mocked node labels), NVIDIA-only tests, and HF-token/NFD-gated
+# tests. Run an excluded test explicitly by invoking chainsaw directly against
+# its dir without a selector.
+CHAINSAW_SELECTOR_GPU := requires notin (kind,gpu-nvidia,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+
+# NVIDIA GPU environment: runs only NVIDIA GPU tests (gpu-nvidia). Excludes
+# Kind-only tests and the AMD GPU values (bare gpu is AMD-built today), plus
+# HF-token/NFD-gated tests.
+CHAINSAW_SELECTOR_NVIDIA := requires notin (kind,gpu,gpu-amd,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
 
 # Select appropriate config based on ENV and CI detection
 # CI is detected via CI env var (set by GitHub Actions, GitLab CI, etc.)
 CHAINSAW_CONFIG_KIND := $(if $(CI),$(CHAINSAW_CONFIG_DIR)/kind-ci.yaml,$(CHAINSAW_CONFIG_DIR)/kind.yaml)
 CHAINSAW_CONFIG_GPU := $(CHAINSAW_CONFIG_DIR)/gpu.yaml
-CHAINSAW_ENV_CONFIG := $(if $(filter gpu,$(ENV)),$(CHAINSAW_CONFIG_GPU),$(CHAINSAW_CONFIG_KIND))
+# NVIDIA reuses the GPU chainsaw config (timeouts / failure-catch are vendor-agnostic).
+CHAINSAW_CONFIG_NVIDIA := $(CHAINSAW_CONFIG_GPU)
+CHAINSAW_ENV_CONFIG := $(if $(filter nvidia,$(ENV)),$(CHAINSAW_CONFIG_NVIDIA),$(if $(filter gpu,$(ENV)),$(CHAINSAW_CONFIG_GPU),$(CHAINSAW_CONFIG_KIND)))
 
 # Select appropriate selector and parallelism based on ENV
-CHAINSAW_ENV_SELECTOR := $(if $(filter gpu,$(ENV)),--selector "$(CHAINSAW_SELECTOR_GPU)",$(if $(filter kind,$(ENV)),--selector "$(CHAINSAW_SELECTOR_KIND)",))
+CHAINSAW_ENV_SELECTOR := $(if $(filter nvidia,$(ENV)),--selector "$(CHAINSAW_SELECTOR_NVIDIA)",$(if $(filter gpu,$(ENV)),--selector "$(CHAINSAW_SELECTOR_GPU)",$(if $(filter kind,$(ENV)),--selector "$(CHAINSAW_SELECTOR_KIND)",)))
 CHAINSAW_ENV_PARALLEL := $(if $(filter kind,$(ENV)),--parallel 4,)
 
 .PHONY: test-chainsaw
 test-chainsaw: ## Run chainsaw e2e tests (selector based on ENV). Pass CHAINSAW_ARGS for additional options.
 	@echo "Environment: $(ENV) (context: $(CURRENT_CONTEXT))"
 	@echo "Config: $(CHAINSAW_ENV_CONFIG)"
-	@echo "Selector: $(if $(filter gpu,$(ENV)),$(CHAINSAW_SELECTOR_GPU),$(CHAINSAW_SELECTOR_KIND))"
+	@echo "Selector: $(if $(filter nvidia,$(ENV)),$(CHAINSAW_SELECTOR_NVIDIA),$(if $(filter gpu,$(ENV)),$(CHAINSAW_SELECTOR_GPU),$(CHAINSAW_SELECTOR_KIND)))"
 	@mkdir -p $(CHAINSAW_REPORT_DIR) $(CHAINSAW_DEBUG_DIR)
 	@CHAINSAW_DEBUG_DIR="$(CURDIR)/$(CHAINSAW_DEBUG_DIR)" PATH="$(CURDIR)/hack:$(PATH)" chainsaw test --full-name --test-dir $(CHAINSAW_TEST_DIR) \
 		--config $(CHAINSAW_ENV_CONFIG) \
@@ -397,6 +416,10 @@ test-chainsaw-kind-ttl: aim-dummy-ttl-push ## Run kind e2e against an ephemeral 
 .PHONY: test-chainsaw-gpu
 test-chainsaw-gpu: ## Run chainsaw e2e tests for GPU environment
 	$(MAKE) test-chainsaw ENV=gpu
+
+.PHONY: test-chainsaw-nvidia
+test-chainsaw-nvidia: ## Run chainsaw e2e tests for NVIDIA GPU environment
+	$(MAKE) test-chainsaw ENV=nvidia
 
 .PHONY: test-chainsaw-gpu-ttl
 test-chainsaw-gpu-ttl: aim-dummy-ttl-push ## Run GPU e2e against an ephemeral ttl.sh aim-dummy (use while amdenterpriseai images aren't public yet). GPU nodes pull the image from public ttl.sh; the operator reads its OCI labels from there too.
@@ -517,7 +540,7 @@ vcluster-connect: ## Connect to personal vcluster and switch context.
 .PHONY: env-info
 env-info: ## Show current environment configuration (derived from kubectl context).
 	@echo "Context: $(CURRENT_CONTEXT)"
-	@echo "ENV:     $(ENV) (kind-* contexts -> kind, otherwise -> gpu)"
+	@echo "ENV:     $(ENV) (kind-* contexts -> kind, otherwise -> gpu; ENV=nvidia is explicit)"
 
 ##@ Build
 
@@ -623,16 +646,20 @@ sync-detector-images: ## Sync accelerator-detector image refs in config/accelera
 	 DETECTOR_GPU_TAG="$$(yq '.acceleratorDetector.gpu.image.tag' config/helm/values.yaml)"; \
 	 DETECTOR_CPU_REPO="$$(yq '.acceleratorDetector.cpu.image.repository' config/helm/values.yaml)"; \
 	 DETECTOR_CPU_TAG="$$(yq '.acceleratorDetector.cpu.image.tag' config/helm/values.yaml)"; \
-	 for v in "$${DETECTOR_GPU_REPO}" "$${DETECTOR_GPU_TAG}" "$${DETECTOR_CPU_REPO}" "$${DETECTOR_CPU_TAG}"; do \
+	 DETECTOR_NVIDIA_REPO="$$(yq '.acceleratorDetector.nvidia.image.repository' config/helm/values.yaml)"; \
+	 DETECTOR_NVIDIA_TAG="$$(yq '.acceleratorDetector.nvidia.image.tag' config/helm/values.yaml)"; \
+	 for v in "$${DETECTOR_GPU_REPO}" "$${DETECTOR_GPU_TAG}" "$${DETECTOR_CPU_REPO}" "$${DETECTOR_CPU_TAG}" "$${DETECTOR_NVIDIA_REPO}" "$${DETECTOR_NVIDIA_TAG}"; do \
 	   if [ -z "$${v}" ] || [ "$${v}" = "null" ]; then \
 	     echo "ERROR: missing acceleratorDetector image value in config/helm/values.yaml"; exit 1; \
 	   fi; \
 	 done; \
 	 echo "  - GPU detector image: $${DETECTOR_GPU_REPO}:$${DETECTOR_GPU_TAG}"; \
 	 echo "  - CPU detector image: $${DETECTOR_CPU_REPO}:$${DETECTOR_CPU_TAG}"; \
+	 echo "  - NVIDIA detector image: $${DETECTOR_NVIDIA_REPO}:$${DETECTOR_NVIDIA_TAG}"; \
 	 cd config/accelerator-detector && \
 	   kustomize edit set image accelerator-detector-gpu="$${DETECTOR_GPU_REPO}:$${DETECTOR_GPU_TAG}" && \
-	   kustomize edit set image accelerator-detector-cpu="$${DETECTOR_CPU_REPO}:$${DETECTOR_CPU_TAG}"
+	   kustomize edit set image accelerator-detector-cpu="$${DETECTOR_CPU_REPO}:$${DETECTOR_CPU_TAG}" && \
+	   kustomize edit set image accelerator-detector-nvidia="$${DETECTOR_NVIDIA_REPO}:$${DETECTOR_NVIDIA_TAG}"
 
 .PHONY: build-installer
 build-installer: manifests generate sync-detector-images ## Generate a consolidated YAML with CRDs and deployment.

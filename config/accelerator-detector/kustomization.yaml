@@ -10,6 +10,13 @@ resources:
 - service_account.yaml
 - gpu-daemonset.yaml
 - cpu-daemonset.yaml
+- nvidia-daemonset.yaml
+# Default detector image refs. These mirror the Helm chart's
+# acceleratorDetector.{gpu,cpu,nvidia}.image values in config/helm/values.yaml so a
+# bare `kustomize build config/default` produces a usable install.yaml. The
+# `make build-installer` target re-syncs these from values.yaml on each build
+# (via yq + `kustomize edit set image`) to keep this block in lockstep with
+# the Helm path.
 images:
 - name: accelerator-detector-cpu
   newName: docker.io/amdenterpriseai/aim-epyc-base
@@ -17,3 +24,6 @@ images:
 - name: accelerator-detector-gpu
   newName: docker.io/amdenterpriseai/aim-base
   newTag: "0.12"
+- name: accelerator-detector-nvidia
+  newName: docker.io/library/python
+  newTag: 3-slim

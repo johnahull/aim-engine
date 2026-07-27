@@ -1,33 +1,41 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: accelerator-detector-cpu
+  name: accelerator-detector-nvidia
   namespace: system
   labels:
     app.kubernetes.io/name: aim-accelerator-detector
-    app.kubernetes.io/component: cpu-detection
+    app.kubernetes.io/component: nvidia-detection
 spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: aim-accelerator-detector
-      app.kubernetes.io/component: cpu-detection
+      app.kubernetes.io/component: nvidia-detection
   template:
     metadata:
       labels:
         app.kubernetes.io/name: aim-accelerator-detector
-        app.kubernetes.io/component: cpu-detection
+        app.kubernetes.io/component: nvidia-detection
     spec:
       serviceAccountName: accelerator-detector
+      # Targets NVIDIA GPU nodes. The NVIDIA GPU Operator's NFD config labels
+      # nodes carrying an NVIDIA PCI device (vendor 10de) with this key, the
+      # same label the operator itself uses to place its components. Override
+      # via Helm for clusters whose NFD emits class+vendor PCI keys.
+      nodeSelector:
+        feature.node.kubernetes.io/pci-10de.present: "true"
+      # nvidia-smi and libnvidia-ml are injected from the host driver by the
+      # nvidia-container-toolkit, so the pod must run under the nvidia runtime.
+      runtimeClassName: nvidia
       tolerations:
         - operator: Exists
       # NFD's features.d lives under /etc/kubernetes on the host and is
-      # root-owned. The GPU detector (privileged) creates it, so on
-      # heterogeneous nodes the nonroot CPU container can't write its
-      # feature file. chmod it once from a root init container and keep
-      # the main container hardened (nonroot, no caps).
+      # root-owned. On heterogeneous nodes another (privileged) detector may
+      # have created it; chmod it once from a root init container so the
+      # hardened nonroot main container can write its feature file.
       initContainers:
         - name: prep-features-dir
-          image: accelerator-detector-cpu:latest
+          image: accelerator-detector-nvidia:latest
           command: ["sh", "-c", "mkdir -p /nfd-features && chmod 0777 /nfd-features"]
           securityContext:
             runAsUser: 0
@@ -37,13 +45,20 @@ spec:
               mountPath: /nfd-features
       containers:
         - name: detector
-          image: accelerator-detector-cpu:latest
+          image: accelerator-detector-nvidia:latest
           command: ["python3", "/scripts/detect-and-label.py"]
           env:
             - name: DETECT_TYPE
-              value: "cpu"
+              value: "gpu"
             - name: ACCELERATOR_VENDOR
-              value: "AMD"
+              value: "NVIDIA"
+            # Inject all GPUs into the container without consuming a
+            # nvidia.com/gpu device-plugin slot, and request the "utility"
+            # driver capability so the runtime mounts nvidia-smi + libnvidia-ml.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "utility"
             - name: DETECT_INTERVAL
               value: "300"
             - name: NODE_NAME
@@ -72,9 +87,6 @@ spec:
             - name: scripts
               mountPath: /scripts
               readOnly: true
-            - name: host-proc-cpuinfo
-              mountPath: /proc/cpuinfo
-              readOnly: true
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -98,7 +110,3 @@ spec:
           configMap:
             name: accelerator-detector-script
             defaultMode: 0755
-        - name: host-proc-cpuinfo
-          hostPath:
-            path: /proc/cpuinfo
-            type: File

@@ -18,9 +18,12 @@ consulted. Partition detection is best-effort: any failure falls back to the
 `partitioning-scheme.default` sentinel and never blocks model/family labels.
 
 Environment variables:
-  DETECT_TYPE      - "gpu", "cpu", or "all" (default: "gpu")
-  DETECT_INTERVAL  - seconds between re-detection cycles (default: 10)
-  NODE_NAME        - node name for logging (injected via downward API)
+  DETECT_TYPE        - "gpu", "cpu", or "all" (default: "gpu")
+  ACCELERATOR_VENDOR - "AMD" or "NVIDIA" (default: "AMD"). Selects the detection
+                       backend (AMD -> aim-runtime/amd-smi, NVIDIA -> nvidia-smi)
+                       and is stamped onto the per-type vendor label axis.
+  DETECT_INTERVAL    - seconds between re-detection cycles (default: 10)
+  NODE_NAME          - node name for logging (injected via downward API)
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,6 +50,28 @@ FEATURES_DIR = "/nfd-features"
 FEATURE_FILE_TEMPLATE = "aim-accelerator-{}"
 LABEL_PREFIX = "feature.node.kubernetes.io/aim-accelerator"
 HEALTH_FILE = "/tmp/healthy"
+
+# Vendor axis. Each DaemonSet is vendor-specific and stamps its vendor onto a
+# per-accelerator-type sub-axis so cross-vendor nodes (e.g. an NVIDIA GPU on an
+# AMD EPYC host) carry one vendor key per type without conflict:
+#   feature.node.kubernetes.io/aim-accelerator.vendor.GPU.NVIDIA=8
+#   feature.node.kubernetes.io/aim-accelerator.vendor.CPU.AMD=1
+# Consumers match on key existence (Exists), so vendor is a per-type label
+# rather than a single node-wide one. Assumes one vendor (and one model) per
+# accelerator type per node.
+#
+# FUTURE USE: these labels are currently published for discovery/observability
+# only. The intended consumer is a resolver that picks the device-plugin
+# resource (amd.com/gpu vs nvidia.com/gpu) from the vendor without a
+# model->vendor table, but that wiring does NOT exist yet — the operator still
+# requests amd.com/gpu unconditionally (see internal/v1alpha2/aimprofile/
+# node_match.go). Do not assume end-to-end NVIDIA scheduling from these labels.
+VENDOR_LABEL_INFIX = "vendor"
+DEFAULT_VENDOR = "AMD"
+NVIDIA_VENDOR = "NVIDIA"
+# Vendors this detector knows how to handle. main() fails fast on anything else
+# so a typo (e.g. "NVDA") can't silently route to the wrong detection backend.
+SUPPORTED_VENDORS = (DEFAULT_VENDOR, NVIDIA_VENDOR)
 
 # Model/family detection lives in the runtime's `detect-hardware` subcommand.
 # The canonical way to reach it is the `aim-runtime` console script, but it is
@@ -140,6 +166,131 @@ def detect_hardware(detect_type: str) -> list | None:
     except Exception as exc:
         logger.error("Failed to parse detect-hardware output: %s", exc)
         return None
+
+
+# Canonical NVIDIA datacenter GPU tokens. nvidia-smi reports verbose product
+# names ("NVIDIA H100 80GB HBM3", "NVIDIA A100-SXM4-80GB", "Tesla T4"); we reduce
+# them to a stable token used as the label key and matched by AIMProfiles. Listed
+# most-specific-first so e.g. GH200 wins over H200 and L40S over L40. A boundary
+# check keeps A10 from matching inside A100.
+_NVIDIA_MODEL_TOKENS = (
+    "GH200", "H200", "H100", "B200", "A100", "A40", "A30", "A10",
+    "L40S", "L40", "L4", "V100", "T4",
+)
+
+# Anything outside the k8s label-key alphabet collapses to '_' in the fallback.
+_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _normalize_nvidia_rtx_gpu_name(upper: str) -> str | None:
+    """Normalize GeForce/workstation RTX product names to compact tokens.
+
+    Consumer/workstation naming is messy and a moving target, so rather than
+    enumerate every SKU we collapse the common shapes with patterns (anything
+    unrecognized still falls through to the slug):
+      GeForce RTX 4090          -> RTX4090
+      GeForce RTX 4080 SUPER    -> RTX4080Super
+      GeForce RTX 4070 Ti SUPER -> RTX4070TiSuper
+      GeForce RTX 3090 Ti       -> RTX3090Ti
+      RTX A6000                 -> RTXA6000   (workstation Ampere)
+      RTX 6000 Ada Generation   -> RTX6000Ada (workstation Ada)
+    """
+    # Workstation Ada: "RTX 6000 ADA [GENERATION]" (check before the bare
+    # GeForce pattern so the "ADA" suffix isn't dropped).
+    m = re.search(r"(?<![A-Z0-9])RTX\s+(\d{3,4})\s+ADA(?![A-Z0-9])", upper)
+    if m:
+        return f"RTX{m.group(1)}Ada"
+    # Workstation Ampere: "RTX A6000".
+    m = re.search(r"(?<![A-Z0-9])RTX\s+A(\d{3,4})(?![A-Z0-9])", upper)
+    if m:
+        return f"RTXA{m.group(1)}"
+    # GeForce consumer: "RTX 4090 [TI] [SUPER]".
+    m = re.search(r"(?<![A-Z0-9])RTX\s+(\d{3,4})(\s+TI)?(\s+SUPER)?(?![A-Z0-9])", upper)
+    if m:
+        token = f"RTX{m.group(1)}"
+        if m.group(2):
+            token += "Ti"
+        if m.group(3):
+            token += "Super"
+        return token
+    return None
+
+
+def _normalize_nvidia_model(raw: str) -> str:
+    """Reduce an nvidia-smi product name to a canonical label token.
+
+    Recognized datacenter parts map to their short token (H100, A100, ...);
+    consumer/workstation RTX cards are normalized by pattern (RTX4090, RTXA6000,
+    ...) so "try it on a workstation GPU" produces clean labels too.
+    Unrecognized names fall back to a sanitized, label-key-safe slug so the node
+    is still labelled (and we log a warning so the token table can be extended).
+    """
+    upper = raw.strip().upper()
+    for token in _NVIDIA_MODEL_TOKENS:
+        if re.search(rf"(?<![A-Z0-9]){re.escape(token)}(?![A-Z0-9])", upper):
+            return token
+    rtx_token = _normalize_nvidia_rtx_gpu_name(upper)
+    if rtx_token:
+        return rtx_token
+    slug = _LABEL_UNSAFE.sub("_", raw.strip()).strip("_.-")[:63] or "UNKNOWN"
+    logger.warning("Unrecognized NVIDIA GPU name %r; using sanitized label %r", raw, slug)
+    return slug
+
+
+def detect_hardware_nvidia() -> list | None:
+    """Detect NVIDIA GPUs via nvidia-smi and return detections in the common shape.
+
+    Returns the same structure as detect_hardware():
+      [{"accelerator_type": "GPU", "accelerator_model": <token>, "accelerator_count": n}, ...]
+
+    Honors the same None-vs-[] contract that keeps labels from flapping:
+      - None  => detection FAILED this cycle (nvidia-smi missing, non-zero exit,
+                 timeout). Caller preserves the last-good feature file.
+      - []    => detection SUCCEEDED and confidently found no GPUs.
+
+    nvidia-smi and libnvidia-ml are injected into the container by the
+    nvidia-container-toolkit (NVIDIA_VISIBLE_DEVICES=all +
+    NVIDIA_DRIVER_CAPABILITIES=utility under the nvidia runtime), so no driver
+    libraries are baked into the detector image.
+    """
+    cmd = ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]
+    logger.info("Running: %s", " ".join(cmd))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        logger.error(
+            "nvidia-smi not found; ensure the nvidia runtime injects it "
+            "(NVIDIA_VISIBLE_DEVICES=all, NVIDIA_DRIVER_CAPABILITIES=utility)"
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        logger.error("nvidia-smi timed out after 120s")
+        return None
+
+    if result.returncode != 0:
+        logger.error("nvidia-smi failed (exit %d): %s", result.returncode, result.stderr.strip())
+        return None
+
+    counts: dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        model = _normalize_nvidia_model(name)
+        counts[model] = counts.get(model, 0) + 1
+
+    detections = [
+        {"accelerator_type": "GPU", "accelerator_model": model, "accelerator_count": count}
+        for model, count in sorted(counts.items())
+    ]
+    for det in detections:
+        logger.info(
+            "Detected: type=GPU model=%s count=%s",
+            det["accelerator_model"], det["accelerator_count"],
+        )
+    if not detections:
+        logger.warning("nvidia-smi returned no GPUs")
+    return detections
 
 
 def detect_partitions() -> list | None:
@@ -383,17 +534,19 @@ def build_partition_lines(entries: list | None, gpu_count: int) -> list:
     return lines
 
 
-def build_feature_lines(detections: list) -> list:
+def build_feature_lines(detections: list, vendor: str = DEFAULT_VENDOR) -> list:
     """Convert detection results into NFD feature file lines.
 
     Each detection dict has: accelerator_type, accelerator_model, accelerator_count.
-    We emit two layers of labels so AIMProfiles can target either a specific
-    model or a generic family:
+    We emit three layers of labels so AIMProfiles can target a specific model, a
+    generic family, or a vendor:
 
       - Per-model:  feature.node.kubernetes.io/aim-accelerator.{MODEL}={count}
                     e.g. aim-accelerator.MI300X=8, aim-accelerator.EPYC_ZEN5=1
       - Per-family: feature.node.kubernetes.io/aim-accelerator.{TYPE}={count}
                     e.g. aim-accelerator.GPU=8,    aim-accelerator.CPU=1
+      - Per-vendor: feature.node.kubernetes.io/aim-accelerator.vendor.{TYPE}.{VENDOR}={count}
+                    e.g. aim-accelerator.vendor.GPU.NVIDIA=8
 
     Family labels are required for AIM images whose embedded profile YAML
     declares accelerator_model: CPU / GPU (the family name) rather than a
@@ -401,8 +554,12 @@ def build_feature_lines(detections: list) -> list:
     matcher (internal/v1alpha2/aimprofile/node_match.go) finds no nodes for
     such profiles and reports them as unsupported.
 
-    Family counts sum across all model entries of the same type (e.g. a
-    hypothetical mixed MI300X+MI325X node aggregates to GPU=12).
+    The vendor axis is keyed per accelerator type (one vendor per type per node)
+    so a cross-vendor node never has conflicting vendor labels. Vendor comes from
+    the DaemonSet's ACCELERATOR_VENDOR env, not from detection output.
+
+    Family (and vendor) counts sum across all model entries of the same type
+    (e.g. a hypothetical mixed MI300X+MI325X node aggregates to GPU=12).
     """
     seen_models = set()
     family_counts: dict[str, int] = {}
@@ -424,7 +581,13 @@ def build_feature_lines(detections: list) -> list:
         f"{LABEL_PREFIX}.{family}={count}"
         for family, count in sorted(family_counts.items())
     ]
-    lines = model_lines + family_lines
+    vendor_lines = []
+    if vendor:
+        vendor_lines = [
+            f"{LABEL_PREFIX}.{VENDOR_LABEL_INFIX}.{family}.{vendor}={count}"
+            for family, count in sorted(family_counts.items())
+        ]
+    lines = model_lines + family_lines + vendor_lines
 
     if lines:
         logger.info("Labels: %s", ", ".join(lines))
@@ -466,7 +629,7 @@ def gpu_unit_count(detections: list) -> int:
     return total
 
 
-def run_detection_cycle(detect_type: str) -> bool:
+def run_detection_cycle(detect_type: str, vendor: str = DEFAULT_VENDOR) -> bool:
     """Run one detect-and-publish cycle.
 
     The model/family axis and the partition axis are detected and published
@@ -496,8 +659,13 @@ def run_detection_cycle(detect_type: str) -> bool:
     """
     wrote = False
 
-    # Model/family axis (detect-hardware). Sticky: None => preserve last-good.
-    detections = detect_hardware(detect_type)
+    # Model/family axis. Backend is vendor-specific: NVIDIA -> nvidia-smi,
+    # everything else -> aim-runtime detect-hardware. Sticky: None => preserve
+    # last-good.
+    if vendor == NVIDIA_VENDOR:
+        detections = detect_hardware_nvidia()
+    else:
+        detections = detect_hardware(detect_type)
     if detections is None:
         logger.warning(
             "Model detection failed this cycle; preserving last-good feature "
@@ -505,7 +673,7 @@ def run_detection_cycle(detect_type: str) -> bool:
             FEATURE_FILE_TEMPLATE.format(detect_type),
         )
     else:
-        lines = build_feature_lines(detections)
+        lines = build_feature_lines(detections, vendor)
         if lines:
             write_feature_file(lines, detect_type)
         else:
@@ -515,16 +683,26 @@ def run_detection_cycle(detect_type: str) -> bool:
             write_feature_file([], detect_type)
         wrote = True
 
-    # Partition axis (amd-smi), GPU only and independent of detect-hardware.
+    # Partition axis, GPU only and independent of the model axis.
     if detect_type == "gpu":
         gpu_count_hint = gpu_unit_count(detections) if detections else 0
-        # A successful, GPU-free detect-hardware result ([] -> hint 0) is a
-        # CONFIDENT "no GPUs on this node". In that case clear the partition
-        # axis too rather than preserving stale labels (e.g. a GPU that was
-        # physically removed). A FAILED detection (None) is not confident and
-        # must stay sticky, so only flag confidence when detections is not None.
+        # A successful, GPU-free model result ([] -> hint 0) is a CONFIDENT "no
+        # GPUs on this node". In that case clear the partition axis too rather
+        # than preserving stale labels (e.g. a GPU that was physically removed).
+        # A FAILED detection (None) is not confident and must stay sticky, so
+        # only flag confidence when detections is not None.
         confident_no_gpu = detections is not None and gpu_count_hint == 0
-        if run_partition_cycle(gpu_count_hint, clear_when_no_signal=confident_no_gpu):
+        # AMD reads the scheme from amd-smi; NVIDIA partitioning (MIG) is not yet
+        # parsed, so NVIDIA GPU nodes report only the default sentinel.
+        if vendor == NVIDIA_VENDOR:
+            partition_written = publish_nvidia_default_partition_labels(
+                gpu_count_hint, clear_when_no_signal=confident_no_gpu
+            )
+        else:
+            partition_written = run_partition_cycle(
+                gpu_count_hint, clear_when_no_signal=confident_no_gpu
+            )
+        if partition_written:
             wrote = True
 
     return wrote
@@ -576,18 +754,88 @@ def run_partition_cycle(gpu_count_hint: int, clear_when_no_signal: bool = False)
     return False
 
 
+def publish_nvidia_default_partition_labels(gpu_count_hint: int, clear_when_no_signal: bool = False) -> bool:
+    """Write the NVIDIA partition feature file (always the `default` sentinel).
+
+    Unlike the amd-smi path, this never detects a real partition scheme: MIG
+    geometry is not yet parsed, so it only writes the hardware-agnostic
+    `partitioning-scheme.default` label (count = physical GPUs) — mirroring how
+    non-partitionable AMD hardware (Radeon) is handled, and keeping
+    partition-blind (unpartitioned) profiles matching NVIDIA nodes today.
+
+    TODO(MIG): parse `nvidia-smi mig -lgip` / `-lgi` and emit per-instance
+    `partitioning-scheme.<profile>` labels, analogous to the amd-smi path.
+
+    Writes the feature file when GPUs are present (or clears it when
+    `clear_when_no_signal` is set and none are), returning True. Returns False
+    without writing when there is no signal, preserving the last-good file.
+    """
+    if gpu_count_hint > 0:
+        write_feature_file(build_partition_lines(None, gpu_count_hint), PARTITION_FILE_KIND)
+        return True
+    if clear_when_no_signal:
+        logger.info(
+            "No NVIDIA GPUs detected; clearing partition feature file %s",
+            FEATURE_FILE_TEMPLATE.format(PARTITION_FILE_KIND),
+        )
+        write_feature_file([], PARTITION_FILE_KIND)
+        return True
+    logger.warning(
+        "No NVIDIA GPU signal this cycle; preserving last-good partition "
+        "feature file %s", FEATURE_FILE_TEMPLATE.format(PARTITION_FILE_KIND),
+    )
+    return False
+
+
+def resolve_vendor(raw: str | None) -> str:
+    """Normalize and validate the ACCELERATOR_VENDOR env value.
+
+    Fails fast (ValueError) on anything outside SUPPORTED_VENDORS so a typo like
+    "NVDA" can't silently fall through to the AMD detection backend on an NVIDIA
+    node, producing empty/nonsense labels while the pod stays healthy.
+    """
+    vendor = (raw or DEFAULT_VENDOR).strip().upper() or DEFAULT_VENDOR
+    if vendor not in SUPPORTED_VENDORS:
+        raise ValueError(
+            f"Unsupported ACCELERATOR_VENDOR={raw!r}; must be one of {list(SUPPORTED_VENDORS)}"
+        )
+    return vendor
+
+
+def resolve_interval(raw: str | None, default: int = 10) -> int:
+    """Parse DETECT_INTERVAL, falling back to a sane default on bad input.
+
+    A malformed value would otherwise crash the detection loop on startup with
+    an opaque traceback; instead log and continue at the default cadence.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid DETECT_INTERVAL=%r; using %ds", raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Non-positive DETECT_INTERVAL=%r; using %ds", raw, default)
+        return default
+    return value
+
+
 def main():
     detect_type = os.environ.get("DETECT_TYPE", "gpu")
-    interval = int(os.environ.get("DETECT_INTERVAL", "10"))
+    try:
+        vendor = resolve_vendor(os.environ.get("ACCELERATOR_VENDOR"))
+    except ValueError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
+    interval = resolve_interval(os.environ.get("DETECT_INTERVAL"))
     node_name = os.environ.get("NODE_NAME", "unknown")
 
     logger.info(
-        "Starting accelerator-detector on node=%s type=%s interval=%ds",
-        node_name, detect_type, interval,
+        "Starting accelerator-detector on node=%s type=%s vendor=%s interval=%ds",
+        node_name, detect_type, vendor, interval,
     )
 
     while True:
-        run_detection_cycle(detect_type)
+        run_detection_cycle(detect_type, vendor)
 
         # Refresh health unconditionally: a detector waiting out a transient
         # hardware-tool hiccup is still alive and must not be liveness-killed.

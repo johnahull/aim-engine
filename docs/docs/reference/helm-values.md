@@ -131,4 +131,14 @@ AcceleratorDetector DaemonSets for hardware detection via NFD. Detects GPU and C
 | `acceleratorDetector.cpu.nodeSelector` | Node selector for CPU-only nodes (no additional selector needed; the DaemonSet uses nodeAffinity DoesNotExist on the amd-gpu label) | `{}` |
 | `acceleratorDetector.cpu.tolerations` | Tolerations for CPU detector pods (defaults to tolerate all taints) | `[{operator: Exists}]` |
 | `acceleratorDetector.cpu.resources` | Resource limits and requests for CPU detector pods |  |
+| `acceleratorDetector.nvidia` | NVIDIA GPU node detection. Uses a thin Python image; nvidia-smi and the driver libraries are injected at runtime by the nvidia-container-toolkit (NVIDIA_VISIBLE_DEVICES=all + NVIDIA_DRIVER_CAPABILITIES=utility under the nvidia runtime), so no CUDA/driver is baked into the image. Writes NFD labels like feature.node.kubernetes.io/aim-accelerator.H100=8 and feature.node.kubernetes.io/aim-accelerator.vendor.GPU.NVIDIA=8. Only scheduled on nodes labelled feature.node.kubernetes.io/pci-10de.present (set by the NVIDIA GPU Operator's NFD config). It won't deploy anywhere on a GPU-free or AMD-only cluster, so it is safe to leave enabled by default. |  |
+| `acceleratorDetector.nvidia.enable` | Enable NVIDIA accelerator detection DaemonSet | `true` |
+| `acceleratorDetector.nvidia.image.repository` | NVIDIA detector image repository (thin Python image) | `docker.io/library/python` |
+| `acceleratorDetector.nvidia.image.tag` | NVIDIA detector image tag | `3-slim` |
+| `acceleratorDetector.nvidia.image.pullPolicy` | Image pull policy | `IfNotPresent` |
+| `acceleratorDetector.nvidia.imagePullSecrets` | Secrets for pulling the NVIDIA detector image from private registries | `[]` |
+| `acceleratorDetector.nvidia.runtimeClassName` | RuntimeClass that routes the pod through the nvidia-container-toolkit so nvidia-smi/libnvidia-ml are injected. The NVIDIA GPU Operator creates a RuntimeClass named "nvidia". Set to empty ("") to rely on the node default runtime instead. | `nvidia` |
+| `acceleratorDetector.nvidia.nodeSelector` | Node selector to target NVIDIA GPU nodes. Default matches the NVIDIA GPU Operator's vendor-only PCI label; override for vanilla-NFD clusters that emit class+vendor keys (e.g. pci-0302_10de.present). | `{feature.node.kubernetes.io/pci-10de.present: "true"}` |
+| `acceleratorDetector.nvidia.tolerations` | Tolerations for NVIDIA GPU nodes (defaults to tolerate all taints) | `[{operator: Exists}]` |
+| `acceleratorDetector.nvidia.resources` | Resource limits and requests for NVIDIA detector pods |  |
 

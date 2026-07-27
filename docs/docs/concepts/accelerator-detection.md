@@ -9,7 +9,7 @@ The labels feed two different consumers depending on API version:
 
 ## How It Works
 
-Two DaemonSets detect hardware on each node, write the results to NFD's local feature file directory, and NFD publishes them as node labels. The GPU detector runs `aim-runtime detect-hardware` for the accelerator model and, independently, `amd-smi partition` for the GPU partition state; the CPU detector reads `/proc/cpuinfo`.
+DaemonSets detect hardware on each node, write the results to NFD's local feature file directory, and NFD publishes them as node labels. The AMD GPU detector runs `aim-runtime detect-hardware` for the accelerator model and, independently, `amd-smi partition` for the GPU partition state; the NVIDIA GPU detector runs `nvidia-smi`; the CPU detector reads `/proc/cpuinfo`. Each detector also stamps a per-accelerator-type **vendor** label (see [Vendor Labels](#vendor-labels)).
 
 ```
 Node boots
@@ -23,7 +23,7 @@ Node boots
   → AIM Engine matches profiles (or v1alpha1 templates) to nodes via label affinity
 ```
 
-Detection runs periodically (default: every 10 seconds) to keep labels — including GPU partition state — current. The end-to-end latency floor is NFD's own scan interval, not `detectInterval`.
+Detection runs periodically (Helm default `detectInterval: 10` seconds) to keep labels — including GPU partition state — current. The end-to-end latency floor is NFD's own scan interval, not `detectInterval`. (The bare `kustomize` manifests under `config/accelerator-detector/` ship a more conservative `300`s default; the Helm chart is the supported install path.)
 
 ## Node Labels
 
@@ -45,14 +45,50 @@ feature.node.kubernetes.io/aim-accelerator.EPYC_9965: "128"
 |----------|---------------|
 | AMD Instinct MI300X (8 GPUs) | `aim-accelerator.MI300X=8` |
 | AMD Instinct MI325X (8 GPUs) | `aim-accelerator.MI325X=8` |
+| NVIDIA H100 (8 GPUs) | `aim-accelerator.H100=8` |
+| NVIDIA A100 (8 GPUs) | `aim-accelerator.A100=8` |
 | AMD EPYC 9965 (192 cores) | `aim-accelerator.EPYC_9965=192` |
 | AMD EPYC 9575F (64 cores) | `aim-accelerator.EPYC_9575F=64` |
+
+NVIDIA product names reported by `nvidia-smi` (e.g. `NVIDIA H100 80GB HBM3`, `NVIDIA A100-SXM4-80GB`) are normalized to a canonical token (`H100`, `A100`) for the label key. Consumer and workstation RTX cards are normalized by pattern too — `NVIDIA GeForce RTX 4090` → `RTX4090`, `NVIDIA RTX A6000` → `RTXA6000`, `NVIDIA RTX 6000 Ada Generation` → `RTX6000Ada` — so evaluating on a workstation GPU produces clean labels. Unrecognized names fall back to a sanitized slug and are logged so the token table can be extended.
+
+:::{admonition} Consumer GPUs are for evaluation
+:class: note
+
+Consumer/workstation NVIDIA cards are detected and labelled (model, `GPU` family, and `vendor.GPU.NVIDIA`) so you can try AIM Engine on them, but detection does not imply every profile will run: consumer cards differ from datacenter parts in VRAM, interconnect (no NVLink), and features (e.g. no FP8 on Ampere consumer). Whether a given model serves is governed by the profile's own requirements, not the detector. Consumer cards have no MIG, so they report `partitioning-scheme.default`.
+:::
 
 AIM Engine constructs node affinity from `AIMProfile.spec.acceleratorModel` (or v1alpha1 `AIMServiceTemplate.spec.hardware.gpu.model`) using the `Exists` operator, without requiring any knowledge of hardware specifics. The label value (accelerator count) is informational only; actual capacity is enforced via the computed device resource request — see [Profiles — Accelerator and node affinity](profiles.md#accelerator-and-node-affinity).
 
 :::{note}
 Architecture-level labels for fallback profile matching (e.g. `aim-accelerator.CDNA3`, `aim-accelerator.EPYC_ZEN5`) will be supported once `aim-runtime` returns the full identifier hierarchy.
 :::
+
+## Vendor Labels
+
+Each detector also publishes a **vendor** label, keyed per accelerator type, on the `feature.node.kubernetes.io/aim-accelerator.vendor.<TYPE>.<VENDOR>` axis. The vendor comes from the DaemonSet itself (each detector is vendor-specific), not from detection output.
+
+Scoping the vendor by accelerator type lets a cross-vendor node carry one vendor key per type without conflict — for example, an NVIDIA GPU on an AMD EPYC host:
+
+```
+feature.node.kubernetes.io/aim-accelerator.vendor.GPU.NVIDIA: "8"
+feature.node.kubernetes.io/aim-accelerator.vendor.CPU.AMD: "1"
+```
+
+| Node | Vendor labels |
+|------|---------------|
+| AMD MI300X ×8 | `aim-accelerator.vendor.GPU.AMD=8` |
+| NVIDIA H100 ×8 | `aim-accelerator.vendor.GPU.NVIDIA=8` |
+| AMD EPYC CPU-only | `aim-accelerator.vendor.CPU.AMD=192` |
+
+Like the other labels, the value is the accelerator count and is informational; consumers match on the key via `Exists`. This iteration assumes a single vendor — and a single model — per accelerator type on a given node.
+
+:::{admonition} Published for discovery only (not yet wired to scheduling)
+:class: warning
+
+The vendor label is currently published for discovery and observability. It is **not yet consumed** by the operator: AIM Engine still requests `amd.com/gpu` unconditionally, so deploying a model onto an NVIDIA node does not work end-to-end yet. Wiring the vendor label to the device-plugin resource (`amd.com/gpu` vs `nvidia.com/gpu`) is planned follow-up work. Treat NVIDIA support in this release as **detection only**.
+:::
+
 ## GPU Partition Scheme Labels
 
 On GPU nodes the detector also reads the current partition state from `amd-smi partition --current --json` and publishes it on a single partition axis, `feature.node.kubernetes.io/aim-accelerator.partitioning-scheme.*`. The kernel-applied state reported by `amd-smi` is the single source of truth — AMD GPU Operator / DCM labels are **not** consulted, because they can lag or disagree with the kernel.
@@ -79,12 +115,25 @@ This iteration assumes the AMD GPU Operator's `resource_naming_strategy: single`
 
 | DaemonSet | Image | Target Nodes | Detects |
 |-----------|-------|--------------|---------|
-| GPU | `aim-base` (includes ROCm) | Nodes with `feature.node.kubernetes.io/amd-gpu=true` | AMD Instinct GPUs via `amdsmi` |
+| GPU (AMD) | `aim-base` (includes ROCm) | Nodes with `feature.node.kubernetes.io/amd-gpu=true` | AMD Instinct GPUs via `amdsmi` |
+| NVIDIA | `python:3-slim` (thin) | Nodes with `feature.node.kubernetes.io/pci-10de.present=true` | NVIDIA GPUs via `nvidia-smi` |
 | CPU | `aim-epyc-base` (no ROCm) | Nodes without the `amd-gpu` label | AMD EPYC CPUs via `/proc/cpuinfo` |
 
-The GPU DaemonSet uses a `nodeSelector` on the `amd-gpu` label (set by the AMD GPU Operator). The CPU DaemonSet uses a `nodeAffinity` rule to exclude nodes where that label is present. The two are mutually exclusive per node.
+The AMD GPU DaemonSet uses a `nodeSelector` on the `amd-gpu` label (set by the AMD GPU Operator); the NVIDIA DaemonSet uses a `nodeSelector` on `pci-10de.present` (10de is NVIDIA's PCI vendor ID, set by the NVIDIA GPU Operator's NFD config). The CPU DaemonSet targets the remaining nodes.
 
-Both DaemonSets are independently configurable via Helm values.
+:::{admonition} CPU detector and NVIDIA GPU nodes
+:class: note
+
+The CPU detector (`aim-epyc-base`) runs on nodes without the `amd-gpu` label, which includes NVIDIA GPU nodes. That is fine — and useful — on an AMD-EPYC host with NVIDIA GPUs (it labels the host CPU). On a **non-AMD host** (e.g. Intel) with NVIDIA GPUs, the EPYC-oriented CPU detection won't produce meaningful CPU labels; this is a known limitation. It does not affect the NVIDIA GPU labels, which come from the separate NVIDIA DaemonSet.
+:::
+
+The NVIDIA detector does **not** bake in any CUDA/driver: `nvidia-smi` and `libnvidia-ml` are injected from the host driver by the nvidia-container-toolkit. The pod therefore runs under the `nvidia` RuntimeClass with `NVIDIA_VISIBLE_DEVICES=all` and `NVIDIA_DRIVER_CAPABILITIES=utility`, and it does not request a `nvidia.com/gpu` resource (so it lands on every GPU node without consuming a GPU slot). On clusters whose NFD emits class+vendor PCI keys (e.g. `pci-0302_10de.present`) rather than the operator's vendor-only key, override the `nodeSelector` via Helm.
+
+All DaemonSets are independently configurable via Helm values.
+
+:::{note}
+NVIDIA MIG geometry is not yet detected. NVIDIA GPU nodes currently report only the `partitioning-scheme.default` sentinel, so they match unpartitioned profiles. Per-instance MIG partition labels are a planned follow-up.
+:::
 
 ### NFD Integration
 
@@ -94,8 +143,9 @@ Labels are **sticky across transient failures**: a detection failure (the underl
 
 ## Prerequisites
 
-- **Node Feature Discovery (NFD)** must be installed on the cluster. NFD is included with the AMD GPU Operator.
-- **Container images** must be accessible. The GPU DaemonSet uses `aim-base`; the CPU DaemonSet uses `aim-epyc-base`.
+- **Node Feature Discovery (NFD)** must be installed on the cluster. NFD is included with the AMD GPU Operator and the NVIDIA GPU Operator.
+- **Container images** must be accessible. The AMD GPU DaemonSet uses `aim-base`; the CPU DaemonSet uses `aim-epyc-base`; the NVIDIA DaemonSet uses a thin `python:3-slim` image.
+- **For NVIDIA detection:** the nvidia-container-toolkit must be installed (it injects `nvidia-smi`), and a `nvidia` RuntimeClass should exist (created by the NVIDIA GPU Operator). Both are present on any cluster already running NVIDIA GPU workloads.
 
 ## Configuration
 
@@ -121,7 +171,20 @@ acceleratorDetector:
       tag: "latest"
     imagePullSecrets:
       - name: your-pull-secret
+
+  nvidia:
+    enable: true
+    image:
+      repository: "your-registry/python"
+      tag: "3-slim"
+    # RuntimeClass that routes the pod through the nvidia-container-toolkit so
+    # nvidia-smi is injected. Set to "" to use the node's default runtime.
+    runtimeClassName: nvidia
+    imagePullSecrets:
+      - name: your-pull-secret
 ```
+
+The NVIDIA detector is enabled by default but only schedules on NVIDIA GPU nodes, so it is a no-op on AMD-only or GPU-free clusters.
 
 To disable entirely:
 
