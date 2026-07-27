@@ -1,0 +1,36 @@
+# Backing namespace profile for the Reduced-mode lazy-completion test.
+#
+# NON-primary and no accelerator on purpose:
+#   - no accelerator => no hardware requirement, so it reaches Ready in any
+#     cluster (kind or GPU vcluster);
+#   - non-primary + Reduced => the eager AIMProfile reconciler projects NOTHING
+#     for it (per-profile runtimes are Exhaustive/Both only; the model-slug
+#     primary is only published for the model's primary profile). So there is no
+#     eager ServingRuntime aim-<profile.Name> — the whole point of this test.
+#
+# Deployable (aimId + modelSources both set), so the shared builder can turn it
+# into a complete namespace runtime once the lazy watcher resolves it, and the
+# consuming AIMService can stand up a profile-owned (Shared) namespace cache.
+#
+# The image is a placeholder (registry.example.com): the test asserts the lazy
+# projection + KServe binding contract, decided at render time, not that a pod
+# pulls and serves (see the test's pod-readiness note).
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: reduced-ns-profile
+spec:
+  aimId: Qwen/Qwen3-0.6B
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  primary: false
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B
+      # Small PVC: the download is simulated (no real bytes), so this only needs
+      # to provision, not hold real weights.
+      size: 1Gi

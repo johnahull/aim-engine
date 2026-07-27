@@ -104,6 +104,7 @@ Task-oriented walkthroughs for common workflows:
 - [Routing and Ingress](guides/routing-and-ingress.md) — Gateway API patterns and path templates
 - [Private Registries](guides/private-registries.md) — Authentication for HuggingFace, S3, and OCI
 - [Multi-Tenancy](guides/multi-tenancy.md) — Namespace isolation patterns
+- [Bring Your Own KServe](guides/bring-your-own-kserve.md) — Reference AIM-projected runtimes from your own InferenceService
 
 ### Administration
 

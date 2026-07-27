@@ -1,0 +1,334 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Upgrade migration: an AIMService that was already running under the
+# retired inline-predictor path is reconciled by the runtime-reference operator.
+#
+# Two upgrade hazards are exercised on a LIVE service:
+#   1. Orphaned ConfigMap. The retired path built a service-owned profile
+#      ConfigMap named <service>-profile-<hash>, owner-ref'd by the AIMService.
+#      The runtime-reference reconcile no longer plans it, so it must be
+#      explicitly garbage-collected — guarded by owner-ref (UID) + the AIM
+#      managed-by label + the legacy name shape so a coincidentally-named user
+#      ConfigMap is never touched.
+#   2. In-place inline->reference ISVC rewrite. The same-named InferenceService
+#      is re-applied switching predictor.containers[0] (inline) ->
+#      predictor.model.runtime (reference) in place. Because the retired and the
+#      new reconcile apply the ISVC under the SAME SSA field manager
+#      (aim-service-controller), the re-apply that omits containers drops the
+#      inline predictor and adds the runtime reference. The referenced runtime is
+#      materialized cross-scope by the always-on lazy InferenceService-watch
+#      projection, and KServe binds it. See ADR 0008 (2026-07-08 addendum) and
+#      its appendix finding 3 (a running pod survives the transient window).
+#
+# Pod readiness is intentionally NOT asserted: the placeholder image
+# (registry.example.com) never pulls and the cache download is simulated, so the
+# predictor pod cannot serve. Like the sibling runtime-projection tests, this
+# asserts the deterministic render-time contract — the reference rewrite, the
+# dropped inline container, KServe binding, the projected-ConfigMap mount, and
+# the orphan-ConfigMap deletion.
+#
+# No accelerator is involved, so the cluster profile reaches Ready in any
+# cluster; the cache PVC only needs a default RWX StorageClass. No `requires`
+# gate, so this stays in the kind lane (CHAINSAW_SELECTOR_KIND).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-service-upgrade-migration
+spec:
+  timeouts:
+    assert: 120s
+    # The AIMProfileCache -> AIMArtifact -> PVC finalizer chain makes namespace
+    # teardown slow on a loaded cluster (the sibling tests sit right at the 60s
+    # default). Give teardown headroom so a slow PVC detach never reports the
+    # (passing) test as failed.
+    cleanup: 240s
+  steps:
+    - name: Create the backing cluster profile
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-migration
+              status:
+                status: Ready
+
+    - name: Simulate a pre-upgrade inline InferenceService
+      description: |
+        Stand up the old-shape ISVC BEFORE the AIMService exists so the operator
+        adopts it (same computed name) instead of creating a fresh one. It is
+        applied under the operator's own SSA field manager
+        (aim-service-controller) so the later reconcile — which omits containers —
+        drops the inline predictor, exactly as a real upgraded service would.
+        The ISVC name is namespace-derived (GenerateInferenceServiceName:
+        hash(namespace, serviceName), truncated to fit the KServe predictor
+        hostname), so it is computed here rather than hardcoded.
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              set -eu
+              SVC="mig-svc"
+              NS="$NAMESPACE"
+              # Reproduce GenerateInferenceServiceName: parts=[SVC],
+              # hash=first8(sha256('"NS"|"SVC"')), maxLen=63-len("-predictor-")-len(NS),
+              # then iteratively truncate the (single) name part to fit.
+              HASH=$(printf '%s' "\"$NS\"|\"$SVC\"" | sha256sum | cut -c1-8)
+              TARGET=$((63 - 11 - ${#NS}))
+              PART="$SVC"
+              while [ $(( ${#PART} + 1 + 8 )) -gt "$TARGET" ]; do
+                [ ${#PART} -le 1 ] && break
+                PART="${PART%?}"
+                PART="${PART%-}"
+              done
+              ISVC="${PART}-${HASH}"
+              echo "computed InferenceService name: $ISVC (namespace=$NS)"
+
+              cat <<EOF | kubectl apply --server-side --field-manager=aim-service-controller -f -
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                name: ${ISVC}
+                namespace: ${NS}
+                labels:
+                  aim.eai.amd.com/service: mig-svc
+              spec:
+                predictor:
+                  containers:
+                    - name: kserve-container
+                      image: registry.example.com/aim-cpu-base:0.12.0
+                      ports:
+                        - containerPort: 8080
+                          protocol: TCP
+              EOF
+
+    - name: Assert the pre-upgrade ISVC is in the inline shape
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: mig-svc
+              spec:
+                predictor:
+                  (containers[?name == 'kserve-container']):
+                    - name: kserve-container
+
+    - name: Create the AIMService that references the cluster profile
+      try:
+        - apply:
+            file: service.yaml
+
+    - name: Assert the service resolves the cluster profile
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: mig-svc
+              status:
+                (conditions[?type == 'ProfileReady']):
+                  - status: "True"
+                    reason: ProfileResolved
+                resolvedProfile:
+                  name: test-migration
+                  scope: Cluster
+
+    - name: Assert the profile-owned (Shared) cluster cache reaches Ready
+      description: |
+        The AIMService stands up a Shared, cluster-scoped AIMProfileCache for the
+        resolved cluster profile. caching.env put the download Job into
+        simulation mode, so it reaches Ready without a real download. This is the
+        gate the service waits on before it (re)writes the InferenceService.
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: mig-svc
+              spec:
+                profileName: test-migration
+                profileScope: Cluster
+                mode: Shared
+              status:
+                status: Ready
+
+    - name: Simulate the orphaned legacy service-owned ConfigMap
+      description: |
+        Author the <service>-profile-<hash> ConfigMap the retired inline path
+        created: owner-ref'd by THIS AIMService (real UID) and carrying the AIM
+        managed-by label, so the guarded cleanup deletes exactly this object. The
+        name is namespace-independent (hash of serviceName + "service-profile")
+        so it is pinned here: mig-svc-profile-42b44313. A poke annotation forces a
+        prompt reconcile (the controller also Owns ConfigMaps, so the create
+        alone already enqueues one).
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              set -eu
+              UID=$(kubectl get aimservice mig-svc -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+              [ -n "$UID" ] || { echo "ERROR: AIMService mig-svc has no UID"; exit 1; }
+              echo "AIMService UID: $UID"
+
+              cat <<EOF | kubectl apply --server-side --field-manager=chainsaw-migration -f -
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: mig-svc-profile-42b44313
+                namespace: $NAMESPACE
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/service: mig-svc
+                ownerReferences:
+                  - apiVersion: aim.eai.amd.com/v1alpha1
+                    kind: AIMService
+                    name: mig-svc
+                    uid: $UID
+                    controller: true
+                    blockOwnerDeletion: true
+              data:
+                vllm-none-bf16-tp0-latency.yaml: |
+                  aim_id: Qwen/Qwen3-0.6B
+              EOF
+
+              kubectl annotate aimservice mig-svc -n "$NAMESPACE" \
+                example.com/migration-poke="$(date +%s)" --overwrite
+
+    - name: Assert the ISVC is rewritten to reference the projected runtime
+      description: |
+        The overlay sets predictor.model.runtime to the hashed per-profile runtime
+        name (serving.RuntimeName("test-migration") = aim-test-migration-c84b2956)
+        with the huggingface model format, and stamps the runtime-profile
+        annotation (the cross-scope fast-path for lazy projection).
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: mig-svc
+                annotations:
+                  aim.eai.amd.com/runtime-profile: test-migration
+                  aim.eai.amd.com/model-id: Qwen/Qwen3-0.6B
+              spec:
+                predictor:
+                  model:
+                    runtime: aim-test-migration-c84b2956
+                    modelFormat:
+                      name: huggingface
+
+    - name: Assert the inline predictor container was dropped in place
+      description: |
+        The in-place rewrite must remove the inline container (SSA drops fields
+        the shared aim-service-controller field manager no longer sends), leaving
+        a pure runtime reference — no inline predictor image or container.
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              set -eu
+              ISVC=$(kubectl get inferenceservice -n "$NAMESPACE" \
+                -l aim.eai.amd.com/service=mig-svc \
+                -o jsonpath='{.items[0].metadata.name}')
+              echo "InferenceService: $ISVC"
+
+              CONTAINERS=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.spec.predictor.containers}')
+              if [ -n "$CONTAINERS" ]; then
+                echo "ERROR: inline predictor container was not dropped on rewrite: $CONTAINERS"
+                kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" -o yaml
+                exit 1
+              fi
+
+              MODEL_IMAGE=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.spec.predictor.model.image}')
+              if [ -n "$MODEL_IMAGE" ]; then
+                echo "ERROR: overlay inlined a predictor image: $MODEL_IMAGE"
+                exit 1
+              fi
+              echo "OK: inline container dropped in place; ISVC references the runtime"
+
+    - name: Assert KServe binds the lazily-materialized runtime
+      description: |
+        The rewritten ISVC references aim-test-migration-c84b2956; the always-on
+        lazy InferenceService-watch projection materializes a complete namespace
+        ServingRuntime (+ colocated ConfigMap) cross-scope from the cluster
+        profile, and KServe binds it by name (status.servingRuntimeName).
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: mig-svc
+              status:
+                (servingRuntimeName || ''): aim-test-migration-c84b2956
+
+    - name: Assert the predictor Deployment survives the transition and mounts the projected ConfigMap
+      description: |
+        The rendered predictor Deployment (Standard/raw deployment mode) carries
+        the colocated profile ConfigMap as the aim-profile volume — i.e. the pod
+        mounts the profile the lazy watcher materialized onto the referenced
+        runtime, not the retired inline one. That the Deployment is present after
+        the in-place rewrite also corroborates ADR 0008 appendix finding 3: the live
+        predictor is re-rendered, not torn down, across the inline->reference
+        transition. The Deployment name is derived from the hashed ISVC name, so
+        locate it via KServe's inferenceservice label rather than a fixed name.
+      try:
+        - script:
+            timeout: 120s
+            content: |
+              set -eu
+              ISVC=$(kubectl get inferenceservice -n "$NAMESPACE" \
+                -l aim.eai.amd.com/service=mig-svc \
+                -o jsonpath='{.items[0].metadata.name}')
+              echo "InferenceService: $ISVC"
+
+              DEPLOY=$(kubectl get deployment -n "$NAMESPACE" \
+                -l "serving.kserve.io/inferenceservice=$ISVC" \
+                -o jsonpath='{.items[0].metadata.name}')
+              if [ -z "$DEPLOY" ]; then
+                echo "ERROR: no predictor Deployment for ISVC $ISVC"
+                kubectl get deployment -n "$NAMESPACE" -o wide
+                exit 1
+              fi
+              echo "Predictor Deployment: $DEPLOY"
+
+              MOUNTED=$(kubectl get deployment -n "$NAMESPACE" "$DEPLOY" -o json \
+                | jq -r '[.spec.template.spec.volumes[]?
+                    | select(.configMap.name == "aim-test-migration-c84b2956")
+                    | .name] | join(",")')
+              if [ "$MOUNTED" != "aim-profile" ]; then
+                echo "ERROR: predictor Deployment does not mount aim-test-migration-c84b2956 as aim-profile (got: '$MOUNTED')"
+                kubectl get deployment -n "$NAMESPACE" "$DEPLOY" -o yaml
+                exit 1
+              fi
+              echo "OK: predictor Deployment survives the rewrite and mounts the projected profile ConfigMap"
+
+    - name: Assert the orphaned legacy service-owned ConfigMap is garbage-collected
+      description: |
+        The guarded cleanup deletes exactly the owner-ref'd, managed-by-labelled,
+        legacy-named ConfigMap. `error` polls until it is gone.
+      try:
+        - error:
+            timeout: 120s
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: mig-svc-profile-42b44313

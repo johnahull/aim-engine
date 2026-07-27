@@ -1,0 +1,25 @@
+# A plain, native KServe InferenceService referencing the managed runtime by
+# name — no AIM-specific spec, no annotations. The lazy watcher materializes the
+# complete namespace ServingRuntime (+ colocated profile ConfigMap) for it, and
+# later gains the profile-owned cache mount when the AIMProfileCache goes Ready.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: native-late-cache
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: external
+spec:
+  predictor:
+    minReplicas: 1
+    model:
+      runtime: aim-test-late-cache-7636ef3c
+      modelFormat:
+        name: huggingface
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi

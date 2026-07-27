@@ -1,0 +1,177 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# The lazy InferenceService-watch resolver completes the Reduced/Both
+# model-slug primary runtime cross-namespace.
+#
+# Under --runtime-projection-mode=Reduced a primary AIMClusterProfile publishes
+# ONLY the model-slug primary ClusterServingRuntime aim-<model-slug> (slug from
+# spec.aimId) — the portable, vendor-independent handle native KServe references
+# by name (autoSelect stays off, like every projected runtime). That CSR is bare
+# (a cluster runtime cannot carry a colocated profile ConfigMap into an arbitrary
+# consumer namespace). A native KServe ISVC in a fresh namespace references
+# aim-<model-slug> by name.
+#
+# The backing primary profile resolves (via the managed CSR's ownerRef/label) to
+# name <primary>, whose per-profile name would be aim-<primary> — NOT the
+# referenced slug name. Before this fix the name guard only recognized the
+# per-profile name, so the slug reference was declined and the ISVC never got its
+# ConfigMap. Now the resolver ALSO recognizes the model-slug name and
+# materializes the shadow under the REFERENCED slug name (autoSelect off, like
+# the eager slug runtime), while still correlating/owning to the backing primary
+# profile.
+#
+# The materialized runtime carries the lazy-projection marker label
+# (aim.eai.amd.com/runtime-projection: lazy) — proof it came from the LAZY path.
+#
+# Pod readiness is intentionally NOT asserted: the placeholder image
+# (registry.example.com) never pulls. This asserts the deterministic contract —
+# slug-name recognition, lazy runtime/ConfigMap materialization under the slug
+# name (autoSelect off), ownership by the backing primary profile, and KServe
+# binding — all decided at render time, independent of a live pod.
+#
+# OPT-IN: gated `requires: reduced-mode`, so the default (Exhaustive) lane skips
+# it — its assertions only hold against an operator started in Reduced (or Both).
+# Run it with:
+#   make set-projection-mode MODE=Reduced
+#   make test-chainsaw \
+#     CHAINSAW_TEST_DIR=tests/e2e/v1alpha2/runtime-projection/lazy-shadow-model-slug \
+#     CHAINSAW_ENV_SELECTOR=''
+# (see docs/docs/contributing/testing.md).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-lazy-shadow-model-slug
+  labels:
+    requires: reduced-mode
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Apply the primary cluster profile and wait for Ready
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: lazy-slug-primary
+              status:
+                status: Ready
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+
+    - name: Assert the eager model-slug ClusterServingRuntime is projected (bare, autoSelect off)
+      description: |
+        Reduced names the primary aim-<model-slug> (aim-lazy-slug-model here) with
+        autoSelect off (referenced by name) and the correlator label pointing at
+        the backing primary profile. It is bare — it cannot carry a colocated
+        ConfigMap — which is exactly what the lazy watcher completes below.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-lazy-slug-model
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: lazy-slug-primary
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: lazy-slug-primary
+              spec:
+                supportedModelFormats:
+                  - name: huggingface
+                    autoSelect: false
+
+    - name: Apply the native InferenceService referencing the model-slug runtime
+      try:
+        - apply:
+            file: inference-service.yaml
+
+    - name: Assert the colocated profile ConfigMap is lazily materialized under the slug name
+      description: |
+        Materialized under the REFERENCED slug name (aim-lazy-slug-model), marked
+        with the lazy-projection label, and correlated to the backing primary
+        profile (lazy-slug-primary) — not the slug.
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-lazy-slug-model
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: lazy-slug-primary
+                  # Proof this is the lazy shadow (not an eager projection).
+                  aim.eai.amd.com/runtime-projection: lazy
+              data:
+                (keys(@)):
+                  - vllm-none-bf16-tp0-latency.yaml
+
+    - name: Assert a complete namespace ServingRuntime is materialized under the slug name, autoSelect off
+      description: |
+        The lazy watcher materialized aim-<model-slug> in the consumer namespace,
+        owner-ref'd by the backing primary AIMClusterProfile, marked with the
+        lazy-projection label, complete (mounts the colocated profile ConfigMap of
+        the same name), and — mirroring the eager slug runtime — it keeps
+        autoSelect off (referenced by name).
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-lazy-slug-model
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: lazy-slug-primary
+                  aim.eai.amd.com/runtime-projection: lazy
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: lazy-slug-primary
+              spec:
+                supportedModelFormats:
+                  - name: huggingface
+                    autoSelect: false
+                (volumes[?configMap.name == 'aim-lazy-slug-model']):
+                  - name: aim-profile
+
+    - name: Assert KServe resolves the namespace ServingRuntime over the same-named CSR
+      description: |
+        Shadow-completion: with both a cluster runtime and a complete namespace
+        runtime of the same name, KServe binds the namespace SR (status carries
+        servingRuntimeName, not clusterServingRuntimeName).
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                name: native-slug-consumer
+              status:
+                (servingRuntimeName || ''): aim-lazy-slug-model
+
+    - name: Assert the predictor pod mounts the materialized ConfigMap
+      description: |
+        The rendered predictor Deployment (Standard/raw deployment mode) carries
+        the colocated profile ConfigMap as a volume — i.e. the pod mounts the
+        profile the lazy watcher materialized under the slug name.
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: native-slug-consumer-predictor
+              spec:
+                template:
+                  spec:
+                    (volumes[?configMap.name == 'aim-lazy-slug-model']):
+                      - name: aim-profile

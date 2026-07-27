@@ -1,0 +1,153 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Lazy shadow gains the cache mount when the cache goes Ready LATE.
+#
+# The backing cluster profile declares modelSources but the AIMProfileCache that
+# populates the PVC does not exist when the native ISVC is applied. The lazy
+# watcher materializes a complete namespace ServingRuntime WITHOUT the cache
+# volume (only the redirect env, which is modelSources-driven). Later a Ready,
+# Shared, cluster-scope AIMProfileCache is seeded in the namespace; the cache
+# watch re-enqueues the consuming ISVC and the shadow gains the PVC volume/mount
+# — all WITHOUT the InferenceService being re-applied.
+#
+# The cache is frozen to Ready (apply-with-status.sh) with a fabricated PVC, so
+# no real download or storage class is needed and it runs in any cluster.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-lazy-shadow-late-cache
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Create the backing cluster profile and bare managed CSR
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - apply:
+            file: managed-runtime.yaml
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-late-cache
+              status:
+                status: Ready
+
+    - name: Apply the native InferenceService referencing the managed runtime
+      try:
+        - apply:
+            file: inference-service.yaml
+
+    - name: Assert the shadow ServingRuntime is materialized WITHOUT the cache volume
+      description: |
+        No AIMProfileCache exists yet, so the shadow carries the colocated
+        profile ConfigMap volume and the modelSources redirect env, but NO
+        PVC-backed cache volume.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-late-cache-7636ef3c
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-late-cache
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-late-cache
+              spec:
+                (volumes[?configMap.name == 'aim-test-late-cache-7636ef3c']):
+                  - name: aim-profile
+                (volumes[?persistentVolumeClaim] | length(@)): 0
+
+    - name: Record the InferenceService identity before the cache is seeded
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              # Trailing newline is required so the reader's `read` returns 0
+              # (a newline-less file makes `read` hit EOF and exit non-zero).
+              kubectl get inferenceservice native-late-cache -n "$NAMESPACE" \
+                -o jsonpath='{.metadata.uid} {.metadata.generation}{"\n"}' \
+                > "/tmp/late-cache-$NAMESPACE.txt"
+              echo "recorded ISVC identity: $(cat /tmp/late-cache-$NAMESPACE.txt)"
+
+    - name: Seed a Ready, Shared, cluster-scope AIMProfileCache in the namespace
+      try:
+        - apply:
+            file: profile-cache.yaml
+        - script:
+            timeout: 60s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              apply-with-status.sh profile-cache.yaml --status-only -n "$NAMESPACE"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                name: test-late-cache-cache
+              status:
+                status: Ready
+
+    - name: Assert the shadow ServingRuntime gains the PVC cache volume, mount, and redirect env
+      description: |
+        The late cache re-enqueues the ISVC via the AIMProfileCache watch and the
+        shadow is re-materialized with the profile-owned cache volume (claim
+        late-cache-weights-pvc), its mount at the cache mountPoint, and the
+        modelSources redirect env (AIM_CACHE_PATH, AIM_MODEL_ID, AIM_ID="").
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-late-cache-7636ef3c
+              spec:
+                (volumes[?persistentVolumeClaim.claimName == 'late-cache-weights-pvc']):
+                  - name: late-cache-weights
+                (containers[0].volumeMounts[?name == 'late-cache-weights'].mountPath | [0]): /workspace/cache/Qwen/Qwen3-0.6B
+                (containers[0].env[?name == 'AIM_CACHE_PATH'].value | [0]): /workspace/cache
+                (containers[0].env[?name == 'AIM_MODEL_ID'].value | [0]): Qwen/Qwen3-0.6B
+                (containers[0].env[?name == 'AIM_ID'] | length(@)): 1
+                (containers[0].env[?name == 'AIM_ID' && value] | length(@)): 0
+
+    - name: Assert the InferenceService was never re-applied
+      description: |
+        The self-heal completes the shadow only. Fail if the ISVC uid changed
+        (recreated) or its generation changed (spec re-applied) between the
+        pre-cache snapshot and now.
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              read -r OLD_UID OLD_GEN < "/tmp/late-cache-$NAMESPACE.txt" || true
+              if [ -z "${OLD_UID:-}" ] || [ -z "${OLD_GEN:-}" ]; then
+                echo "ERROR: could not read recorded ISVC identity from /tmp/late-cache-$NAMESPACE.txt"
+                exit 1
+              fi
+              NEW_UID=$(kubectl get inferenceservice native-late-cache -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+              NEW_GEN=$(kubectl get inferenceservice native-late-cache -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')
+              rm -f "/tmp/late-cache-$NAMESPACE.txt"
+              if [ "$NEW_UID" != "$OLD_UID" ]; then
+                echo "ERROR: InferenceService was recreated (uid $OLD_UID -> $NEW_UID)"
+                exit 1
+              fi
+              if [ "$NEW_GEN" != "$OLD_GEN" ]; then
+                echo "ERROR: InferenceService spec was re-applied (generation $OLD_GEN -> $NEW_GEN)"
+                exit 1
+              fi
+              echo "OK: shadow gained the cache mount without re-applying the InferenceService"

@@ -42,12 +42,14 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	v1alpha1service "github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimservice"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
 
 const (
-	testProfileA    = "profile-a"
-	testServiceName = "svc"
-	testModelIDFP8  = "qwen/qwen3-32b-fp8"
+	testProfileA           = "profile-a"
+	testServiceName        = "svc"
+	testModelIDFP8         = "qwen/qwen3-32b-fp8"
+	testClusterProfileName = "cluster-profile"
 
 	componentNameInferenceService = "InferenceService"
 	componentNameHTTPRoute        = "HTTPRoute"
@@ -208,7 +210,7 @@ func TestComposeState_ClusterProfileFallback(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
 	}
 	clusterProfile := &aimv1alpha2.AIMClusterProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster-profile"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterProfileName},
 		Spec: aimv1alpha2.AIMClusterProfileSpec{
 			AIMProfileSpecCommon: *sampleProfileSpec(),
 		},
@@ -225,12 +227,17 @@ func TestComposeState_ClusterProfileFallback(t *testing.T) {
 	if obs.profileScope != aimv1alpha1.AIMResolutionScopeCluster {
 		t.Errorf("profile scope should be cluster: %v", obs.profileScope)
 	}
-	if obs.profileName != "cluster-profile" {
+	if obs.profileName != testClusterProfileName {
 		t.Errorf("cluster profile name not resolved: %q", obs.profileName)
 	}
 }
 
-func TestBuildInferenceServiceFromProfile_BasicShape(t *testing.T) {
+// TestBuildInferenceServiceFromProfile_ReferencesRuntime pins the Phase C
+// contract: the ISVC references the projected runtime (aim-<profile.Name>) via
+// predictor.model.runtime + modelFormat and emits NO inline predictor (no
+// container image, no profile ConfigMap volume/mount, no framework env). The
+// runtime carries all of that; the service only references it.
+func TestBuildInferenceServiceFromProfile_ReferencesRuntime(t *testing.T) {
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
 		Spec: aimv1alpha1.AIMServiceSpec{
@@ -241,22 +248,16 @@ func TestBuildInferenceServiceFromProfile_BasicShape(t *testing.T) {
 	profileStatus := &aimv1alpha2.AIMProfileStatus{
 		Status: constants.AIMStatusReady,
 		Resources: &corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("8"),
-				corev1.ResourceMemory: resource.MustParse("32Gi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("16"),
-				corev1.ResourceMemory: resource.MustParse("64Gi"),
-			},
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8")},
 		},
+		// Affinity belongs on the runtime, never the overlay; pin that the
+		// overlay drops it even when the profile resolved one.
+		ResolvedNodeAffinity: &corev1.NodeAffinity{},
 	}
 
 	r := &ProfileServiceReconciler{}
 	obs := ServiceObservation{
-		ServiceFetchResult: ServiceFetchResult{
-			service: service,
-		},
+		ServiceFetchResult:    ServiceFetchResult{service: service},
 		resolvedProfileSpec:   profileSpec,
 		resolvedProfileStatus: profileStatus,
 		profileName:           testProfileA,
@@ -272,9 +273,6 @@ func TestBuildInferenceServiceFromProfile_BasicShape(t *testing.T) {
 		t.Fatalf("buildInferenceServiceFromProfile returned nil")
 	}
 
-	if isvc.Namespace != "ns" {
-		t.Errorf("unexpected namespace: %q", isvc.Namespace)
-	}
 	if isvc.Labels[constants.LabelService] != testServiceName {
 		t.Errorf("missing service label: %v", isvc.Labels)
 	}
@@ -282,52 +280,154 @@ func TestBuildInferenceServiceFromProfile_BasicShape(t *testing.T) {
 		t.Errorf("missing profile label: %v", isvc.Labels)
 	}
 
-	if len(isvc.Spec.Predictor.Containers) == 0 {
-		t.Fatalf("expected at least one container")
+	model := isvc.Spec.Predictor.Model
+	if model == nil {
+		t.Fatalf("expected predictor.model to be set")
 	}
-	container := isvc.Spec.Predictor.Containers[0]
-	if container.Image != profileSpec.Image {
-		t.Errorf("container image mismatch: got %q want %q", container.Image, profileSpec.Image)
+	if model.Runtime == nil || *model.Runtime != serving.RuntimeName(testProfileA) {
+		t.Errorf("predictor.model.runtime = %v, want %q", model.Runtime, serving.RuntimeName(testProfileA))
+	}
+	if model.ModelFormat.Name != serving.RuntimeModelFormat {
+		t.Errorf("modelFormat.name = %q, want %q", model.ModelFormat.Name, serving.RuntimeModelFormat)
 	}
 
-	// Profile volume + mount should be present.
-	foundProfileVol := false
+	// No inline predictor: no explicit container, no inline image, no profile
+	// ConfigMap volume, no framework env on the overlay.
+	if len(isvc.Spec.Predictor.Containers) != 0 {
+		t.Errorf("overlay must not inline predictor containers, got %d", len(isvc.Spec.Predictor.Containers))
+	}
+	if model.Image != "" {
+		t.Errorf("overlay model must not carry an inline image, got %q", model.Image)
+	}
 	for _, v := range isvc.Spec.Predictor.Volumes {
 		if v.Name == profileVolumePrefix {
-			foundProfileVol = true
+			t.Errorf("overlay must not mount the profile ConfigMap volume %q (runtime owns it)", profileVolumePrefix)
 		}
 	}
-	if !foundProfileVol {
-		t.Errorf("profile volume %q not found on ISVC", profileVolumePrefix)
-	}
-
-	foundProfileMount := false
-	for _, m := range container.VolumeMounts {
-		if m.Name == profileVolumePrefix {
-			foundProfileMount = true
-		}
-	}
-	if !foundProfileMount {
-		t.Errorf("profile volume mount %q not found on container", profileVolumePrefix)
-	}
-
-	// AIM_PROFILE_ID env var should be present and reference custom/<aimId>/...
-	foundEnv := false
-	for _, e := range container.Env {
+	for _, e := range model.Env {
 		if e.Name == constants.EnvAIMProfileID {
-			foundEnv = true
-			if e.Value == "" {
-				t.Errorf("AIM_PROFILE_ID env value is empty")
-			}
+			t.Errorf("overlay must not carry framework env %q (runtime owns it)", constants.EnvAIMProfileID)
 		}
 	}
-	if !foundEnv {
-		t.Errorf("expected AIM_PROFILE_ID env var on container")
+	if isvc.Spec.Predictor.Affinity != nil {
+		t.Errorf("overlay must not carry node affinity (runtime owns it)")
+	}
+	// No service-level resource override -> the overlay leaves resources to the
+	// runtime (empty requests/limits on the model).
+	if len(model.Resources.Requests) != 0 || len(model.Resources.Limits) != 0 {
+		t.Errorf("overlay must not carry profile resources without a service override, got %+v", model.Resources)
+	}
+}
+
+// TestBuildInferenceServiceFromProfile_StickyReference pins that an existing
+// ISVC keeps its current runtime reference even when the resolved profile name
+// would now project a different runtime (e.g. a projection-mode change), so a
+// mode change never re-rolls a live ISVC.
+func TestBuildInferenceServiceFromProfile_StickyReference(t *testing.T) {
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
+		},
+	}
+	existingRef := "aim-some-previous-runtime"
+	existing := &servingv1beta1.InferenceService{
+		Spec: servingv1beta1.InferenceServiceSpec{
+			Predictor: servingv1beta1.PredictorSpec{
+				Model: &servingv1beta1.ModelSpec{Runtime: ptr.To(existingRef)},
+			},
+		},
 	}
 
-	// Resource requirements from profile status should be propagated.
-	if container.Resources.Requests.Cpu().Cmp(resource.MustParse("8")) != 0 {
-		t.Errorf("CPU requests not propagated: %v", container.Resources.Requests.Cpu())
+	obs := ServiceObservation{
+		ServiceFetchResult: ServiceFetchResult{
+			service:          service,
+			inferenceService: controllerutils.FetchResult[*servingv1beta1.InferenceService]{Value: existing},
+		},
+		resolvedProfileSpec:   sampleProfileSpec(),
+		resolvedProfileStatus: &aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+		profileName:           testProfileA,
+		profileScope:          aimv1alpha1.AIMResolutionScopeNamespace,
+	}
+	(&ProfileServiceReconciler{}).composeDerivedNames(context.Background(), &obs)
+
+	isvc := buildInferenceServiceFromProfile(service, obs)
+	if isvc == nil {
+		t.Fatalf("expected non-nil ISVC")
+	}
+	if got := isvc.Spec.Predictor.Model.Runtime; got == nil || *got != existingRef {
+		t.Errorf("runtime reference must be sticky: got %v, want %q", got, existingRef)
+	}
+}
+
+// TestBuildInferenceServiceFromProfile_StampsRuntimeProfile pins the lazy
+// runtime-projection fast-path: a service stamps the backing profile name so the
+// lazy watcher can materialize the runtime in the service's namespace before it
+// exists. Stamped for BOTH scopes — a cluster profile is the cross-scope case,
+// and a namespace profile needs it under Reduced mode (no eager per-profile
+// runtime), where the watcher resolves the namespace AIMProfile from it.
+func TestBuildInferenceServiceFromProfile_StampsRuntimeProfile(t *testing.T) {
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testClusterProfileName},
+		},
+	}
+	obs := ServiceObservation{
+		ServiceFetchResult:    ServiceFetchResult{service: service},
+		resolvedProfileSpec:   sampleProfileSpec(),
+		resolvedProfileStatus: &aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+		profileName:           testClusterProfileName,
+		profileScope:          aimv1alpha1.AIMResolutionScopeCluster,
+	}
+	(&ProfileServiceReconciler{}).composeDerivedNames(context.Background(), &obs)
+
+	isvc := buildInferenceServiceFromProfile(service, obs)
+	if isvc == nil {
+		t.Fatalf("expected non-nil ISVC")
+	}
+	if got := isvc.Annotations[constants.AnnotationRuntimeProfile]; got != testClusterProfileName {
+		t.Errorf("cluster-scoped service must stamp runtime-profile annotation, got %q", got)
+	}
+
+	// Namespace scope stamps it too so a Reduced-mode namespace-profile-backed
+	// service can be lazily completed.
+	obs.profileScope = aimv1alpha1.AIMResolutionScopeNamespace
+	nsISVC := buildInferenceServiceFromProfile(service, obs)
+	if got := nsISVC.Annotations[constants.AnnotationRuntimeProfile]; got != testClusterProfileName {
+		t.Errorf("namespace-scoped service must also stamp the runtime-profile annotation, got %q", got)
+	}
+}
+
+// TestBuildInferenceServiceFromProfile_ServiceResourceOverrideOnModel pins that
+// a service-level resource override is the one resource knob carried by the
+// overlay (KServe merges it over the runtime container by name).
+func TestBuildInferenceServiceFromProfile_ServiceResourceOverrideOnModel(t *testing.T) {
+	override := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("16Gi")},
+	}
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile:   &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
+			Resources: override,
+		},
+	}
+	obs := ServiceObservation{
+		ServiceFetchResult:    ServiceFetchResult{service: service},
+		resolvedProfileSpec:   sampleProfileSpec(),
+		resolvedProfileStatus: &aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+		profileName:           testProfileA,
+		profileScope:          aimv1alpha1.AIMResolutionScopeNamespace,
+	}
+	(&ProfileServiceReconciler{}).composeDerivedNames(context.Background(), &obs)
+
+	isvc := buildInferenceServiceFromProfile(service, obs)
+	if isvc == nil {
+		t.Fatalf("expected non-nil ISVC")
+	}
+	if got := isvc.Spec.Predictor.Model.Resources.Requests.Memory(); got.Cmp(resource.MustParse("16Gi")) != 0 {
+		t.Errorf("service resource override not carried on model: got %v, want 16Gi", got)
 	}
 }
 
@@ -873,29 +973,28 @@ func TestBuildInferenceServiceFromProfile_Replicas_AutoScalingHandsOffToExternal
 	}
 }
 
-// TestBuildInferenceServiceFromProfile_FrameworkEnvVarsWinOverProfile verifies
-// that a profile author cannot override AIM_PROFILE_ID via ContainerEnv. This
-// is essential because the framework's value is the only one that actually
-// resolves to the projected ConfigMap path.
-func TestBuildInferenceServiceFromProfile_FrameworkEnvVarsWinOverProfile(t *testing.T) {
+// TestBuildInferenceServiceFromProfile_SharedCacheNotOverlaid pins that a
+// profile-owned (Shared) cache is NOT overlaid onto the ISVC — the runtime
+// mounts it instead, so overlaying it would duplicate the runtime's volume.
+func TestBuildInferenceServiceFromProfile_SharedCacheNotOverlaid(t *testing.T) {
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
 		Spec: aimv1alpha1.AIMServiceSpec{
 			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
+			// Shared is the default; state it explicitly for the reader.
+			Caching: &aimv1alpha1.AIMServiceCachingConfig{Mode: aimv1alpha1.CachingModeShared},
 		},
 	}
-	profileSpec := sampleProfileSpec()
-	profileSpec.ContainerEnv = []corev1.EnvVar{
-		{Name: constants.EnvAIMProfileID, Value: "hijacked"},
-		{Name: "PROFILE_ONLY", Value: "kept"},
-	}
-
 	obs := ServiceObservation{
-		ServiceFetchResult:    ServiceFetchResult{service: service},
-		resolvedProfileSpec:   profileSpec,
+		ServiceFetchResult: ServiceFetchResult{
+			service:      service,
+			profileCache: controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]{Value: readyCacheFixture()},
+		},
+		resolvedProfileSpec:   profileSpecWithModelSources(),
 		resolvedProfileStatus: &aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
 		profileName:           testProfileA,
 		profileScope:          aimv1alpha1.AIMResolutionScopeNamespace,
+		profileCacheReady:     true,
 	}
 	(&ProfileServiceReconciler{}).composeDerivedNames(context.Background(), &obs)
 
@@ -903,52 +1002,36 @@ func TestBuildInferenceServiceFromProfile_FrameworkEnvVarsWinOverProfile(t *test
 	if isvc == nil {
 		t.Fatalf("expected non-nil ISVC")
 	}
-	env := envMap(isvc.Spec.Predictor.Containers[0].Env)
-
-	if env[constants.EnvAIMProfileID] == "hijacked" {
-		t.Errorf("profile.ContainerEnv must not be able to override %s", constants.EnvAIMProfileID)
+	if len(isvc.Spec.Predictor.Volumes) != 0 {
+		t.Errorf("Shared (profile-owned) cache must not be overlaid; got volumes %+v", isvc.Spec.Predictor.Volumes)
 	}
-	if env[constants.EnvAIMProfileID] == "" {
-		t.Errorf("framework env var %s is missing", constants.EnvAIMProfileID)
-	}
-	if env["PROFILE_ONLY"] != "kept" {
-		t.Errorf("non-overlapping profile env var should survive: got %q", env["PROFILE_ONLY"])
+	if len(isvc.Spec.Predictor.Model.VolumeMounts) != 0 {
+		t.Errorf("Shared (profile-owned) cache must not add model mounts; got %+v", isvc.Spec.Predictor.Model.VolumeMounts)
 	}
 }
 
-// TestBuildInferenceServiceFromProfile_FrameworkBeatsOverlayContainerEnv pins
-// the v1alpha2 precedence rule: user-supplied ContainerEnv flows through the
-// overlay's ContainerEnv (already merged by ApplyProfileCopyOverrides in
-// ComposeState) and is then overlaid by framework AIM_* vars. AIM_* identity
-// variables belong to the controller; the user cannot reshape them via
-// spec.profileOverrides.containerEnv.
-//
-// This is a deliberate behaviour change from the inline-override era where
-// service-level overrides were re-applied after framework vars. It is the
-// natural consequence of moving overrides into a real overlay AIMProfile —
-// the AIMService never re-applies overrides at deploy time.
-func TestBuildInferenceServiceFromProfile_FrameworkBeatsOverlayContainerEnv(t *testing.T) {
-	// Simulate the post-overlay state: the overlay's spec.containerEnv
-	// already carries the user's containerEnv override. The reconciler
-	// must NOT let that hijack a framework AIM_* var.
-	overlaySpec := sampleProfileSpec()
-	overlaySpec.ContainerEnv = []corev1.EnvVar{
-		{Name: constants.EnvAIMProfileID, Value: "user-attempt-via-overlay"},
-		{Name: "USER_FLAG", Value: "kept"},
-	}
-
+// TestBuildInferenceServiceFromProfile_DedicatedCacheOverlaid pins that a
+// service-owned (Dedicated) cache lands on the overlay: the PVC volume, the
+// model volume mount, and the framework redirect env (overriding the runtime
+// container by name).
+func TestBuildInferenceServiceFromProfile_DedicatedCacheOverlaid(t *testing.T) {
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
 		Spec: aimv1alpha1.AIMServiceSpec{
 			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
+			Caching: &aimv1alpha1.AIMServiceCachingConfig{Mode: aimv1alpha1.CachingModeDedicated},
 		},
 	}
 	obs := ServiceObservation{
-		ServiceFetchResult:    ServiceFetchResult{service: service},
-		resolvedProfileSpec:   overlaySpec,
+		ServiceFetchResult: ServiceFetchResult{
+			service:      service,
+			profileCache: controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]{Value: readyCacheFixture()},
+		},
+		resolvedProfileSpec:   profileSpecWithModelSources(),
 		resolvedProfileStatus: &aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
 		profileName:           testProfileA,
 		profileScope:          aimv1alpha1.AIMResolutionScopeNamespace,
+		profileCacheReady:     true,
 	}
 	(&ProfileServiceReconciler{}).composeDerivedNames(context.Background(), &obs)
 
@@ -956,17 +1039,51 @@ func TestBuildInferenceServiceFromProfile_FrameworkBeatsOverlayContainerEnv(t *t
 	if isvc == nil {
 		t.Fatalf("expected non-nil ISVC")
 	}
-	env := envMap(isvc.Spec.Predictor.Containers[0].Env)
 
-	if env[constants.EnvAIMProfileID] == "user-attempt-via-overlay" {
-		t.Errorf("framework %s must win over overlay containerEnv, got user value", constants.EnvAIMProfileID)
+	if !volumeRefsPVC(isvc.Spec.Predictor.Volumes, "weights-pvc") {
+		t.Errorf("Dedicated (service-owned) cache PVC must be overlaid; got volumes %+v", isvc.Spec.Predictor.Volumes)
 	}
-	if env[constants.EnvAIMProfileID] == "" {
-		t.Errorf("framework %s must be present", constants.EnvAIMProfileID)
+	model := isvc.Spec.Predictor.Model
+	if len(model.VolumeMounts) == 0 {
+		t.Errorf("Dedicated cache must add a model volume mount")
 	}
-	if env["USER_FLAG"] != "kept" {
-		t.Errorf("non-AIM_* user containerEnv via the overlay should survive, got %q", env["USER_FLAG"])
+	// Redirect env must be present so the runtime loads from the local cache,
+	// overriding the runtime container env by name.
+	env := envMap(model.Env)
+	if env[constants.EnvAIMModelID] == "" {
+		t.Errorf("Dedicated cache overlay must carry the %s redirect env", constants.EnvAIMModelID)
 	}
+}
+
+func profileSpecWithModelSources() *aimv1alpha2.AIMProfileSpecCommon {
+	spec := sampleProfileSpec()
+	spec.ModelSources = []aimv1alpha1.AIMModelSource{{ModelID: "org/model", SourceURI: "hf://org/model"}}
+	return spec
+}
+
+func readyCacheFixture() *aimv1alpha2.AIMProfileCache {
+	return &aimv1alpha2.AIMProfileCache{
+		Status: aimv1alpha2.AIMProfileCacheStatus{
+			Status: constants.AIMStatusReady,
+			Artifacts: map[string]aimv1alpha1.AIMResolvedArtifact{
+				"weights": {
+					Name:                  "weights",
+					Status:                constants.AIMStatusReady,
+					PersistentVolumeClaim: "weights-pvc",
+					MountPoint:            "/workspace/cache/org/model",
+				},
+			},
+		},
+	}
+}
+
+func volumeRefsPVC(volumes []corev1.Volume, claimName string) bool {
+	for _, v := range volumes {
+		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claimName {
+			return true
+		}
+	}
+	return false
 }
 
 func envMap(vars []corev1.EnvVar) map[string]string {
@@ -1335,5 +1452,117 @@ func TestPlanProfileCache_DedicatedHonorsServiceCachingMode(t *testing.T) {
 	}
 	if cache.Name != expected {
 		t.Fatalf("Dedicated cache name does not match deterministic-lookup formula: got %q, want %q", cache.Name, expected)
+	}
+}
+
+// TestPlanResources_LegacyProfileConfigMapCleanup is the upgrade regression: a
+// service upgraded from the old inline path left an orphaned
+// <service>-profile-<hash> ConfigMap the new reconcile no longer plans.
+// PlanResources must GC exactly that orphan — guarded by owner-ref UID AND the
+// managed-by label AND the legacy name shape — and never touch a
+// coincidentally-named ConfigMap missing a guard, since a false-positive delete
+// of a user object is the worst-case regression.
+func TestPlanResources_LegacyProfileConfigMapCleanup(t *testing.T) {
+	const serviceUID = "svc-uid-legacy-1"
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns", UID: serviceUID},
+	}
+
+	legacyName, err := legacyProfileConfigMapName(service.Name)
+	if err != nil {
+		t.Fatalf("legacyProfileConfigMapName: %v", err)
+	}
+
+	ownedByService := []metav1.OwnerReference{{
+		APIVersion: "aim.eai.amd.com/v1alpha1",
+		Kind:       "AIMService",
+		Name:       service.Name,
+		UID:        serviceUID,
+		Controller: ptr.To(true),
+	}}
+	ownedByOther := []metav1.OwnerReference{{
+		APIVersion: "aim.eai.amd.com/v1alpha1",
+		Kind:       "AIMService",
+		Name:       "some-other-service",
+		UID:        "a-different-uid",
+		Controller: ptr.To(true),
+	}}
+	managedByAIM := map[string]string{constants.LabelK8sManagedBy: constants.LabelValueManagedBy}
+
+	makeConfigMap := func(owners []metav1.OwnerReference, labels map[string]string) *corev1.ConfigMap {
+		return &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            legacyName,
+				Namespace:       service.Namespace,
+				OwnerReferences: owners,
+				Labels:          labels,
+			},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		configMap  *corev1.ConfigMap
+		wantDelete bool
+	}{
+		{
+			name:       "owned by this service + managed-by label + legacy name is deleted",
+			configMap:  makeConfigMap(ownedByService, managedByAIM),
+			wantDelete: true,
+		},
+		{
+			name:       "legacy name but no owner reference is untouched",
+			configMap:  makeConfigMap(nil, managedByAIM),
+			wantDelete: false,
+		},
+		{
+			name:       "legacy name and owner reference but missing managed-by label is untouched",
+			configMap:  makeConfigMap(ownedByService, nil),
+			wantDelete: false,
+		},
+		{
+			name:       "legacy name owned by a different service is untouched",
+			configMap:  makeConfigMap(ownedByOther, managedByAIM),
+			wantDelete: false,
+		},
+		{
+			name:       "no legacy ConfigMap observed (post-rewrite service) deletes nothing",
+			configMap:  nil,
+			wantDelete: false,
+		},
+	}
+
+	r := &ProfileServiceReconciler{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := ServiceObservation{
+				ServiceFetchResult: ServiceFetchResult{
+					service:                service,
+					legacyProfileConfigMap: controllerutils.FetchResult[*corev1.ConfigMap]{Value: tc.configMap},
+				},
+			}
+
+			plan := r.PlanResources(context.Background(),
+				controllerutils.ReconcileContext[*aimv1alpha1.AIMService]{Object: service}, obs)
+
+			var deletedConfigMaps int
+			for _, obj := range plan.GetToDelete() {
+				configMap, ok := obj.(*corev1.ConfigMap)
+				if !ok {
+					continue
+				}
+				if configMap.Name != legacyName || configMap.Namespace != service.Namespace {
+					t.Fatalf("plan queued deletion of an unexpected ConfigMap %s/%s", configMap.Namespace, configMap.Name)
+				}
+				deletedConfigMaps++
+			}
+
+			if tc.wantDelete && deletedConfigMaps != 1 {
+				t.Fatalf("expected exactly one legacy ConfigMap delete, got %d", deletedConfigMaps)
+			}
+			if !tc.wantDelete && deletedConfigMaps != 0 {
+				t.Fatalf("expected no ConfigMap delete, got %d", deletedConfigMaps)
+			}
+		})
 	}
 }

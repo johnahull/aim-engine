@@ -1,0 +1,82 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Lazy shadow self-heals on DRIFT of the materialized object.
+#
+# The materialized namespace ServingRuntime is force-applied (SSA +
+# ForceOwnership) under the reserved aim- prefix, so AIM Engine is authoritative
+# over its managed fields. This test hand-edits the shadow SR's container image
+# to a bogus value and asserts the managed-SR watch re-triggers the reconcile,
+# which reasserts ownership and reverts the image to the profile's image.
+#
+# No accelerator is involved, so this runs in any cluster (kind or GPU vcluster).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-lazy-shadow-selfheal-drift
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Create the backing cluster profile and bare managed CSR
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - apply:
+            file: managed-runtime.yaml
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-selfheal-drift
+              status:
+                status: Ready
+
+    - name: Apply the native InferenceService referencing the managed runtime
+      try:
+        - apply:
+            file: inference-service.yaml
+
+    - name: Assert the shadow ServingRuntime is materialized with the profile image
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-selfheal-drift-a41c39a9
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-selfheal-drift
+              spec:
+                (containers[?name == 'kserve-container'].image | [0]): registry.example.com/aim-cpu-base:0.12.0
+
+    - name: Drift the shadow ServingRuntime container image to a bogus value
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              kubectl patch servingruntime aim-test-selfheal-drift-a41c39a9 -n "$NAMESPACE" \
+                --type=json \
+                -p '[{"op":"replace","path":"/spec/containers/0/image","value":"registry.example.com/bogus-drift:0.0.0"}]'
+              echo "patched shadow SR image to bogus value"
+
+    - name: Assert the managed image field is reverted on the next reconcile
+      description: |
+        The kubectl patch set a bogus image; the managed-SR watch enqueues the
+        consuming ISVC, and the authoritative force-apply reclaims the image
+        field and restores the profile's image. Chainsaw polls until the revert
+        lands (a persistent bogus value would fail this assert).
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-selfheal-drift-a41c39a9
+              spec:
+                (containers[?name == 'kserve-container'].image | [0]): registry.example.com/aim-cpu-base:0.12.0

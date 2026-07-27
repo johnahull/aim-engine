@@ -1,0 +1,42 @@
+# A profile-owned (Shared), cluster-scoped AIMProfileCache for the backing
+# cluster profile, colocated in the consumer's namespace. Frozen to Ready with a
+# resolved artifact (PVC + mount point) via apply-with-status.sh, and paused so
+# the AIMProfileCache controller does not overwrite the status. Only a Ready,
+# Shared, Cluster-scope cache for this profile contributes the cache mount to the
+# lazily-materialized ServingRuntime.
+#
+# Its spec.profileName is the PROFILE name (slug-late-cache), NOT the model slug
+# — this is exactly the gap the fix closes: the cache carries no aimId, so the
+# cache-event handler must resolve this profile to recover aimId "Qwen/Qwen3-0.6B"
+# and thereby wake the consumer of the model-slug runtime aim-qwen-qwen3-0-6b.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfileCache
+metadata:
+  name: slug-late-cache-cache
+  annotations:
+    aim.eai.amd.com/reconciliation-paused: "true"
+spec:
+  profileName: slug-late-cache
+  profileScope: Cluster
+  mode: Shared
+status:
+  status: Ready
+  conditions:
+    - type: ProfileFound
+      status: "True"
+      reason: ProfileResolved
+      message: Profile resolved
+      lastTransitionTime: "2025-01-01T00:00:00Z"
+    - type: ArtifactsReady
+      status: "True"
+      reason: AllCachesReady
+      message: All artifacts are ready
+      lastTransitionTime: "2025-01-01T00:00:00Z"
+  artifacts:
+    slug-late-cache-weights:
+      uid: "00000000-0000-0000-0000-0000000c5c5e"
+      name: slug-late-cache-weights
+      model: Qwen/Qwen3-0.6B
+      status: Ready
+      persistentVolumeClaim: slug-late-cache-weights-pvc
+      mountPoint: /workspace/cache/Qwen/Qwen3-0.6B

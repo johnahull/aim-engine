@@ -28,12 +28,10 @@ import (
 	"testing"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
-	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 )
 
 func mustJSON(t *testing.T, v any) *apiextensionsv1.JSON {
@@ -57,27 +55,6 @@ func sampleProfileSpec() *aimv1alpha2.AIMProfileSpecCommon {
 		AcceleratorType:  aimv1alpha1.AcceleratorType("gpu"),
 		AcceleratorCount: 1,
 		Image:            "ghcr.io/aim/qwen3-32b:1.0.0",
-	}
-}
-
-func TestProfileConfigMapName_Deterministic(t *testing.T) {
-	a, err := profileConfigMapName("svc-alpha")
-	if err != nil {
-		t.Fatalf("profileConfigMapName returned error: %v", err)
-	}
-	b, err := profileConfigMapName("svc-alpha")
-	if err != nil {
-		t.Fatalf("profileConfigMapName returned error: %v", err)
-	}
-	if a != b {
-		t.Fatalf("profileConfigMapName should be deterministic, got %q vs %q", a, b)
-	}
-	other, err := profileConfigMapName("svc-beta")
-	if err != nil {
-		t.Fatalf("profileConfigMapName returned error: %v", err)
-	}
-	if a == other {
-		t.Fatalf("different service names should produce different configmap names")
 	}
 }
 
@@ -237,44 +214,6 @@ func TestAssembleProfileYAML_OmitsEmptyFeatures(t *testing.T) {
 	}
 	if strings.Contains(string(yamlBytes), "features") {
 		t.Fatalf("expected no features key for a profile without features; got:\n%s", yamlBytes)
-	}
-}
-
-func TestBuildProfileConfigMap(t *testing.T) {
-	service := &aimv1alpha1.AIMService{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns"},
-	}
-	spec := sampleProfileSpec()
-
-	cmName, err := profileConfigMapName(service.Name)
-	if err != nil {
-		t.Fatalf("profileConfigMapName returned error: %v", err)
-	}
-	yamlBytes, filename, err := assembleProfileYAML(spec)
-	if err != nil {
-		t.Fatalf("assembleProfileYAML returned error: %v", err)
-	}
-
-	cm := buildProfileConfigMap(service, cmName, filename, yamlBytes)
-	if cm == nil {
-		t.Fatalf("buildProfileConfigMap returned nil")
-	}
-	if cm.Namespace != "ns" {
-		t.Errorf("unexpected namespace: %q", cm.Namespace)
-	}
-	if cm.Labels[constants.LabelService] != "svc" {
-		t.Errorf("missing or incorrect service label: %v", cm.Labels)
-	}
-	if cm.Labels[constants.LabelK8sManagedBy] != constants.LabelValueManagedBy {
-		t.Errorf("missing managed-by label: %v", cm.Labels)
-	}
-	if len(cm.Data) != 1 {
-		t.Fatalf("expected exactly one data key, got %d", len(cm.Data))
-	}
-	for key := range cm.Data {
-		if !strings.HasSuffix(key, ".yaml") {
-			t.Errorf("data key should be a .yaml filename: %q", key)
-		}
 	}
 }
 

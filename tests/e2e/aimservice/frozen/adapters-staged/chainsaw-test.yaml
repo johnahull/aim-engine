@@ -195,7 +195,9 @@ spec:
       description: |
         The predictor mounts the shared adapter disk read-only at /adapters
         (subPath = service UID) and is pointed at it via the container
-        contract env var AIM_ADAPTER_SOURCE.
+        contract env var AIM_ADAPTER_SOURCE. Post slice-06 the overlay references
+        a runtime via predictor.model (no inline containers), so the adapter mount
+        and AIM_ADAPTER_SOURCE env land on the model container.
       try:
         - assert:
             timeout: 60s
@@ -207,12 +209,11 @@ spec:
                   aim.eai.amd.com/service: adapters-staged-service
               spec:
                 predictor:
-                  containers:
-                    - name: kserve-container
-                      (volumeMounts[?mountPath == '/adapters']):
-                        - readOnly: true
-                      (env[?name == 'AIM_ADAPTER_SOURCE']):
-                        - value: /adapters
+                  model:
+                    (volumeMounts[?mountPath == '/adapters']):
+                      - readOnly: true
+                    (env[?name == 'AIM_ADAPTER_SOURCE']):
+                      - value: /adapters
 
     - name: Assert the service records the sticky adapter disk PVC
       description: |
@@ -409,10 +410,9 @@ spec:
                   aim.eai.amd.com/service: adapters-staged-service
               spec:
                 predictor:
-                  containers:
-                    - name: kserve-container
-                      (volumeMounts[?mountPath == '/adapters']):
-                        - readOnly: true
+                  model:
+                    (volumeMounts[?mountPath == '/adapters']):
+                      - readOnly: true
       finally:
         - script:
             timeout: 60s

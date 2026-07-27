@@ -25,8 +25,10 @@ package controller
 import (
 	"context"
 
+	kservev1alpha1 "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -35,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
@@ -54,6 +57,9 @@ type AIMProfileReconciler struct {
 	Recorder  record.EventRecorder
 	Clientset kubernetes.Interface
 
+	// ProjectionMode governs eager ServingRuntime projection.
+	ProjectionMode aimv1alpha2.RuntimeProjectionMode
+
 	reconciler controllerutils.DomainReconciler[
 		*aimv1alpha2.AIMProfile,
 		*aimv1alpha2.AIMProfileStatus,
@@ -71,6 +77,8 @@ type AIMProfileReconciler struct {
 // +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimprofiles/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimprofiles/finalizers,verbs=update
+// +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimprofilecaches,verbs=get;list;watch
+// +kubebuilder:rbac:groups=serving.kserve.io,resources=servingruntimes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -96,8 +104,9 @@ func (r *AIMProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ctx := context.Background()
 
 	r.reconciler = &aimprofile.ProfileReconciler{
-		Client: mgr.GetClient(),
-		Scheme: r.Scheme,
+		Client:         mgr.GetClient(),
+		Scheme:         r.Scheme,
+		ProjectionMode: r.ProjectionMode,
 	}
 
 	r.pipeline = controllerutils.Pipeline[
@@ -160,7 +169,41 @@ func (r *AIMProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&aimv1alpha2.AIMProfile{}).
+		// Own the projected ServingRuntime so drift (hand-edits) and
+		// node-inventory changes (via the Node watch) self-heal through reconcile.
+		Owns(&kservev1alpha1.ServingRuntime{}).
 		Watches(&corev1.Node{}, nodeHandler, builder.WithPredicates(utils.NodeGPUChangePredicate())).
+		// Re-project when the profile's cache reaches Ready (or its artifacts
+		// change), so the eager per-profile / model-slug runtime gains the cache
+		// mount without waiting for an unrelated reconcile. This covers a
+		// service-driven Shared cache (which the profile does not own, so Owns
+		// would never fire) and mirrors the lazy shadow's own cache watch, so both
+		// projection paths pick up a late-Ready cache promptly.
+		Watches(
+			&aimv1alpha2.AIMProfileCache{},
+			handler.EnqueueRequestsFromMapFunc(findProfilesForProfileCache),
+			builder.WithPredicates(profileCacheProjectionPredicate()),
+		).
 		Named(profileControllerName).
 		Complete(r)
+}
+
+// findProfilesForProfileCache maps a changed AIMProfileCache to the namespace
+// AIMProfile it caches — the profile named by spec.profileName in the cache's
+// own namespace — so a late-Ready (or artifact-changed) cache re-triggers the
+// eager runtime projection that mounts it. Only namespace-scope caches are
+// mapped: a cluster-scope cache backs an AIMClusterProfile, whose eager runtime
+// is a bare CSR that mounts no cache (the lazy shadow mounts it per-namespace
+// instead).
+func findProfilesForProfileCache(_ context.Context, obj client.Object) []reconcile.Request {
+	cache, ok := obj.(*aimv1alpha2.AIMProfileCache)
+	if !ok || cache.Spec.ProfileName == "" {
+		return nil
+	}
+	if scope := cache.Spec.ProfileScope; scope != "" && scope != aimv1alpha1.AIMResolutionScopeNamespace {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Namespace: cache.Namespace, Name: cache.Spec.ProfileName},
+	}}
 }

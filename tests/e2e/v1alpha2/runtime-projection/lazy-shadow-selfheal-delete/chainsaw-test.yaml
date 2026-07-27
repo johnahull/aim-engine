@@ -1,0 +1,134 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Lazy shadow self-heals on DELETE of the materialized object.
+#
+# The lazy InferenceService-watch reconciler materializes a complete namespace
+# ServingRuntime (owned by the backing AIMClusterProfile, not the ISVC). Because
+# the shadow is owned by the profile, `.Owns(...)` on this controller would never
+# fire on it; instead the controller `.Watches` the managed shadow SR/ConfigMap
+# and maps a delete back to the consuming ISVC. This test deletes the shadow
+# ServingRuntime and asserts the watch re-materializes it — WITHOUT the
+# InferenceService being recreated or re-applied.
+#
+# No accelerator is involved, so this runs in any cluster (kind or GPU vcluster).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-lazy-shadow-selfheal-delete
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Create the backing cluster profile and bare managed CSR
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - apply:
+            file: managed-runtime.yaml
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-selfheal-delete
+              status:
+                status: Ready
+
+    - name: Apply the native InferenceService referencing the managed runtime
+      try:
+        - apply:
+            file: inference-service.yaml
+
+    - name: Assert the shadow ServingRuntime + ConfigMap are materialized, owned by the profile
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-test-selfheal-delete-ce8a0dc9
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-selfheal-delete
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-selfheal-delete-ce8a0dc9
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-selfheal-delete
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-selfheal-delete
+              spec:
+                (volumes[?configMap.name == 'aim-test-selfheal-delete-ce8a0dc9']):
+                  - name: aim-profile
+
+    - name: Delete the shadow ServingRuntime and assert it re-materializes without touching the ISVC
+      description: |
+        Capture the shadow SR uid and the ISVC uid/generation, delete the shadow
+        SR, then poll until the watch re-materializes it under a NEW uid (proving
+        it was actually recreated, not merely never gone). Finally re-read the
+        ISVC and fail if its uid changed (recreated) or its generation changed
+        (spec re-applied) — the self-heal must reassert the shadow only.
+      try:
+        - script:
+            timeout: 150s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              SR=aim-test-selfheal-delete-ce8a0dc9
+              ISVC=native-selfheal-delete
+
+              OLD_SR_UID=$(kubectl get servingruntime "$SR" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+              OLD_ISVC_UID=$(kubectl get inferenceservice "$ISVC" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+              OLD_ISVC_GEN=$(kubectl get inferenceservice "$ISVC" -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')
+              echo "before: SR uid=$OLD_SR_UID ; ISVC uid=$OLD_ISVC_UID gen=$OLD_ISVC_GEN"
+
+              kubectl delete servingruntime "$SR" -n "$NAMESPACE" --wait=false
+
+              NEW_SR_UID=""
+              for _ in $(seq 1 70); do
+                NEW_SR_UID=$(kubectl get servingruntime "$SR" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+                if [ -n "$NEW_SR_UID" ] && [ "$NEW_SR_UID" != "$OLD_SR_UID" ]; then
+                  break
+                fi
+                sleep 2
+              done
+              if [ -z "$NEW_SR_UID" ] || [ "$NEW_SR_UID" = "$OLD_SR_UID" ]; then
+                echo "ERROR: shadow ServingRuntime was not re-materialized (uid still '$NEW_SR_UID')"
+                exit 1
+              fi
+              echo "after: SR re-materialized with new uid=$NEW_SR_UID"
+
+              NEW_ISVC_UID=$(kubectl get inferenceservice "$ISVC" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+              NEW_ISVC_GEN=$(kubectl get inferenceservice "$ISVC" -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')
+              if [ "$NEW_ISVC_UID" != "$OLD_ISVC_UID" ]; then
+                echo "ERROR: InferenceService was recreated (uid $OLD_ISVC_UID -> $NEW_ISVC_UID)"
+                exit 1
+              fi
+              if [ "$NEW_ISVC_GEN" != "$OLD_ISVC_GEN" ]; then
+                echo "ERROR: InferenceService spec was re-applied (generation $OLD_ISVC_GEN -> $NEW_ISVC_GEN)"
+                exit 1
+              fi
+              echo "OK: shadow re-materialized without touching the InferenceService"
+
+    - name: Assert the re-materialized shadow is complete and still owned by the profile
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-selfheal-delete-ce8a0dc9
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-selfheal-delete
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-selfheal-delete
+              spec:
+                (volumes[?configMap.name == 'aim-test-selfheal-delete-ce8a0dc9']):
+                  - name: aim-profile

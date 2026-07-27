@@ -1,0 +1,105 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Phase D chain (b): eager Exhaustive projection of an AIMProfile into a complete
+# ServingRuntime (+ colocated profile ConfigMap).
+#
+# Apply a deployable, no-accelerator namespace AIMProfile. The profile reconciler
+# (RuntimeProjectionMode=Exhaustive, the operator default) projects a complete
+# ServingRuntime named aim-<profile.Name> plus its colocated ConfigMap of the
+# same name, both owner-ref'd by the profile and force-applied (reserved aim-
+# prefix). The runtime mounts the colocated ConfigMap as the aim-profile volume.
+#
+# No accelerator and no cache/PVC, so this reaches the projection contract in any
+# cluster with no special infrastructure.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-eager-namespace-projection
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Apply the namespace profile and wait for Ready
+      try:
+        - apply:
+            file: profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: test-eager-sr
+              status:
+                status: Ready
+                # The projected per-profile runtime name is published on
+                # status (the deterministic profile→runtime lookup). It equals the
+                # hashed ServingRuntime / ConfigMap name asserted below.
+                projectedRuntimeName: aim-test-eager-sr-638eae33
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+
+    - name: Assert the colocated profile ConfigMap is projected and owner-ref'd
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-test-eager-sr-638eae33
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: test-eager-sr
+                (ownerReferences[?kind == 'AIMProfile']):
+                  - name: test-eager-sr
+              data:
+                (keys(@)):
+                  - vllm-none-bf16-tp0-latency.yaml
+
+    - name: Assert the complete ServingRuntime is projected and owner-ref'd
+      description: |
+        The complete SR is named aim-<profile.Name>, carries the correlator
+        labels, references the profile image with autoSelect off, mounts the
+        colocated profile ConfigMap of the same name as the aim-profile volume,
+        and is owner-ref'd by the AIMProfile for GC.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-eager-sr-638eae33
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: test-eager-sr
+                (ownerReferences[?kind == 'AIMProfile']):
+                  - name: test-eager-sr
+              spec:
+                supportedModelFormats:
+                  - name: huggingface
+                    autoSelect: false
+                containers:
+                  - name: kserve-container
+                    image: registry.example.com/aim-cpu-base:0.12.0
+                (volumes[?configMap.name == 'aim-test-eager-sr-638eae33']):
+                  - name: aim-profile
+
+    - name: Delete the profile and assert the ServingRuntime is garbage-collected
+      try:
+        - delete:
+            ref:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              name: test-eager-sr
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-eager-sr-638eae33

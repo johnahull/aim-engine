@@ -1,0 +1,31 @@
+# A plain, native KServe InferenceService referencing the model-slug primary
+# runtime by its stable, vendor-independent name (aim-<model-slug>) — no
+# AIM-specific spec, no annotations. This is the "native KServe user targets the
+# portable per-model handle" story: the eager projection published only the
+# model-slug ClusterServingRuntime (Reduced mode), which is bare (no colocated
+# ConfigMap), so the lazy watcher must complete it in this consumer namespace.
+#
+# Standard (raw) deployment + external autoscaler render a predictor Deployment
+# directly (the cluster default in this KServe build), so the test can assert on
+# the rendered pod spec without Knative/Serverless in the loop.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: native-slug-consumer
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: external
+spec:
+  predictor:
+    minReplicas: 1
+    model:
+      runtime: aim-lazy-slug-model
+      modelFormat:
+        name: huggingface
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi

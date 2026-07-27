@@ -24,14 +24,14 @@ package aimservice
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	servingv1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
@@ -40,6 +40,7 @@ import (
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 	v1alpha1svc "github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimservice"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
 
 // fetchInferenceService fetches the existing InferenceService for the
@@ -62,10 +63,40 @@ func fetchInferenceService(
 	}, &servingv1beta1.InferenceService{})
 }
 
-// buildInferenceServiceFromProfile constructs a KServe InferenceService from profile data.
-// Name and ConfigMap references come from the precomputed observation so the
-// fetched and planned ISVC are guaranteed to match and the mounted ConfigMap
-// name matches what the ConfigMap builder applies.
+// fetchLegacyProfileConfigMap fetches the pre-ADR-0008 service-owned profile
+// ConfigMap (<service>-profile-<hash>) by its deterministic legacy name. It is
+// present only for services created before the runtime-reference rewrite; a
+// not-found result is the normal case and is left for PlanResources to skip. A
+// name-generation failure is recorded on the FetchResult so it surfaces through
+// the fetch pipeline rather than being silently dropped.
+func fetchLegacyProfileConfigMap(
+	ctx context.Context,
+	c client.Client,
+	service *aimv1alpha1.AIMService,
+) controllerutils.FetchResult[*corev1.ConfigMap] {
+	name, err := legacyProfileConfigMapName(service.Name)
+	if err != nil {
+		return controllerutils.FetchResult[*corev1.ConfigMap]{Error: err}
+	}
+
+	return controllerutils.Fetch(ctx, c, client.ObjectKey{
+		Namespace: service.Namespace,
+		Name:      name,
+	}, &corev1.ConfigMap{})
+}
+
+// buildInferenceServiceFromProfile constructs a KServe InferenceService that
+// references the runtime projected from the resolved profile
+// (aim-<profile.Name>) and overlays only service-specific fields. The inline
+// predictor — image, base resources, affinity, profile ConfigMap, the full
+// profile-derived framework env, and the profile-owned cache mount — lives on
+// the referenced ServingRuntime (projected lazily by the InferenceService-watch
+// reconciler or eagerly by the profile reconcilers), so the service and any
+// native KServe consumer share one serving definition.
+//
+// The overlay carries only service-owned bits: replicas/autoscaling, auth
+// annotations, service-level resource / pull-secret / service-account
+// overrides, and a service-owned (Dedicated) cache.
 func buildInferenceServiceFromProfile(
 	service *aimv1alpha1.AIMService,
 	obs ServiceObservation,
@@ -75,49 +106,21 @@ func buildInferenceServiceFromProfile(
 	if profileSpec == nil || profileStatus == nil {
 		return nil
 	}
-	if obs.isvcName == "" || obs.configMapName == "" {
+	if obs.isvcName == "" {
 		return nil
 	}
 
-	serviceLabelValue, _ := utils.SanitizeLabelValue(service.Name)
-	profileLabelValue, _ := utils.SanitizeLabelValue(obs.profileName)
-
-	labels := map[string]string{
-		constants.LabelK8sComponent: constants.ComponentInference,
-		constants.LabelK8sManagedBy: constants.LabelValueManagedBy,
-		constants.LabelService:      serviceLabelValue,
-		constants.LabelProfile:      profileLabelValue,
+	// The model overlay references the runtime by name and carries only the
+	// service-level resource override; base resources come from the runtime.
+	// KServe merges predictor.model over the runtime container by name with the
+	// ISVC winning, so this override beats the runtime's resources when set.
+	model := &servingv1beta1.ModelSpec{
+		ModelFormat: servingv1beta1.ModelFormat{Name: serving.RuntimeModelFormat},
+		Runtime:     ptr.To(stickyRuntimeName(obs)),
 	}
-
-	if string(profileSpec.Metric) != "" {
-		metricVal, _ := utils.SanitizeLabelValue(string(profileSpec.Metric))
-		labels[constants.LabelMetric] = metricVal
+	if service.Spec.Resources != nil {
+		model.Resources = *service.Spec.Resources
 	}
-	if string(profileSpec.Precision) != "" {
-		precisionVal, _ := utils.SanitizeLabelValue(string(profileSpec.Precision))
-		labels[constants.LabelPrecision] = precisionVal
-	}
-
-	// Propagate auth annotations (cluster-auth/*) from the AIMService, then
-	// stamp the controller-owned model-id from the resolved profile.
-	annotations := utils.FilterAnnotationsByPrefix(service.Annotations, constants.AnnotationPrefixClusterAuth)
-	if modelId := resolvedModelId(profileSpec); modelId != "" {
-		annotations[constants.AnnotationModelId] = modelId
-	}
-
-	// Build environment variables. Order of precedence (last wins on conflict):
-	//   profileSpec.ContainerEnv (author defaults, with any user overrides
-	//     from spec.profileOverrides.containerEnv already merged in by the
-	//     overlay materialisation step in ComposeState)
-	//     -> framework AIM_* vars (controller-owned; user cannot override
-	//        these — AIM_* identity-of-the-profile semantics belong to the
-	//        framework, not to the user)
-	envVars := upsertEnvVars(nil, profileSpec.ContainerEnv)
-	envVars = upsertEnvVars(envVars, buildFrameworkEnvVars(profileSpec, obs.profileYAMLName))
-
-	resources := resolveResourcesFromProfile(service, profileSpec, profileStatus)
-
-	dshmSizeLimit := resource.MustParse(constants.DefaultSharedMemorySize)
 
 	isvc := &servingv1beta1.InferenceService{
 		TypeMeta: metav1.TypeMeta{
@@ -127,51 +130,17 @@ func buildInferenceServiceFromProfile(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        obs.isvcName,
 			Namespace:   service.Namespace,
-			Labels:      labels,
-			Annotations: annotations,
+			Labels:      buildInferenceServiceLabels(service, obs, profileSpec),
+			Annotations: buildInferenceServiceAnnotations(service, obs, profileSpec),
 		},
 		Spec: servingv1beta1.InferenceServiceSpec{
 			Predictor: servingv1beta1.PredictorSpec{
 				PodSpec: servingv1beta1.PodSpec{
-					ImagePullSecrets:   buildPullSecrets(service, profileSpec),
-					ServiceAccountName: resolveServiceAccountName(service, profileSpec),
+					ImagePullSecrets:   utils.CopyPullSecrets(service.Spec.ImagePullSecrets),
+					ServiceAccountName: service.Spec.ServiceAccountName,
 					PriorityClassName:  service.Spec.PriorityClassName,
-					Containers: []corev1.Container{
-						{
-							Name:            constants.ContainerKServe,
-							Image:           profileSpec.Image,
-							ImagePullPolicy: utils.PullPolicyForImage(profileSpec.Image),
-							Env:             envVars,
-							Resources:       resources,
-							Ports: []corev1.ContainerPort{
-								{
-									ContainerPort: constants.DefaultHTTPPort,
-									Name:          "http",
-									Protocol:      corev1.ProtocolTCP,
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      constants.VolumeSharedMemory,
-									MountPath: constants.MountPathSharedMemory,
-								},
-								BuildProfileVolumeMount(profileSpec.AimId),
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: constants.VolumeSharedMemory,
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{
-									Medium:    corev1.StorageMediumMemory,
-									SizeLimit: &dshmSizeLimit,
-								},
-							},
-						},
-						BuildProfileVolume(obs.configMapName),
-					},
 				},
+				Model: model,
 			},
 		},
 	}
@@ -181,15 +150,76 @@ func buildInferenceServiceFromProfile(
 	// and semantics for Spec.Replicas / MinReplicas / MaxReplicas / AutoScaling.
 	v1alpha1svc.ConfigureReplicasAndAutoscaling(isvc, service)
 
-	if profileStatus.ResolvedNodeAffinity != nil {
-		isvc.Spec.Predictor.Affinity = &corev1.Affinity{
-			NodeAffinity: profileStatus.ResolvedNodeAffinity,
-		}
-	}
-
-	addProfileCacheVolumes(isvc, obs)
+	// A service-owned (Dedicated) cache is overlaid onto the referenced runtime;
+	// a profile-owned (Shared) cache is mounted by the runtime itself.
+	addServiceOwnedCacheOverlay(isvc, service, obs)
 
 	return isvc
+}
+
+// stickyRuntimeName returns the runtime name the ISVC should reference. An
+// existing ISVC keeps whatever runtime it already references (sticky), so a
+// projection-mode change never re-rolls a live ISVC; a fresh ISVC references
+// aim-<profile.Name> from the resolved profile.
+func stickyRuntimeName(obs ServiceObservation) string {
+	if existing := obs.inferenceService.Value; existing != nil &&
+		existing.Spec.Predictor.Model != nil &&
+		existing.Spec.Predictor.Model.Runtime != nil &&
+		*existing.Spec.Predictor.Model.Runtime != "" {
+		return *existing.Spec.Predictor.Model.Runtime
+	}
+	return serving.RuntimeName(obs.profileName)
+}
+
+// buildInferenceServiceLabels builds the correlator labels stamped on the
+// overlay ISVC so it can be traced back to its service and profile.
+func buildInferenceServiceLabels(
+	service *aimv1alpha1.AIMService,
+	obs ServiceObservation,
+	profileSpec *aimv1alpha2.AIMProfileSpecCommon,
+) map[string]string {
+	serviceLabelValue, _ := utils.SanitizeLabelValue(service.Name)
+	profileLabelValue, _ := utils.SanitizeLabelValue(obs.profileName)
+
+	labels := map[string]string{
+		constants.LabelK8sComponent: constants.ComponentInference,
+		constants.LabelK8sManagedBy: constants.LabelValueManagedBy,
+		constants.LabelService:      serviceLabelValue,
+		constants.LabelProfile:      profileLabelValue,
+	}
+	if string(profileSpec.Metric) != "" {
+		metricVal, _ := utils.SanitizeLabelValue(string(profileSpec.Metric))
+		labels[constants.LabelMetric] = metricVal
+	}
+	if string(profileSpec.Precision) != "" {
+		precisionVal, _ := utils.SanitizeLabelValue(string(profileSpec.Precision))
+		labels[constants.LabelPrecision] = precisionVal
+	}
+	return labels
+}
+
+// buildInferenceServiceAnnotations propagates auth annotations (cluster-auth/*),
+// stamps the controller-owned model-id, and records the backing profile name so
+// the lazy runtime-projection watcher can resolve and materialize the runtime in
+// the service's namespace before it exists (the fast-path for a runtime not yet
+// created). Stamped for BOTH scopes: a cluster profile is the cross-scope case,
+// and a namespace profile needs it in Reduced mode, where no eager per-profile
+// runtime exists and the watcher resolves the namespace AIMProfile in the
+// service's namespace from this annotation. The native managed-CSR flow still
+// needs no annotation.
+func buildInferenceServiceAnnotations(
+	service *aimv1alpha1.AIMService,
+	obs ServiceObservation,
+	profileSpec *aimv1alpha2.AIMProfileSpecCommon,
+) map[string]string {
+	annotations := utils.FilterAnnotationsByPrefix(service.Annotations, constants.AnnotationPrefixClusterAuth)
+	if modelId := resolvedModelId(profileSpec); modelId != "" {
+		annotations[constants.AnnotationModelId] = modelId
+	}
+	if obs.profileName != "" {
+		annotations[constants.AnnotationRuntimeProfile] = obs.profileName
+	}
+	return annotations
 }
 
 // upsertEnvVars returns base with overrides applied: for each entry in overrides,
@@ -214,24 +244,35 @@ func upsertEnvVars(base, overrides []corev1.EnvVar) []corev1.EnvVar {
 	return result
 }
 
-// addProfileCacheVolumes adds resolved artifact PVC volumes from the profile cache to the ISVC.
-func addProfileCacheVolumes(isvc *servingv1beta1.InferenceService, obs ServiceObservation) {
-	if len(isvc.Spec.Predictor.Containers) == 0 {
+// addServiceOwnedCacheOverlay overlays a service-owned cache onto the referenced
+// runtime: the PVC volume(s), the volume mount(s) on the model container, and
+// the framework redirect env that points model loading at the local cache. The
+// env overrides the runtime container env by name (KServe merges predictor.model
+// over the runtime container with the ISVC winning).
+//
+// Only a service-owned (Dedicated) cache is overlaid here. A Shared cache is
+// profile-owned and mounted by the runtime itself, so overlaying it would
+// duplicate the runtime's volume and is skipped.
+func addServiceOwnedCacheOverlay(
+	isvc *servingv1beta1.InferenceService,
+	service *aimv1alpha1.AIMService,
+	obs ServiceObservation,
+) {
+	if service.Spec.GetCachingMode() != aimv1alpha1.CachingModeDedicated {
 		return
 	}
-
 	if !obs.profileCacheReady || obs.profileCache.Value == nil {
 		return
 	}
+	model := isvc.Spec.Predictor.Model
+	if model == nil {
+		return
+	}
 
-	container := &isvc.Spec.Predictor.Containers[0]
-	for _, resolved := range obs.profileCache.Value.Status.Artifacts {
-		if resolved.Status != constants.AIMStatusReady || resolved.PersistentVolumeClaim == "" {
-			continue
-		}
+	model.Env = upsertEnvVars(model.Env, buildFrameworkEnvVars(obs.resolvedProfileSpec, obs.profileYAMLName))
 
-		volumeName := utils.MakeRFC1123Compliant(resolved.Name)
-		volumeName = strings.ReplaceAll(volumeName, ".", "-")
+	for _, resolved := range sortedReadyArtifacts(obs.profileCache.Value) {
+		volumeName := strings.ReplaceAll(utils.MakeRFC1123Compliant(resolved.Name), ".", "-")
 
 		isvc.Spec.Predictor.Volumes = append(isvc.Spec.Predictor.Volumes, corev1.Volume{
 			Name: volumeName,
@@ -251,58 +292,40 @@ func addProfileCacheVolumes(isvc *servingv1beta1.InferenceService, obs ServiceOb
 			mountPath = filepath.Join(constants.AIMCacheBasePath, safeModelName)
 		}
 
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		model.VolumeMounts = append(model.VolumeMounts, corev1.VolumeMount{
 			Name:      volumeName,
 			MountPath: mountPath,
 		})
 	}
 }
 
-// buildFrameworkEnvVars returns the operator-managed environment variables
-// that must be present on the predictor container for the AIM runtime to
-// locate the projected profile and, when model caching is active, to redirect
-// model loading to the PVC-backed local path.
-//
-// These vars are framework-owned: neither profile.ContainerEnv nor user
-// spec.profileOverrides.containerEnv can override them. The AIMService
-// reconciler layers them on top of the resolved profile's containerEnv (which
-// already carries user overrides via the materialised overlay AIMProfile), so
-// AIM_* identity vars cannot be reshaped from outside the controller.
+// sortedReadyArtifacts returns the cache's ready, PVC-backed artifacts in name
+// order so the overlay is deterministic (stable SSA, stable tests).
+func sortedReadyArtifacts(cache *aimv1alpha2.AIMProfileCache) []aimv1alpha1.AIMResolvedArtifact {
+	names := make([]string, 0, len(cache.Status.Artifacts))
+	for name := range cache.Status.Artifacts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]aimv1alpha1.AIMResolvedArtifact, 0, len(names))
+	for _, name := range names {
+		resolved := cache.Status.Artifacts[name]
+		if resolved.Status != constants.AIMStatusReady || resolved.PersistentVolumeClaim == "" {
+			continue
+		}
+		out = append(out, resolved)
+	}
+	return out
+}
+
+// buildFrameworkEnvVars returns the operator-managed AIM_* environment that
+// locates the projected profile (and redirects model loading when caching is
+// active). It is purely profile-derived, so the implementation lives on the
+// shared serving builder; the AIMService reconciler layers it on top of the
+// resolved profile's containerEnv so users cannot reshape AIM_* identity vars.
 func buildFrameworkEnvVars(profileSpec *aimv1alpha2.AIMProfileSpecCommon, profileYAMLFilename string) []corev1.EnvVar {
-	profileName := strings.TrimSuffix(profileYAMLFilename, ".yaml")
-	aimProfileID := fmt.Sprintf("custom/%s/%s", profileSpec.AimId, profileName)
-
-	// AIM_PROFILE_ID points the runtime at the operator-assembled profile mounted
-	// under /workspace/aim-runtime/profiles/custom/<aimId>/<name>.
-	vars := []corev1.EnvVar{
-		{Name: constants.EnvAIMProfileID, Value: aimProfileID},
-	}
-
-	// When the profile declares modelSources, the AIMProfileCache has populated
-	// a PVC that we mount at /workspace/cache/<modelId>. AIM_CACHE_PATH and
-	// AIM_MODEL_ID tell the runtime to redirect --model to that local path
-	// instead of pulling from HuggingFace Hub.
-	//
-	// The aim-runtime enforces `AIM_ID` and `AIM_MODEL_ID` as mutually exclusive
-	// (one picks an image-embedded family profile, the other redirects the model
-	// location). AIM_PROFILE_ID alone is sufficient to locate the custom profile,
-	// so we only set AIM_ID when we are NOT redirecting the model. Per-AIM images
-	// also bake `ENV AIM_ID=...` into the container so they can run standalone;
-	// we explicitly clobber it to the empty string when we set AIM_MODEL_ID to
-	// avoid the runtime's mutual-exclusivity check rejecting the pod.
-	if len(profileSpec.ModelSources) > 0 {
-		vars = append(vars,
-			corev1.EnvVar{Name: constants.EnvAIMID, Value: ""},
-			corev1.EnvVar{Name: constants.EnvAIMCachePath, Value: constants.AIMCacheBasePath},
-			corev1.EnvVar{Name: constants.EnvAIMModelID, Value: profileSpec.ModelSources[0].ModelID},
-		)
-	} else {
-		vars = append(vars,
-			corev1.EnvVar{Name: constants.EnvAIMID, Value: profileSpec.AimId},
-		)
-	}
-
-	return vars
+	return serving.BuildFrameworkEnvVars(profileSpec, profileYAMLFilename)
 }
 
 // resolveEffectiveResourcesFromProfile returns the fully-merged predictor
@@ -353,18 +376,4 @@ func resolveResourcesFromProfile(
 	}
 
 	return corev1.ResourceRequirements{}
-}
-
-func buildPullSecrets(service *aimv1alpha1.AIMService, profileSpec *aimv1alpha2.AIMProfileSpecCommon) []corev1.LocalObjectReference {
-	if len(service.Spec.ImagePullSecrets) > 0 {
-		return utils.CopyPullSecrets(service.Spec.ImagePullSecrets)
-	}
-	return utils.CopyPullSecrets(profileSpec.ImagePullSecrets)
-}
-
-func resolveServiceAccountName(service *aimv1alpha1.AIMService, profileSpec *aimv1alpha2.AIMProfileSpecCommon) string {
-	if service.Spec.ServiceAccountName != "" {
-		return service.Spec.ServiceAccountName
-	}
-	return profileSpec.ServiceAccountName
 }

@@ -40,6 +40,10 @@ The two modes are mutually exclusive — the controller doesn't mix them in a si
 
 Cache-backed mode is mainly used by `AIMModel.spec.profiles.derivedFrom.sourceRef` when the source is an image's discovery output rather than already-materialised profiles. For standalone use, you'll almost always omit `sourceRef`.
 
+:::{note}
+**Editing a user pre-populated `sourceRef` catalog is not reactive.** The operator watches the ConfigMaps it manages (including discovery caches published by an `AIMModel`), so those changes reconcile the profile set immediately. A catalog `ConfigMap` you create and maintain yourself is read on demand but not live-watched — edits are picked up on the profile set's next reconcile. To apply an edit promptly, re-apply or re-annotate the `AIMProfileSet` / `AIMClusterProfileSet` to trigger a reconcile.
+:::
+
 ## Selector
 
 `spec.selector` chooses candidates from the source pool. At least one matching field must be set (validated by CRD CEL).

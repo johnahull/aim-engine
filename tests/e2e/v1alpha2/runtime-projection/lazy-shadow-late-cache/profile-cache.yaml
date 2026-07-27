@@ -1,0 +1,37 @@
+# A profile-owned (Shared), cluster-scoped AIMProfileCache for the backing
+# cluster profile, colocated in the consumer's namespace. Frozen to Ready with a
+# resolved artifact (PVC + mount point) via apply-with-status.sh, and paused so
+# the AIMProfileCache controller does not overwrite the status. Only a Ready,
+# Shared, Cluster-scope cache for this profile contributes the cache mount to the
+# lazily-materialized ServingRuntime, so all four fields matter.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfileCache
+metadata:
+  name: test-late-cache-cache
+  annotations:
+    aim.eai.amd.com/reconciliation-paused: "true"
+spec:
+  profileName: test-late-cache
+  profileScope: Cluster
+  mode: Shared
+status:
+  status: Ready
+  conditions:
+    - type: ProfileFound
+      status: "True"
+      reason: ProfileResolved
+      message: Profile resolved
+      lastTransitionTime: "2025-01-01T00:00:00Z"
+    - type: ArtifactsReady
+      status: "True"
+      reason: AllCachesReady
+      message: All artifacts are ready
+      lastTransitionTime: "2025-01-01T00:00:00Z"
+  artifacts:
+    late-cache-weights:
+      uid: "00000000-0000-0000-0000-0000000c4c4e"
+      name: late-cache-weights
+      model: Qwen/Qwen3-0.6B
+      status: Ready
+      persistentVolumeClaim: late-cache-weights-pvc
+      mountPoint: /workspace/cache/Qwen/Qwen3-0.6B

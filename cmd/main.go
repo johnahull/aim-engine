@@ -40,10 +40,14 @@ import (
 
 	kservev1alpha1 "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	kservev1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -54,6 +58,7 @@ import (
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
+	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -87,6 +92,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var runtimeProjectionModeFlag string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -105,6 +111,11 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&runtimeProjectionModeFlag, "runtime-projection-mode", string(aimv1alpha2.RuntimeProjectionModeDefault),
+		"Eager runtime projection mode driven by the profile reconcilers: "+
+			"Exhaustive (one runtime per projectable profile, autoSelect off), Reduced (one model-slug "+
+			"primary per model, autoSelect on), or Both. The lazy InferenceService-watch projection is "+
+			"always on and not governed by this knob.")
 	opts := zap.Options{
 		Development: false,
 		// Disable stack traces for errors - they're noisy for expected infrastructure errors.
@@ -115,6 +126,15 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Resolve the eager runtime projection mode once at startup so a typo fails
+	// loudly here rather than silently disabling projection later.
+	runtimeProjectionMode, err := aimv1alpha2.ParseRuntimeProjectionMode(runtimeProjectionModeFlag)
+	if err != nil {
+		setupLog.Error(err, "invalid --runtime-projection-mode")
+		os.Exit(1)
+	}
+	setupLog.Info("runtime projection configured", "mode", runtimeProjectionMode)
 
 	// Install-time override for the artifact-downloader image. The binary bakes
 	// in the public docker.io/amdenterpriseai mirror at build time (via LDFLAGS),
@@ -227,8 +247,29 @@ func main() {
 	})
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
+		Scheme:  scheme,
+		Metrics: metricsServerOptions,
+		// Scope the shared ConfigMap informer to AIM-managed objects. Without
+		// this the cache lists/watches every ConfigMap in the cluster — a real
+		// memory / watch-traffic cost — even though the operator only ever needs
+		// its own (discovery caches, projected runtime shadows, custom-profile
+		// and profile ConfigMaps all carry managed-by=aim-engine). The two reads
+		// that can legitimately target an unlabeled ConfigMap — a user
+		// pre-populated AIMProfileSet sourceRef catalog and a hand-authored
+		// runtime's colocated ConfigMap — go through the uncached APIReader
+		// instead (see LoadDiscoveryCatalog and namespaceRuntimeComplete). A
+		// user pre-populated sourceRef catalog is therefore still read on demand,
+		// but its edits are only picked up on the next reconcile rather than via
+		// a live watch — acceptable for a user-managed input.
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.ConfigMap{}: {
+					Label: labels.SelectorFromSet(labels.Set{
+						constants.LabelK8sManagedBy: constants.LabelValueManagedBy,
+					}),
+				},
+			},
+		},
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
@@ -312,17 +353,19 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&v1alpha2controller.AIMProfileReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		Clientset: clientset,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		Clientset:      clientset,
+		ProjectionMode: runtimeProjectionMode,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AIMProfile")
 		os.Exit(1)
 	}
 	if err := (&v1alpha2controller.AIMClusterProfileReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		Clientset: clientset,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		Clientset:      clientset,
+		ProjectionMode: runtimeProjectionMode,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AIMClusterProfile")
 		os.Exit(1)
@@ -365,6 +408,14 @@ func main() {
 		Clientset: clientset,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AIMClusterProfileSet")
+		os.Exit(1)
+	}
+	if err := (&v1alpha2controller.InferenceServiceRuntimeReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Clientset: clientset,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "InferenceServiceRuntimeProjection")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

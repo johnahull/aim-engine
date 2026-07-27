@@ -1,0 +1,24 @@
+# A plain, native KServe InferenceService referencing the managed runtime by
+# name — no AIM-specific spec, no annotations. The lazy watcher materializes the
+# complete namespace ServingRuntime (+ colocated profile ConfigMap) for it.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: native-selfheal-drift
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: external
+spec:
+  predictor:
+    minReplicas: 1
+    model:
+      runtime: aim-test-selfheal-drift-a41c39a9
+      modelFormat:
+        name: huggingface
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi

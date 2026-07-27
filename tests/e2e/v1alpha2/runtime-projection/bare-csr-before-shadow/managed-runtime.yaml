@@ -1,0 +1,48 @@
+# A bare, managed ClusterServingRuntime standing in for the eager cluster
+# projection (serving.BuildClusterServingRuntime), named with the hashed
+# per-profile runtime name (serving.RuntimeName("test-bare-csr") =
+# aim-test-bare-csr-899eadd9). Unlike the lazy-shadow fixture's CSR, this one
+# reproduces the hazard exactly: it carries the FULL profile-derived
+# framework env — including AIM_PROFILE_ID pointing at
+# /workspace/aim-runtime/profiles/custom/Qwen/Qwen3-0.6B/vllm-none-bf16-tp0-latency.yaml
+# — but NO colocated profile ConfigMap and NO profile volume/mount (a cluster
+# runtime cannot guarantee a namespaced ConfigMap in an arbitrary consumer
+# namespace). So the AIM_PROFILE_ID it carries dangles: the file it names exists
+# only once the lazy watcher materializes the namespace shadow (+ ConfigMap).
+#
+# The managed-by + profile correlator labels let the lazy watcher follow the CSR
+# back to its backing AIMClusterProfile (the native, annotation-free path).
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: aim-test-bare-csr-899eadd9
+  labels:
+    app.kubernetes.io/managed-by: aim-engine
+    app.kubernetes.io/component: inference
+    aim.eai.amd.com/profile: test-bare-csr
+spec:
+  supportedModelFormats:
+    - name: huggingface
+      autoSelect: false
+  protocolVersions:
+    - v2
+  containers:
+    - name: kserve-container
+      image: registry.example.com/aim-cpu-base:0.12.0
+      # Full framework env as BuildClusterServingRuntime emits for a
+      # modelSources profile: the profile id dangles (no ConfigMap here) and the
+      # cache-redirect vars are set. This is the "dangling AIM_PROFILE_ID" the
+      # lazy shadow must satisfy.
+      env:
+        - name: AIM_PROFILE_ID
+          value: custom/Qwen/Qwen3-0.6B/vllm-none-bf16-tp0-latency
+        - name: AIM_ID
+          value: ""
+        - name: AIM_CACHE_PATH
+          value: /workspace/cache
+        - name: AIM_MODEL_ID
+          value: Qwen/Qwen3-0.6B
+      ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP

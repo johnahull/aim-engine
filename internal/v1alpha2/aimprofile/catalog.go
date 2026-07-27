@@ -280,10 +280,13 @@ func dedupCatalogItems(items []DiscoveryCatalogItem, aimID string) []DiscoveryCa
 }
 
 // LoadDiscoveryCatalog fetches a discovery cache ConfigMap by ProfileSourceRef and
-// parses it into a DiscoveryCatalog.
-func LoadDiscoveryCatalog(ctx context.Context, c client.Client, ref aimv1alpha1.ProfileSourceRef, namespace string) (*corev1.ConfigMap, *DiscoveryCatalog, error) {
+// parses it into a DiscoveryCatalog. It takes a client.Reader (not a full Client)
+// because a sourceRef may point at a user pre-populated ConfigMap that carries no
+// managed-by label and so is absent from the label-scoped cache — callers pass
+// the uncached APIReader for this read.
+func LoadDiscoveryCatalog(ctx context.Context, r client.Reader, ref aimv1alpha1.ProfileSourceRef, namespace string) (*corev1.ConfigMap, *DiscoveryCatalog, error) {
 	var configMap corev1.ConfigMap
-	if err := c.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: namespace}, &configMap); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: namespace}, &configMap); err != nil {
 		return nil, nil, err
 	}
 	catalog, err := ParseDiscoveryCatalog(&configMap)

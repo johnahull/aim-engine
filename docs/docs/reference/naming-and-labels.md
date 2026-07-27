@@ -92,6 +92,32 @@ The `source-model` and `source-model-scope` labels are derived from controller o
 | `aim.eai.amd.com/gpu.model` | `MI300X`, `MI325X`, … | GPU model |
 | `aim.eai.amd.com/gpu.count` | `"1"`, `"4"` | GPU count |
 
+### Projected runtime metadata
+
+Stamped on every projected KServe `ServingRuntime` / `ClusterServingRuntime` (and its colocated profile `ConfigMap`) so a native / bring-your-own-KServe consumer can trace and inspect the runtime without reversing its hashed object name. See [Bring Your Own KServe](../guides/bring-your-own-kserve.md).
+
+Per-profile runtimes are named `aim-<truncated-profile>-<hash>` (hashed, not reversible); the Reduced/Both model-slug primary is named `aim-<model-slug>` (readable, `autoSelect` on). The `aim-` prefix is **reserved** for AIM Engine — do not hand-author objects under it.
+
+| Label | Value | Purpose |
+|---|---|---|
+| `aim.eai.amd.com/profile` | Sanitized backing profile name | Correlator back to the profile (selectable) |
+| `aim.eai.amd.com/model` | Sanitized model slug | Filter runtimes by the model they serve |
+| `aim.eai.amd.com/precision` | `fp8`, `fp16`, … | Filter by numeric precision |
+| `aim.eai.amd.com/accelerator-class` | `MI300X`, … | Filter by accelerator class |
+| `aim.eai.amd.com/runtime-projection` | `eager`, `lazy` | How it was materialized — `eager` (by the profile) or `lazy` (shadow via InferenceService watch). Provenance, not health |
+| `aim.eai.amd.com/runtime-projection-state` | `projected` | Projection **health** surfaced on the runtime object. `projected` is the only value stamped; the degraded transition is reported on the profile's [`RuntimeProjected`](conditions.md#runtimeprojected) condition, not this label |
+
+| Annotation | Value | Purpose |
+|---|---|---|
+| `aim.eai.amd.com/projected.profile` | Untruncated backing profile name | Recover the identity the hashed object name hides |
+| `aim.eai.amd.com/projected.aim-id` | Backing profile `aimId` | Model architecture identifier |
+| `aim.eai.amd.com/projected.model-id` | Backing profile `modelId` | Served model id |
+| `aim.eai.amd.com/projected.precision` | Backing profile precision | — |
+| `aim.eai.amd.com/projected.metric` | Backing profile metric | — |
+| `aim.eai.amd.com/runtime-projection-message` | Human-readable note | Companion to `runtime-projection-state`; points to the profile's `RuntimeProjected` condition |
+
+A projected runtime also carries an owner reference to its backing `AIMProfile` / `AIMClusterProfile`, which is what garbage-collects it when the profile is deleted.
+
 ### Cache labels
 
 | Label | Value | Purpose |
@@ -182,6 +208,14 @@ kubectl get inferenceservice -l aim.eai.amd.com/service.name=qwen-chat -n <names
 
 ```bash
 kubectl get aimartifact -l aim.eai.amd.com/profile-cache.name=<cache-name> -n <namespace>
+```
+
+### Find projected runtimes for a model (with their projection state)
+
+```bash
+kubectl get clusterservingruntime \
+  -l aim.eai.amd.com/model=qwen-qwen3-32b \
+  -L aim.eai.amd.com/runtime-projection-state,aim.eai.amd.com/runtime-projection
 ```
 
 ### Find discovery jobs for a model

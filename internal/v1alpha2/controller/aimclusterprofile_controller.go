@@ -25,6 +25,7 @@ package controller
 import (
 	"context"
 
+	kservev1alpha1 "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -54,6 +55,9 @@ type AIMClusterProfileReconciler struct {
 	Recorder  record.EventRecorder
 	Clientset kubernetes.Interface
 
+	// ProjectionMode governs eager ClusterServingRuntime projection.
+	ProjectionMode aimv1alpha2.RuntimeProjectionMode
+
 	reconciler controllerutils.DomainReconciler[
 		*aimv1alpha2.AIMClusterProfile,
 		*aimv1alpha2.AIMProfileStatus,
@@ -71,6 +75,7 @@ type AIMClusterProfileReconciler struct {
 // +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimclusterprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimclusterprofiles/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimclusterprofiles/finalizers,verbs=update
+// +kubebuilder:rbac:groups=serving.kserve.io,resources=clusterservingruntimes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -96,8 +101,9 @@ func (r *AIMClusterProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ctx := context.Background()
 
 	r.reconciler = &aimprofile.ClusterProfileReconciler{
-		Client: mgr.GetClient(),
-		Scheme: r.Scheme,
+		Client:         mgr.GetClient(),
+		Scheme:         r.Scheme,
+		ProjectionMode: r.ProjectionMode,
 	}
 
 	r.pipeline = controllerutils.Pipeline[
@@ -159,6 +165,9 @@ func (r *AIMClusterProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&aimv1alpha2.AIMClusterProfile{}).
+		// Own the projected ClusterServingRuntime so drift (hand-edits) and
+		// node-inventory changes (via the Node watch) self-heal through reconcile.
+		Owns(&kservev1alpha1.ClusterServingRuntime{}).
 		Watches(&corev1.Node{}, nodeHandler, builder.WithPredicates(utils.NodeGPUChangePredicate())).
 		Named(clusterProfileControllerName).
 		Complete(r)

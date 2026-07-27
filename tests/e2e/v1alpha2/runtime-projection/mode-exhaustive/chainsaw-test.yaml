@@ -1,0 +1,98 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Projection-mode smoke (Exhaustive). Locks the eager output of the profile
+# reconcilers when the operator runs with --runtime-projection-mode=Exhaustive
+# (the operator default, so this test runs in the DEFAULT chainsaw lane — no
+# `requires` gate). Exhaustive projects one runtime PER projectable profile,
+# named aim-<profile.Name> with autoSelect off, and does NOT publish the
+# model-slug primary runtime.
+#
+# Assertions (in order, so the absence check never races the reconcile):
+#   1. per-profile CSR aim-mode-exhaustive-primary-909716e1 present (autoSelect: false),
+#   2. model-slug CSR aim-mode-test-exhaustive absent,
+#   3. per-profile CSR garbage-collected on profile delete.
+#
+# Its Reduced sibling asserts the complementary shape and is gated
+# `requires: reduced-mode` so it stays out of this default lane.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-mode-exhaustive
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Apply the primary cluster profile and wait for Ready
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: mode-exhaustive-primary
+              status:
+                status: Ready
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+
+    - name: Assert the per-profile ClusterServingRuntime is projected (Exhaustive)
+      description: |
+        Exhaustive names the runtime aim-<profile.Name>, carries the correlator
+        labels, references the profile image, and leaves autoSelect off so
+        native KServe auto-selection is never made ambiguous by N per-profile
+        runtimes claiming the same model format.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-exhaustive-primary-909716e1
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: mode-exhaustive-primary
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: mode-exhaustive-primary
+              spec:
+                supportedModelFormats:
+                  - name: huggingface
+                    autoSelect: false
+                containers:
+                  - name: kserve-container
+                    image: registry.example.com/aim-cpu-base:0.12.0
+
+    - name: Assert NO model-slug ClusterServingRuntime exists in Exhaustive mode
+      description: |
+        The model-slug primary (aim-<model-slug>, derived from spec.aimId) is a
+        Reduced-mode artifact. Exhaustive must not publish it. The per-profile
+        assertion above already proved the reconcile ran, so the model-slug
+        runtime is definitively absent, not merely not-yet-created.
+      try:
+        - error:
+            timeout: 30s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-test-exhaustive
+
+    - name: Delete the profile and assert the per-profile runtime is garbage-collected
+      try:
+        - delete:
+            ref:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              name: mode-exhaustive-primary
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-exhaustive-primary-909716e1

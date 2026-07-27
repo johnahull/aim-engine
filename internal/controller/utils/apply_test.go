@@ -203,6 +203,59 @@ func TestApplyControllerLabelsToResult(t *testing.T) {
 	}
 }
 
+// TestApplyControllerLabelsToResult_ForceBucket verifies the force-apply bucket
+// receives the same controller labels as the regular owned bucket, so an object
+// queued via ApplyWithForce is not left without managed-by/correlator labels.
+func TestApplyControllerLabelsToResult_ForceBucket(t *testing.T) {
+	planResult := &PlanResult{}
+	planResult.ApplyWithForce(&corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "forced-service"},
+	})
+
+	labels := map[string]string{"app.kubernetes.io/managed-by": "test-controller"}
+	ApplyControllerLabelsToResult(planResult, labels)
+
+	got := planResult.GetToApplyWithForce()
+	if len(got) != 1 {
+		t.Fatalf("force bucket length = %d, want 1", len(got))
+	}
+	if v := got[0].GetLabels()["app.kubernetes.io/managed-by"]; v != "test-controller" {
+		t.Errorf("force-bucket object missing controller label, got %q", v)
+	}
+}
+
+// TestPropagateLabelsForResult_ForceBucket verifies parent labels propagate to
+// objects in the force-apply bucket, matching the other apply buckets.
+func TestPropagateLabelsForResult_ForceBucket(t *testing.T) {
+	parent := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Labels: map[string]string{"team": testLabelValueAlpha}},
+	}
+	planResult := &PlanResult{}
+	planResult.ApplyWithForce(&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "forced"}})
+
+	PropagateLabelsForResult(parent, planResult, &LabelPropagationSettings{Enabled: true, Match: []string{"team"}})
+
+	if v := planResult.GetToApplyWithForce()[0].GetLabels()["team"]; v != testLabelValueAlpha {
+		t.Errorf("force-bucket object missing propagated label, got %q", v)
+	}
+}
+
+// TestPlanResult_MergeCarriesForceBucket guards that composite reconcilers that
+// merge sub-plans do not silently drop force-apply objects.
+func TestPlanResult_MergeCarriesForceBucket(t *testing.T) {
+	base := PlanResult{}
+	base.ApplyWithForce(&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "a"}})
+
+	other := PlanResult{}
+	other.ApplyWithForce(&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "b"}})
+
+	base.Merge(other)
+
+	if got := len(base.GetToApplyWithForce()); got != 2 {
+		t.Fatalf("merged force bucket length = %d, want 2", got)
+	}
+}
+
 func TestApplyControllerLabels_EmptyLabels(t *testing.T) {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{

@@ -1,0 +1,26 @@
+# Backing namespace profile for the eager Exhaustive projection (chain b). No
+# accelerator fields, so it has no hardware requirement and reaches Ready in any
+# cluster. Deployable: aimId + modelSources are both set, so it is projectable
+# and the AIMProfile reconciler eagerly projects a complete ServingRuntime named
+# aim-test-eager-sr-<hash> (prefix-reserved truncate+hash of the
+# profile name; see status.projectedRuntimeName) plus its colocated profile
+# ConfigMap of the same name, owner-ref'd by this profile.
+#
+# The image is a placeholder (registry.example.com): chain (b) asserts the
+# projection contract (complete SR + ConfigMap, labels, owner ref), not that a
+# pod serves.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: test-eager-sr
+spec:
+  aimId: Qwen/Qwen3-0.6B
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B

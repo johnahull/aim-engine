@@ -384,7 +384,10 @@ spec:
         The whole point of adapterMode: the read-only /adapters mount and the
         AIM_ADAPTER_SOURCE env are immutable startup properties of the pod, keyed
         on adapter mode rather than the (now empty) adapter list — so dropping to
-        zero adapters leaves the InferenceService mount untouched.
+        zero adapters leaves the InferenceService mount untouched. Post slice-06
+        the overlay references a runtime via predictor.model (no inline
+        containers), so the adapter mount and AIM_ADAPTER_SOURCE env land on the
+        model container.
       try:
         - assert:
             timeout: 60s
@@ -396,12 +399,11 @@ spec:
                   aim.eai.amd.com/service: adapters-dynamic-service
               spec:
                 predictor:
-                  containers:
-                    - name: kserve-container
-                      (volumeMounts[?mountPath == '/adapters']):
-                        - readOnly: true
-                      (env[?name == 'AIM_ADAPTER_SOURCE']):
-                        - value: /adapters
+                  model:
+                    (volumeMounts[?mountPath == '/adapters']):
+                      - readOnly: true
+                    (env[?name == 'AIM_ADAPTER_SOURCE']):
+                      - value: /adapters
 
     - name: Verify the service subtree has no adapter directories left
       try:

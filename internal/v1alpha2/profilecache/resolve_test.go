@@ -1,0 +1,179 @@
+// MIT License
+//
+// Copyright (c) 2025 Advanced Micro Devices, Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+package profilecache
+
+import (
+	"context"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
+	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
+	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+)
+
+const testNamespace = "team-a"
+
+func newScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		aimv1alpha1.AddToScheme,
+		aimv1alpha2.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			t.Fatalf("AddToScheme() error = %v", err)
+		}
+	}
+	return scheme
+}
+
+// cache builds an AIMProfileCache with the given identity and status. The object
+// name is intentionally decoupled from profileName so tests can pin that a
+// service-driven Shared cache (hashed name) still resolves by profileName.
+func cache(name, profileName string, scope aimv1alpha1.AIMResolutionScope, mode aimv1alpha2.AIMProfileCacheMode, status constants.AIMStatus) *aimv1alpha2.AIMProfileCache {
+	return &aimv1alpha2.AIMProfileCache{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Spec: aimv1alpha2.AIMProfileCacheSpec{
+			ProfileName:  profileName,
+			ProfileScope: scope,
+			Mode:         mode,
+		},
+		Status: aimv1alpha2.AIMProfileCacheStatus{Status: status},
+	}
+}
+
+func newClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).Build()
+}
+
+func TestFindReadyShared(t *testing.T) {
+	t.Parallel()
+
+	const profile = "qwen3-32b-mi300x"
+	ns := aimv1alpha1.AIMResolutionScopeNamespace
+	cl := aimv1alpha1.AIMResolutionScopeCluster
+	shared := aimv1alpha2.ProfileCacheModeShared
+	dedicated := aimv1alpha2.ProfileCacheModeDedicated
+
+	cases := []struct {
+		name       string
+		objs       []client.Object
+		queryScope aimv1alpha1.AIMResolutionScope
+		wantName   string // "" means expect nil
+	}{
+		{
+			// The service-driven Shared cache carries a hashed object name, not
+			// the profile name — it must still resolve by spec.profileName. This
+			// is the core of the mode-independent-mount fix.
+			name:       "service-driven shared cache (hashed name) resolves",
+			objs:       []client.Object{cache(profile+"-cache-fe2d5ebc", profile, ns, shared, constants.AIMStatusReady)},
+			queryScope: ns,
+			wantName:   profile + "-cache-fe2d5ebc",
+		},
+		{
+			name:       "profile-owned shared cache (named after profile) resolves",
+			objs:       []client.Object{cache(profile, profile, ns, shared, constants.AIMStatusReady)},
+			queryScope: ns,
+			wantName:   profile,
+		},
+		{
+			name:       "dedicated cache is never returned",
+			objs:       []client.Object{cache(profile+"-svc-cache", profile, ns, dedicated, constants.AIMStatusReady)},
+			queryScope: ns,
+			wantName:   "",
+		},
+		{
+			name:       "non-ready cache is skipped",
+			objs:       []client.Object{cache(profile+"-cache", profile, ns, shared, constants.AIMStatusPending)},
+			queryScope: ns,
+			wantName:   "",
+		},
+		{
+			name:       "different profile is skipped",
+			objs:       []client.Object{cache("other-cache", "other-profile", ns, shared, constants.AIMStatusReady)},
+			queryScope: ns,
+			wantName:   "",
+		},
+		{
+			name:       "empty cache scope is treated as Namespace",
+			objs:       []client.Object{cache(profile+"-cache", profile, "", shared, constants.AIMStatusReady)},
+			queryScope: ns,
+			wantName:   profile + "-cache",
+		},
+		{
+			name:       "cluster query does not match a namespace-scope cache",
+			objs:       []client.Object{cache(profile+"-cache", profile, ns, shared, constants.AIMStatusReady)},
+			queryScope: cl,
+			wantName:   "",
+		},
+		{
+			name:       "cluster query matches a cluster-scope cache",
+			objs:       []client.Object{cache(profile+"-cache", profile, cl, shared, constants.AIMStatusReady)},
+			queryScope: cl,
+			wantName:   profile + "-cache",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newClient(t, tc.objs...)
+			got, err := FindReadyShared(context.Background(), c, testNamespace, profile, tc.queryScope)
+			if err != nil {
+				t.Fatalf("FindReadyShared() error = %v", err)
+			}
+			if tc.wantName == "" {
+				if got != nil {
+					t.Fatalf("FindReadyShared() = %q, want nil", got.Name)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("FindReadyShared() = nil, want %q", tc.wantName)
+			}
+			if got.Name != tc.wantName {
+				t.Fatalf("FindReadyShared() = %q, want %q", got.Name, tc.wantName)
+			}
+		})
+	}
+}
+
+// TestFindReadyShared_EmptyProfileName pins the guard: an empty profileName never
+// lists or matches anything (it would otherwise shadow-match a nameless cache).
+func TestFindReadyShared_EmptyProfileName(t *testing.T) {
+	t.Parallel()
+	c := newClient(t, cache("some-cache", "", aimv1alpha1.AIMResolutionScopeNamespace, aimv1alpha2.ProfileCacheModeShared, constants.AIMStatusReady))
+	got, err := FindReadyShared(context.Background(), c, testNamespace, "", aimv1alpha1.AIMResolutionScopeNamespace)
+	if err != nil {
+		t.Fatalf("FindReadyShared() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("FindReadyShared() = %q, want nil for empty profileName", got.Name)
+	}
+}

@@ -1,0 +1,29 @@
+# Primary, deployable, no-accelerator cluster profile whose MODEL-SLUG primary
+# runtime a late-Ready cache must complete cross-namespace.
+#
+# Under --runtime-projection-mode=Reduced this profile publishes ONLY the
+# model-slug primary ClusterServingRuntime aim-<model-slug> (slug derived from
+# spec.aimId: "Qwen/Qwen3-0.6B" -> "qwen-qwen3-0-6b"), referenced by name
+# (autoSelect off), and NO per-profile runtime. It declares modelSources (so the
+# framework redirect env AIM_CACHE_PATH / AIM_MODEL_ID / AIM_ID="" is emitted)
+# but the cache that populates the PVC does not exist yet — the shadow is
+# materialized first without the cache mount, then gains it once the
+# AIMProfileCache reaches Ready and the cache event re-enqueues the model-slug
+# consumer. No accelerator, so it reaches Ready in any cluster (kind or GPU
+# vcluster).
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: slug-late-cache
+spec:
+  aimId: Qwen/Qwen3-0.6B
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  primary: true
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B

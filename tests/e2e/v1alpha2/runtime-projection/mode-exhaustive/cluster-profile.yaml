@@ -1,0 +1,28 @@
+# Primary, deployable, no-accelerator cluster profile for the Exhaustive
+# projection-mode smoke test. Being primary + carrying an aimId means it is a
+# candidate for BOTH the per-profile runtime (aim-<profile.Name>) and the
+# Reduced-mode model-slug primary (aim-<model-slug>); which of those the
+# operator actually projects is exactly what the mode predicate decides, so the
+# same fixture is reused verbatim across the mode-exhaustive / mode-reduced
+# smokes (each with a unique aimId + name to avoid cluster-scoped collisions
+# between the lanes).
+#
+# The image is a placeholder (registry.example.com): the smoke asserts the
+# projection contract, not that a pod serves. No accelerator + no cache, so it
+# reaches the contract in any cluster.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: mode-exhaustive-primary
+spec:
+  aimId: mode-test/exhaustive
+  modelId: mode-test/exhaustive
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  primary: true
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: mode-test/exhaustive
+      sourceUri: hf://mode-test/exhaustive

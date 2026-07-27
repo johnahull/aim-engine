@@ -141,19 +141,13 @@ spec:
                 resolvedProfile:
                   scope: Namespace
 
-    - name: Assert the profile ConfigMap is created
-      try:
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                labels:
-                  aim.eai.amd.com/service: test-cpu-via-model-service
-                  app.kubernetes.io/managed-by: aim-engine
-                  app.kubernetes.io/component: inference
-
-    - name: Assert the InferenceService is created with the seed's base image
+    - name: Assert the InferenceService references the projected runtime, inlining nothing
+      description: |
+        Post slice-06 the AIMService retires the inline predictor: the overlay
+        sets predictor.model.modelFormat=huggingface and references the eager
+        namespace runtime aim-<derived> by name, carrying no inline predictor
+        image/container. model-id is derived from the resolved profile's modelId
+        and cluster-auth is propagated from the AIMService.
       try:
         - assert:
             resource:
@@ -162,16 +156,85 @@ spec:
               metadata:
                 labels:
                   aim.eai.amd.com/service: test-cpu-via-model-service
-                # model-id is derived from the resolved profile's modelId;
-                # cluster-auth is propagated from the AIMService.
                 annotations:
                   aim.eai.amd.com/model-id: Qwen/Qwen3-0.6B
                   cluster-auth/allowed-group: test-allowed-group
               spec:
                 predictor:
-                  containers:
-                    - name: kserve-container
-                      image: registry.example.com/aim-cpu-base:0.12.0
+                  model:
+                    modelFormat:
+                      name: huggingface
+
+    - name: Assert the ISVC binds the eager namespace runtime and inlines no predictor
+      description: |
+        The runtime name is aim-<derived> where <derived> is a content hash, so
+        recompute it (as the create step did) and assert the ISVC references it,
+        that the eager AIMProfile→ServingRuntime projection materialized that
+        runtime owner-ref'd by the derived AIMProfile carrying the seed base
+        image, that the colocated profile ConfigMap exists, and that the overlay
+        inlined no predictor image/container.
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              set -eu
+              MODEL_GV=aimmodels.v1alpha2.aim.eai.amd.com
+              PROFILE_GV=aimprofiles.v1alpha2.aim.eai.amd.com
+
+              PROFILE_SET=$(kubectl get "$MODEL_GV" -n "$NAMESPACE" test-cpu-via-model \
+                -o jsonpath='{.status.profileSetRef.name}')
+              DERIVED=$(kubectl get "$PROFILE_GV" -n "$NAMESPACE" -o json \
+                | jq -r --arg set "$PROFILE_SET" \
+                    '.items[]
+                      | select(.metadata.annotations["aim.eai.amd.com/profile-set-name"] == $set)
+                      | .metadata.name' \
+                | head -1)
+              if [ -z "$DERIVED" ]; then
+                echo "ERROR: could not resolve derived profile name"
+                exit 1
+              fi
+              RUNTIME="aim-$DERIVED"
+              echo "Derived profile: $DERIVED ; runtime: $RUNTIME"
+
+              ISVC=$(kubectl get inferenceservice -n "$NAMESPACE" \
+                -l aim.eai.amd.com/service=test-cpu-via-model-service \
+                -o jsonpath='{.items[0].metadata.name}')
+
+              REF=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.spec.predictor.model.runtime}')
+              if [ "$REF" != "$RUNTIME" ]; then
+                echo "ERROR: ISVC references runtime '$REF', want '$RUNTIME'"
+                exit 1
+              fi
+
+              MODEL_IMAGE=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.spec.predictor.model.image}')
+              CONTAINERS=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.spec.predictor.containers}')
+              if [ -n "$MODEL_IMAGE" ] || [ -n "$CONTAINERS" ]; then
+                echo "ERROR: overlay inlined a predictor (image='$MODEL_IMAGE' containers='$CONTAINERS')"
+                exit 1
+              fi
+
+              # Eager namespace ServingRuntime, owned by the derived AIMProfile,
+              # carrying the seed base image.
+              SR_IMAGE=$(kubectl get servingruntime -n "$NAMESPACE" "$RUNTIME" \
+                -o jsonpath='{.spec.containers[0].image}')
+              if [ "$SR_IMAGE" != "registry.example.com/aim-cpu-base:0.12.0" ]; then
+                echo "ERROR: ServingRuntime image '$SR_IMAGE' != seed base image"
+                kubectl get servingruntime -n "$NAMESPACE" "$RUNTIME" -o yaml
+                exit 1
+              fi
+              OWNER=$(kubectl get servingruntime -n "$NAMESPACE" "$RUNTIME" \
+                -o jsonpath='{.metadata.ownerReferences[?(@.kind=="AIMProfile")].name}')
+              if [ "$OWNER" != "$DERIVED" ]; then
+                echo "ERROR: ServingRuntime owner '$OWNER' != derived profile '$DERIVED'"
+                exit 1
+              fi
+
+              # Colocated profile ConfigMap of the same name as the runtime.
+              kubectl get configmap -n "$NAMESPACE" "$RUNTIME" >/dev/null
+              echo "OK: ISVC references $RUNTIME; eager SR + ConfigMap materialized; no inline predictor"
 
     - name: Assert the foreign annotation is NOT propagated to the InferenceService
       try:

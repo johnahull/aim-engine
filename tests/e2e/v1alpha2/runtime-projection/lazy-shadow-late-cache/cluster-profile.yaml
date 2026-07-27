@@ -1,0 +1,21 @@
+# Backing cluster profile for the lazily-projected runtime. It declares
+# modelSources (so the framework redirect env AIM_CACHE_PATH / AIM_MODEL_ID /
+# AIM_ID="" is emitted) but the cache that would populate the PVC does not exist
+# yet — the shadow is materialized first without the cache mount, then gains it
+# once the AIMProfileCache reaches Ready. No accelerator, so it reaches Ready in
+# any cluster (kind or GPU vcluster).
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: test-late-cache
+spec:
+  aimId: Qwen/Qwen3-0.6B
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B

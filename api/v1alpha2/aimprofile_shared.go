@@ -348,6 +348,28 @@ type AIMProfileStatus struct {
 	// +optional
 	ResolvedNodeAffinity *corev1.NodeAffinity `json:"resolvedNodeAffinity,omitempty"`
 
+	// ProjectedRuntimeName is the name of the per-profile KServe
+	// ServingRuntime / ClusterServingRuntime this profile projects
+	// (aim-<truncated-profile>-<hash>). Because that object name is truncated and
+	// hashed for length-safety and collision-freedom, it is not reversible; this
+	// field is the authoritative profile→runtime lookup for humans and tooling.
+	// Set alongside RuntimeProjected=True. It follows the projection's
+	// additive/degrade lifecycle: it is kept in place when the projection gate
+	// later flips but the runtime is retained (RuntimeProjected=Degraded), and is
+	// empty when no per-profile runtime is projected (e.g. Reduced mode, or a
+	// profile that was never projectable).
+	// +optional
+	ProjectedRuntimeName string `json:"projectedRuntimeName,omitempty"`
+
+	// ProjectedModelSlugRuntimeName is the name of the readable model-slug
+	// primary runtime (aim-<model-slug>) this profile publishes when it is its
+	// model's primary under Reduced or Both projection mode. Empty otherwise
+	// (Exhaustive mode, or a non-primary / non-projectable profile). Like
+	// ProjectedRuntimeName it follows the additive/degrade lifecycle and is not
+	// cleared when the gate flips while the runtime survives.
+	// +optional
+	ProjectedModelSlugRuntimeName string `json:"projectedModelSlugRuntimeName,omitempty"`
+
 	// Conditions represent the latest observations of profile state.
 	// +listType=map
 	// +listMapKey=type
@@ -380,6 +402,13 @@ const (
 	// enough to back an AIMService (spec.aimId and spec.modelSources both
 	// populated). False on base profiles awaiting derivation.
 	AIMProfileConditionDeployable = "Deployable"
+
+	// AIMProfileConditionRuntimeProjected reflects the eager runtime projection:
+	// True when a runtime is projected for this profile, False (RuntimeDegraded)
+	// when the projection gate later flips but the existing runtime is kept
+	// rather than deleted. Not a "*Ready" component condition, so it is
+	// informational and does not gate the aggregated Ready status.
+	AIMProfileConditionRuntimeProjected = "RuntimeProjected"
 )
 
 // Profile condition reasons.
@@ -397,4 +426,13 @@ const (
 	// profile awaiting derivation (missing aimId or modelSources). Reserved
 	// for base-image producers (custom-model derivation source material).
 	AIMProfileReasonBaseProfile = "BaseProfile"
+
+	// AIMProfileReasonRuntimeProjected indicates a runtime is currently projected
+	// for the profile (it is deployable, has an image, and has matching hardware).
+	AIMProfileReasonRuntimeProjected = "RuntimeProjected"
+
+	// AIMProfileReasonRuntimeDegraded indicates the projection gate is no longer
+	// satisfied (e.g. matching nodes vanished) but a previously-projected runtime
+	// is kept rather than deleted (asymmetric teardown).
+	AIMProfileReasonRuntimeDegraded = "RuntimeDegraded"
 )

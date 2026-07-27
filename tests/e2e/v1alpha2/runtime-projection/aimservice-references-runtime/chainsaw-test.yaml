@@ -1,0 +1,239 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Phase C chain (c): an AIMService references the projected runtime instead of
+# inlining the predictor.
+#
+# A namespaced v1alpha2 AIMService references a cluster profile by name. The
+# service emits an InferenceService that sets predictor.model.runtime to the
+# reserved aim-<profile.Name> and carries only the service-specific overlay (no
+# inline predictor image/container). The runtime does not exist eagerly (cluster
+# profile, no eager projection), so the always-on lazy InferenceService-watch
+# projection (slice 04) materializes a complete namespace ServingRuntime (+
+# colocated ConfigMap) cross-scope from the cluster profile, and KServe binds it.
+#
+# Pod readiness is intentionally NOT asserted: the placeholder image
+# (registry.example.com) never pulls and the cache download is simulated, so the
+# predictor pod cannot serve. Like chain (d), this asserts the deterministic
+# Phase-C contract — the runtime reference + overlay split, lazy runtime
+# materialization, KServe binding, and the predictor mounting the projected
+# ConfigMap — all decided at render time, independent of a live pod.
+#
+# No accelerator is involved, so the cluster profile reaches Ready in any
+# cluster; the cache PVC only needs a default RWX StorageClass (Longhorn on the
+# GPU cluster, the NFS provisioner in the kind CI lane) — no `requires` gate, so
+# this stays in the kind lane (CHAINSAW_SELECTOR_KIND).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-aimservice-references-runtime
+spec:
+  timeouts:
+    assert: 120s
+    # The service stands up an AIMProfileCache -> AIMArtifact -> PVC finalizer
+    # chain; on a loaded cluster namespace teardown can exceed the 60s default.
+    cleanup: 240s
+  steps:
+    - name: Create the backing cluster profile
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-phase-c
+              status:
+                status: Ready
+
+    - name: Create the AIMService that references the cluster profile
+      try:
+        - apply:
+            file: service.yaml
+
+    - name: Assert the service resolves the cluster profile
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: phase-c-consumer
+              status:
+                (conditions[?type == 'ProfileReady']):
+                  - status: "True"
+                    reason: ProfileResolved
+                resolvedProfile:
+                  name: test-phase-c
+                  scope: Cluster
+
+    - name: Assert the profile-owned (Shared) cluster cache reaches Ready
+      description: |
+        The AIMService stands up a Shared, cluster-scoped AIMProfileCache for the
+        resolved cluster profile. caching.env put the download Job into
+        simulation mode, so it reaches Ready without a real download. This is the
+        gate the service waits on before it creates the InferenceService.
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: phase-c-consumer
+              spec:
+                profileName: test-phase-c
+                profileScope: Cluster
+                mode: Shared
+              status:
+                status: Ready
+
+    - name: Assert the InferenceService references the runtime and inlines nothing
+      description: |
+        The overlay sets predictor.model.runtime: aim-test-phase-c-fe2d5ebc with the
+        huggingface model format, stamps the runtime-profile annotation (the
+        cross-scope fast-path for lazy projection), propagates the controller
+        model-id and the cluster-auth/* annotation, and carries no inline
+        predictor image or container.
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: phase-c-consumer
+                annotations:
+                  aim.eai.amd.com/runtime-profile: test-phase-c
+                  aim.eai.amd.com/model-id: Qwen/Qwen3-0.6B
+                  cluster-auth/allowed-group: phase-c-group
+              spec:
+                predictor:
+                  model:
+                    runtime: aim-test-phase-c-fe2d5ebc
+                    modelFormat:
+                      name: huggingface
+
+    - name: Assert no inline predictor image/container leaked onto the overlay
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              set -eu
+              ISVC=$(kubectl get inferenceservice -n "$NAMESPACE" \
+                -l aim.eai.amd.com/service=phase-c-consumer \
+                -o jsonpath='{.items[0].metadata.name}')
+
+              MODEL_IMAGE=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.spec.predictor.model.image}')
+              if [ -n "$MODEL_IMAGE" ]; then
+                echo "ERROR: overlay inlined a predictor image: $MODEL_IMAGE"
+                exit 1
+              fi
+
+              CONTAINERS=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.spec.predictor.containers}')
+              if [ -n "$CONTAINERS" ]; then
+                echo "ERROR: overlay inlined predictor containers: $CONTAINERS"
+                exit 1
+              fi
+
+              FOREIGN=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.metadata.annotations.example\.com/ignored}')
+              if [ -n "$FOREIGN" ]; then
+                echo "ERROR: foreign annotation leaked onto InferenceService: $FOREIGN"
+                exit 1
+              fi
+              echo "OK: ISVC references the runtime, inlines no predictor, drops foreign annotation"
+
+    - name: Assert the colocated profile ConfigMap is lazily materialized
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-test-phase-c-fe2d5ebc
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: test-phase-c
+              data:
+                (keys(@)):
+                  - vllm-none-bf16-tp0-latency.yaml
+
+    - name: Assert a complete namespace ServingRuntime is materialized, owned by the cluster profile
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-phase-c-fe2d5ebc
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-phase-c
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-phase-c
+              spec:
+                # The namespace SR is complete: it mounts the colocated profile
+                # ConfigMap of the same name.
+                (volumes[?configMap.name == 'aim-test-phase-c-fe2d5ebc']):
+                  - name: aim-profile
+
+    - name: Assert KServe binds the materialized namespace ServingRuntime
+      description: |
+        With the namespace SR present, the ISVC binds it by name
+        (status.servingRuntimeName).
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: phase-c-consumer
+              status:
+                (servingRuntimeName || ''): aim-test-phase-c-fe2d5ebc
+
+    - name: Assert the predictor pod mounts the materialized profile ConfigMap
+      description: |
+        The rendered predictor Deployment (Standard/raw deployment mode) carries
+        the colocated profile ConfigMap as the aim-profile volume — i.e. the pod
+        mounts the profile the lazy watcher materialized onto the referenced
+        runtime, not an inline one from the service. The Deployment name is
+        derived from the hashed ISVC name, so locate it via KServe's standard
+        inferenceservice label rather than a hardcoded name.
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              set -eu
+              ISVC=$(kubectl get inferenceservice -n "$NAMESPACE" \
+                -l aim.eai.amd.com/service=phase-c-consumer \
+                -o jsonpath='{.items[0].metadata.name}')
+              echo "InferenceService: $ISVC"
+
+              DEPLOY=$(kubectl get deployment -n "$NAMESPACE" \
+                -l "serving.kserve.io/inferenceservice=$ISVC" \
+                -o jsonpath='{.items[0].metadata.name}')
+              if [ -z "$DEPLOY" ]; then
+                echo "ERROR: no predictor Deployment for ISVC $ISVC"
+                kubectl get deployment -n "$NAMESPACE" -o wide
+                exit 1
+              fi
+              echo "Predictor Deployment: $DEPLOY"
+
+              MOUNTED=$(kubectl get deployment -n "$NAMESPACE" "$DEPLOY" -o json \
+                | jq -r '[.spec.template.spec.volumes[]?
+                    | select(.configMap.name == "aim-test-phase-c-fe2d5ebc")
+                    | .name] | join(",")')
+              if [ "$MOUNTED" != "aim-profile" ]; then
+                echo "ERROR: predictor Deployment does not mount aim-test-phase-c-fe2d5ebc as aim-profile (got: '$MOUNTED')"
+                kubectl get deployment -n "$NAMESPACE" "$DEPLOY" -o yaml
+                exit 1
+              fi
+              echo "OK: predictor Deployment mounts the materialized profile ConfigMap as aim-profile"

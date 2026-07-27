@@ -1,0 +1,111 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Phase B chain (d): lazy InferenceService-watch runtime projection.
+#
+# A native KServe InferenceService in a fresh namespace references a managed
+# ClusterServingRuntime (aim-<profile>) by name. The CSR is bare — it has no
+# colocated profile ConfigMap, since a cluster runtime cannot carry one into an
+# arbitrary consumer namespace. The lazy watcher follows the CSR back to its
+# backing AIMClusterProfile and materializes a complete namespace ServingRuntime
+# (+ colocated ConfigMap) in the consumer's namespace, owned by the cluster
+# profile. KServe then resolves the namespace SR over the same-named CSR
+# (shadow-completion), so the predictor pod mounts the materialized ConfigMap.
+#
+# No accelerator is involved, so this runs in any cluster (kind or GPU vcluster).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-lazy-shadow
+spec:
+  timeouts:
+    assert: 90s
+  steps:
+    - name: Create the backing cluster profile and bare managed CSR
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - apply:
+            file: managed-runtime.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-lazy-shadow
+              status:
+                status: Ready
+
+    - name: Apply the native InferenceService referencing the managed runtime
+      try:
+        - apply:
+            file: inference-service.yaml
+
+    - name: Assert the colocated profile ConfigMap is materialized in the namespace
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-test-lazy-shadow-4fd56759
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: test-lazy-shadow
+              # The assembled profile YAML the runtime resolves AIM_PROFILE_ID against.
+              data:
+                (keys(@)):
+                  - vllm-none-bf16-tp0-latency.yaml
+
+    - name: Assert a complete namespace ServingRuntime is materialized, owned by the cluster profile
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-lazy-shadow-4fd56759
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-lazy-shadow
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-lazy-shadow
+              spec:
+                # The namespace SR is complete: it mounts the colocated profile
+                # ConfigMap of the same name.
+                (volumes[?configMap.name == 'aim-test-lazy-shadow-4fd56759']):
+                  - name: aim-profile
+
+    - name: Assert KServe resolves the namespace ServingRuntime over the same-named CSR
+      description: |
+        Shadow-completion: with both a cluster runtime and a complete namespace
+        runtime of the same name, KServe binds the namespace SR (status carries
+        servingRuntimeName, not clusterServingRuntimeName).
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                name: native-lazy-consumer
+              status:
+                (servingRuntimeName || ''): aim-test-lazy-shadow-4fd56759
+
+    - name: Assert the predictor pod mounts the materialized ConfigMap
+      description: |
+        The rendered predictor Deployment (Standard/raw deployment mode) carries
+        the colocated profile ConfigMap as a volume — i.e. the pod mounts the
+        profile the lazy watcher materialized.
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: native-lazy-consumer-predictor
+              spec:
+                template:
+                  spec:
+                    (volumes[?configMap.name == 'aim-test-lazy-shadow-4fd56759']):
+                      - name: aim-profile

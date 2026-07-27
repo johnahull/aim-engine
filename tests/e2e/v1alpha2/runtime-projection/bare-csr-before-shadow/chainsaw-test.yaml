@@ -1,0 +1,164 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Bare ClusterServingRuntime carries a dangling AIM_PROFILE_ID before
+# the lazy shadow lands: confirm the reconvergence window self-heals.
+#
+# The eager cluster projection (serving.BuildClusterServingRuntime) emits a BARE
+# CSR: it carries the full profile-derived framework env — including AIM_PROFILE_ID
+# pointing at /workspace/aim-runtime/profiles/custom/<aimId>/<name>.yaml — but NO
+# colocated profile ConfigMap and NO profile volume/mount (a cluster runtime
+# cannot guarantee a namespaced ConfigMap in an arbitrary consumer namespace). So
+# the AIM_PROFILE_ID it sets dangles for a custom/cache profile: the file it names
+# exists only once the lazy InferenceService-watch reconciler materializes the
+# namespace shadow (a complete namespace ServingRuntime + colocated ConfigMap of
+# the same name).
+#
+# This differs from lazy-shadow/: that fixture's CSR carries NO env, so it only
+# exercises pure shadow materialization. Here the CSR carries the dangling
+# AIM_PROFILE_ID, and the test additionally asserts (a) the bare CSR really is a
+# dangling shadow target (env set, no ConfigMap volume), and (b) once the shadow
+# lands, the shadow's AIM_PROFILE_ID matches the materialized ConfigMap's data KEY
+# (the env never dangles after convergence).
+#
+# Convergence is asserted within the step timeouts: the shadow SR + ConfigMap
+# materialize and KServe rebinds onto the NAMESPACE SR (status.servingRuntimeName
+# set, clusterServingRuntimeName cleared) with no manual intervention. The
+# reconvergence window was measured at a few seconds on the live GPU vcluster (see
+# ADR 0008 appendix finding 4 / bare-CSR addendum).
+#
+# Uses the computed hashed runtime name (serving.RuntimeName("test-bare-csr") =
+# aim-test-bare-csr-899eadd9), never a literal aim-<profile>. No accelerator and
+# no `requires`/needs-secret gate, so it runs in the kind CI lane
+# (CHAINSAW_SELECTOR_KIND) as well as on the GPU vcluster.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-bare-csr-before-shadow
+spec:
+  timeouts:
+    assert: 90s
+    # The namespace teardown (ISVC + predictor Deployment + shadow objects) can
+    # sit right at the 60s default on a loaded vcluster; give it headroom so a
+    # slow teardown never reports the (passing) test as failed.
+    cleanup: 240s
+  steps:
+    - name: Create the backing cluster profile and the bare managed CSR
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - apply:
+            file: managed-runtime.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-bare-csr
+              status:
+                status: Ready
+
+    - name: Assert the bare CSR is a dangling shadow target (AIM_PROFILE_ID set, no profile ConfigMap volume)
+      description: |
+        The bare ClusterServingRuntime carries the framework AIM_PROFILE_ID but
+        mounts no colocated profile ConfigMap — the file that env names does not
+        exist on the CSR itself. This is the pre-shadow hazard this test confirms
+        is transient and self-healing.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-test-bare-csr-899eadd9
+              spec:
+                (containers[0].env[?name == 'AIM_PROFILE_ID'].value | [0]): custom/Qwen/Qwen3-0.6B/vllm-none-bf16-tp0-latency
+                # No configMap-backed volume: the CSR cannot carry the profile
+                # ConfigMap into a consumer namespace.
+                (volumes[?configMap] | length(@)): 0
+
+    - name: Apply the native InferenceService referencing the bare CSR
+      description: |
+        With only the bare CSR resolving the name, this forces the pre-shadow
+        binding ordering: KServe may bind the bare (incomplete) CSR before the
+        lazy watcher materializes the complete namespace shadow.
+      try:
+        - apply:
+            file: inference-service.yaml
+
+    - name: Assert the colocated profile ConfigMap is materialized in the namespace
+      description: |
+        The single data key is the profile filename the runtime resolves
+        AIM_PROFILE_ID against: AIM_PROFILE_ID (custom/Qwen/Qwen3-0.6B/vllm-none-bf16-tp0-latency)
+        + ".yaml" == this ConfigMap key, so the env no longer dangles once mounted.
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-test-bare-csr-899eadd9
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: test-bare-csr
+              data:
+                (keys(@)):
+                  - vllm-none-bf16-tp0-latency.yaml
+
+    - name: Assert the complete namespace ServingRuntime shadows the CSR and its AIM_PROFILE_ID matches the ConfigMap key
+      description: |
+        The lazy watcher materializes a complete namespace ServingRuntime (owned
+        by the cluster profile) that mounts the colocated ConfigMap and sets the
+        SAME AIM_PROFILE_ID the bare CSR carried — now backed by the mounted file.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-bare-csr-899eadd9
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-bare-csr
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-bare-csr
+              spec:
+                (volumes[?configMap.name == 'aim-test-bare-csr-899eadd9']):
+                  - name: aim-profile
+                (containers[0].env[?name == 'AIM_PROFILE_ID'].value | [0]): custom/Qwen/Qwen3-0.6B/vllm-none-bf16-tp0-latency
+
+    - name: Assert KServe self-heals onto the namespace ServingRuntime (not the bare CSR)
+      description: |
+        Shadow-completion: KServe resolves the complete namespace SR over the
+        same-named CSR, so status.servingRuntimeName carries the runtime name and
+        status.clusterServingRuntimeName is cleared — the ISVC ends bound to the
+        runtime whose profile file is actually mounted.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                name: native-bare-csr-consumer
+              status:
+                (servingRuntimeName || ''): aim-test-bare-csr-899eadd9
+                (clusterServingRuntimeName || ''): ''
+
+    - name: Assert the predictor Deployment mounts the materialized profile ConfigMap
+      description: |
+        The rendered predictor Deployment (Standard/raw deployment mode) carries
+        the colocated profile ConfigMap as the aim-profile volume — i.e. the file
+        AIM_PROFILE_ID names is now mounted, so the dangling env has self-healed.
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: native-bare-csr-consumer-predictor
+              spec:
+                template:
+                  spec:
+                    (volumes[?configMap.name == 'aim-test-bare-csr-899eadd9']):
+                      - name: aim-profile

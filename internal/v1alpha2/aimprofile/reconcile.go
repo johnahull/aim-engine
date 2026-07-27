@@ -45,12 +45,22 @@ import (
 type ProfileReconciler struct {
 	Client client.Client
 	Scheme *runtime.Scheme
+
+	// ProjectionMode governs whether this reconciler eagerly projects a
+	// ServingRuntime for the profile (Exhaustive / Both project per-profile;
+	// Reduced does not).
+	ProjectionMode aimv1alpha2.RuntimeProjectionMode
 }
 
 // ClusterProfileReconciler implements the DomainReconciler interface for cluster-scoped profiles.
 type ClusterProfileReconciler struct {
 	Client client.Client
 	Scheme *runtime.Scheme
+
+	// ProjectionMode governs whether this reconciler eagerly projects a
+	// ClusterServingRuntime for the profile (Exhaustive / Both project
+	// per-profile; Reduced does not).
+	ProjectionMode aimv1alpha2.RuntimeProjectionMode
 }
 
 // ============================================================================
@@ -62,6 +72,13 @@ type ProfileFetchResult struct {
 	profile *aimv1alpha2.AIMProfile
 	nodes   []corev1.Node
 	nodeErr error
+
+	// profileCache is the Ready, profile-owned (Shared) AIMProfileCache backing
+	// this profile — whether created by the profile (caching.enabled) or by an
+	// AIMService in Shared mode. Contributes the cache mount on the projected
+	// runtime; resolved identically to the lazy shadow so serving does not depend
+	// on the projection mode. Nil when no Ready Shared cache exists.
+	profileCache *aimv1alpha2.AIMProfileCache
 }
 
 // ClusterProfileFetchResult holds fetched resources for cluster-scoped profiles.
@@ -87,6 +104,12 @@ func (r *ProfileReconciler) FetchRemoteState(
 		nodes, err := listNodes(ctx, c)
 		result.nodes = nodes
 		result.nodeErr = err
+	}
+
+	// The cache mount is needed by both the per-profile runtime and the model-slug
+	// primary, so resolve it whenever the mode projects either.
+	if r.ProjectionMode.ProjectsPerProfile() || r.ProjectionMode.ProjectsModelSlug() {
+		result.profileCache = fetchMountableCache(ctx, c, profile)
 	}
 
 	return result
@@ -126,6 +149,9 @@ type ProfileObservation struct {
 	sourceModel       *aimv1alpha2.ProfileSourceModel
 	origin            aimv1alpha1.ProfileOrigin
 	baseImage         string
+	// projectable reports whether a runtime should be projected for this profile
+	// (deployable, has an image, and hardware is available — freshly computed).
+	projectable bool
 }
 
 // GetComponentHealth returns health of all components for automatic status management.
@@ -148,6 +174,9 @@ type ClusterProfileObservation struct {
 	sourceModel       *aimv1alpha2.ProfileSourceModel
 	origin            aimv1alpha1.ProfileOrigin
 	baseImage         string
+	// projectable reports whether a runtime should be projected for this profile
+	// (deployable, has an image, and hardware is available — freshly computed).
+	projectable bool
 }
 
 // GetComponentHealth returns health of all components for automatic status management.
@@ -176,6 +205,7 @@ func (r *ProfileReconciler) ComposeState(
 	obs.sourceModel = SourceModelFromOwnerRefs(fetch.profile, fetch.profile.Namespace)
 	obs.origin = DeriveProfileOrigin(fetch.profile)
 	obs.baseImage = BaseImageFromProfile(fetch.profile, fetch.profile.Status.BaseImage)
+	obs.projectable = runtimeProjectable(spec, obs.deployable, obs.matchResult)
 	return obs
 }
 
@@ -197,6 +227,7 @@ func (r *ClusterProfileReconciler) ComposeState(
 	obs.sourceModel = SourceModelFromOwnerRefs(fetch.profile, "")
 	obs.origin = DeriveProfileOrigin(fetch.profile)
 	obs.baseImage = BaseImageFromProfile(fetch.profile, fetch.profile.Status.BaseImage)
+	obs.projectable = runtimeProjectable(spec, obs.deployable, obs.matchResult)
 	return obs
 }
 
@@ -218,22 +249,27 @@ func (r *ClusterProfileReconciler) ComposeState(
 // "cache lives with the model definition", AIMService-owned for "cache is
 // per-service workload".
 func (r *ProfileReconciler) PlanResources(
-	_ context.Context,
+	ctx context.Context,
 	reconcileCtx controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile],
-	_ ProfileObservation,
+	obs ProfileObservation,
 ) controllerutils.PlanResult {
 	plan := controllerutils.PlanResult{}
 	profile := reconcileCtx.Object
 	if profile == nil {
 		return plan
 	}
-	if profile.Spec.Caching == nil || !profile.Spec.Caching.Enabled {
-		return plan
+
+	if profile.Spec.Caching != nil && profile.Spec.Caching.Enabled && len(profile.Spec.ModelSources) > 0 {
+		plan.Apply(buildProfileOwnedCache(profile))
 	}
-	if len(profile.Spec.ModelSources) == 0 {
-		return plan
+
+	if r.ProjectionMode.ProjectsPerProfile() {
+		planNamespaceRuntime(ctx, &plan, profile, obs)
 	}
-	plan.Apply(buildProfileOwnedCache(profile))
+	if r.ProjectionMode.ProjectsModelSlug() {
+		planNamespaceModelSlugRuntime(ctx, &plan, profile, obs)
+	}
+
 	return plan
 }
 
@@ -244,11 +280,22 @@ func (r *ProfileReconciler) PlanResources(
 // creation via the service-side path; that cache then references the
 // cluster-scoped profile via spec.profileScope=Cluster.
 func (r *ClusterProfileReconciler) PlanResources(
-	_ context.Context,
-	_ controllerutils.ReconcileContext[*aimv1alpha2.AIMClusterProfile],
-	_ ClusterProfileObservation,
+	ctx context.Context,
+	reconcileCtx controllerutils.ReconcileContext[*aimv1alpha2.AIMClusterProfile],
+	obs ClusterProfileObservation,
 ) controllerutils.PlanResult {
-	return controllerutils.PlanResult{}
+	plan := controllerutils.PlanResult{}
+	profile := reconcileCtx.Object
+	if profile == nil {
+		return plan
+	}
+	if r.ProjectionMode.ProjectsPerProfile() {
+		planClusterRuntime(ctx, &plan, profile, obs)
+	}
+	if r.ProjectionMode.ProjectsModelSlug() {
+		planClusterModelSlugRuntime(ctx, &plan, profile, obs)
+	}
+	return plan
 }
 
 // ============================================================================
@@ -266,6 +313,8 @@ func (r *ProfileReconciler) DecorateStatus(
 		obs.resolvedResources, obs.nodeErr, obs.matchResult,
 		obs.deployable, obs.sourceModel, obs.origin, obs.baseImage,
 	)
+	decorateProjectionCondition(cm, r.ProjectionMode, obs.profile.Spec.Primary, obs.projectable, obs.nodeErr)
+	recordProjectedRuntimeNames(status, r.ProjectionMode, obs.profile.Spec.AIMProfileSpecCommon, obs.profile.Name, obs.projectable)
 }
 
 func (r *ClusterProfileReconciler) DecorateStatus(
@@ -279,6 +328,8 @@ func (r *ClusterProfileReconciler) DecorateStatus(
 		obs.resolvedResources, obs.nodeErr, obs.matchResult,
 		obs.deployable, obs.sourceModel, obs.origin, obs.baseImage,
 	)
+	decorateProjectionCondition(cm, r.ProjectionMode, obs.profile.Spec.Primary, obs.projectable, obs.nodeErr)
+	recordProjectedRuntimeNames(status, r.ProjectionMode, obs.profile.Spec.AIMProfileSpecCommon, obs.profile.Name, obs.projectable)
 }
 
 func decorateProfileStatus(

@@ -1,0 +1,24 @@
+# A namespaced v1alpha2 AIMService referencing the namespace AIMProfile in its
+# own namespace. Under Reduced the backing profile has NO eager
+# per-profile runtime, so the always-on lazy InferenceService-watch projection
+# materializes a complete namespace ServingRuntime shadow named
+# aim-flip-ns-profile-bba2ad9c, marked aim.eai.amd.com/runtime-projection: lazy.
+#
+# caching.env switches the AIMProfileCache download Job into simulation mode so
+# the profile-owned (Shared) NAMESPACE cache reaches Ready without a real
+# download — the gate the AIMService waits on before it creates the ISVC (same
+# pattern as reduced-namespace-service).
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: flip-ns-consumer
+spec:
+  profile:
+    name: flip-ns-profile
+  replicas: 1
+  caching:
+    env:
+      - name: AIM_DEBUG_SIMULATE_HF_DOWNLOAD
+        value: "true"
+      - name: AIM_DEBUG_SIMULATE_HF_DURATION
+        value: "2"

@@ -64,6 +64,40 @@ const (
 	LabelTemplateCacheName = AimLabelDomain + "/template-cache.name"
 	// LabelProfileCacheName is the label key for the profile cache name (used on artifacts)
 	LabelProfileCacheName = AimLabelDomain + "/profile-cache.name"
+
+	// LabelRuntimeProjection marks how a projected runtime under the reserved
+	// aim- prefix was materialised. The lazy InferenceService-watch projection
+	// stamps LabelValueRuntimeProjectionLazy on the shadow ServingRuntime (and
+	// its colocated ConfigMap) it materialises; the eager per-profile / model-slug
+	// projection stamps LabelValueRuntimeProjectionEager; hand-authored runtimes
+	// leave it unset. The lazy reconciler uses it to tell its own shadow — which
+	// it must re-apply on every reconcile to self-heal drift / a late cache /
+	// backing-profile changes — apart from an eager projection or hand-authored
+	// runtime of the same name, which it defers to. A namespace-AIMProfile-backed
+	// shadow and a namespace AIMProfile's eager projection carry the SAME
+	// AIMProfile ownerReference, so the ownerRef kind alone cannot make this
+	// distinction; this label can. The eager marker is what settles ownership
+	// after a projection-mode flip turns eager projection on for a name a lazy
+	// shadow already materialised: the eager force-apply reclaims the key and
+	// overwrites lazy, so the lazy path defers (issue 08).
+	LabelRuntimeProjection = AimLabelDomain + "/runtime-projection"
+
+	// LabelRuntimeProjectionState surfaces the projection health of a runtime
+	// (and its colocated ConfigMap) ON THE RUNTIME OBJECT ITSELF, so a native /
+	// bring-your-own-KServe user holding a ServingRuntime / ClusterServingRuntime
+	// sees a signal without hopping to the backing AIMProfile's status. KServe's
+	// ServingRuntimeStatus is an empty struct with no status subresource, so the
+	// state cannot live in .status; a label under our own domain is the only
+	// surface a non-owning controller can honestly write. It is stamped whenever
+	// AIM Engine projects the runtime, so LabelValueRuntimeProjectionStateProjected
+	// is the only value it ever takes. There is deliberately no "degraded" value:
+	// flipping a kept-but-ungated runtime in place would need a targeted metadata
+	// write under a dedicated field manager (the plan stops emitting the object in
+	// that state), which is out of scope — until then the authoritative degraded
+	// signal is the backing profile's RuntimeProjected condition (reachable via
+	// this runtime's ownerRef / aim.eai.amd.com/profile label). See
+	// AnnotationRuntimeProjectionMessage for the human-readable note.
+	LabelRuntimeProjectionState = AimLabelDomain + "/runtime-projection-state"
 )
 
 // Label values
@@ -77,6 +111,35 @@ const (
 	// LabelValueCacheTypeDedicated indicates a dedicated cache owned by an AIMService.
 	// These caches are created for non-cached modes (Never/Auto) to enable unified downloads.
 	LabelValueCacheTypeDedicated = "dedicated"
+
+	// LabelValueRuntimeProjectionLazy marks a runtime (and its colocated
+	// ConfigMap) materialised by the lazy InferenceService-watch projection — a
+	// shadow that must be re-applied on every reconcile to self-heal. See
+	// LabelRuntimeProjection.
+	LabelValueRuntimeProjectionLazy = "lazy"
+
+	// LabelValueRuntimeProjectionEager marks a per-profile / model-slug runtime
+	// (and its colocated ConfigMap) materialised by the eager profile-reconciler
+	// projection. The eager path stamps it under the SAME LabelRuntimeProjection
+	// key that the lazy path uses, so when the eager force-apply (SSA +
+	// ForceOwnership) lands on a name a lazy shadow already owns — the mode-flip
+	// case where the operator previously only lazily materialised it — it
+	// RECLAIMS the label key and overwrites the lazy marker with this value.
+	// ownedByLazyProjection then reports false, so the lazy InferenceService-watch
+	// reconciler treats the runtime as complete and defers, and managedFields
+	// ownership settles on the single eager manager instead of ping-ponging
+	// between the two force-appliers (issue 08). Simply omitting the label from
+	// the eager apply would NOT remove a label the lazy field manager owns, hence
+	// the explicit overwrite.
+	LabelValueRuntimeProjectionEager = "eager"
+
+	// LabelValueRuntimeProjectionStateProjected marks a runtime that AIM Engine
+	// is actively projecting from a healthy, projectable profile. It is the only
+	// value stamped: a runtime object only ever exists in the projected state,
+	// because the projection plan builds it exclusively while the profile is
+	// projectable (a gate flip stops re-emitting it rather than mutating it).
+	// See LabelRuntimeProjectionState.
+	LabelValueRuntimeProjectionStateProjected = "projected"
 )
 
 // Discovery circuit breaker configuration
@@ -392,6 +455,54 @@ const (
 	// template. It equals the name the runtime serves under (vLLM
 	// --served-model-name, exposed at /v1/models).
 	AnnotationModelId = AimLabelDomain + "/model-id"
+
+	// AnnotationRuntimeProfile records the profile (AIMClusterProfile or namespace
+	// AIMProfile) that backs the runtime an InferenceService references. The
+	// AIMService reconciler stamps it as a fast-path for the lazy
+	// runtime-projection watcher: when the referenced runtime has not been created
+	// yet (cross-scope, or Reduced mode where no eager per-profile runtime
+	// exists), the watcher resolves the backing profile from this annotation
+	// (namespace-first, then cluster) instead of the runtime's ownerRef/label. It
+	// is purely an optimization — the native flow (a managed ClusterServingRuntime
+	// → backing profile) needs no annotation.
+	AnnotationRuntimeProfile = AimLabelDomain + "/runtime-profile"
+
+	// Projected-runtime discoverability annotations (v1alpha2 runtime
+	// projection). Per-profile ServingRuntime / ClusterServingRuntime names are
+	// truncated + hashed (aim-<truncated-profile>-<hash>) and are therefore not
+	// reversible. These annotations restore full-fidelity identity on the
+	// projected object (and its colocated ConfigMap) so humans and tooling can
+	// read the untruncated profile name and the profile axes straight off the
+	// runtime without reversing the name. Values are carried verbatim (they are
+	// not constrained to the label grammar); empty axes are omitted.
+
+	// AnnotationProjectedProfile records the untruncated backing profile name of
+	// a projected runtime, recovering the identity the hashed object name hides.
+	AnnotationProjectedProfile = AimLabelDomain + "/projected.profile"
+
+	// AnnotationProjectedAimID records the backing profile's aimId (model
+	// architecture identifier) on a projected runtime.
+	AnnotationProjectedAimID = AimLabelDomain + "/projected.aim-id"
+
+	// AnnotationProjectedModelID records the backing profile's modelId on a
+	// projected runtime.
+	AnnotationProjectedModelID = AimLabelDomain + "/projected.model-id"
+
+	// AnnotationProjectedPrecision records the backing profile's precision on a
+	// projected runtime.
+	AnnotationProjectedPrecision = AimLabelDomain + "/projected.precision"
+
+	// AnnotationProjectedMetric records the backing profile's optimization
+	// metric on a projected runtime.
+	AnnotationProjectedMetric = AimLabelDomain + "/projected.metric"
+
+	// AnnotationRuntimeProjectionMessage is the human-readable companion to the
+	// LabelRuntimeProjectionState marker, stamped on a projected runtime (and its
+	// colocated ConfigMap). It carries a stable, per-object-data-free note (so
+	// re-applies never churn it) that explains the marker and points a native /
+	// bring-your-own-KServe user at the authoritative, transitioning health on
+	// the backing profile's RuntimeProjected condition.
+	AnnotationRuntimeProjectionMessage = AimLabelDomain + "/runtime-projection-message"
 
 	// AnnotationReconcilerPipeline forces an AIMService onto a specific
 	// reconciliation pipeline, bypassing the default spec-shape dispatch.

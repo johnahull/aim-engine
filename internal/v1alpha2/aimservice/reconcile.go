@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-logr/logr"
 	servingv1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -90,6 +91,13 @@ type ServiceFetchResult struct {
 	httpRoute            controllerutils.FetchResult[*gatewayapiv1.HTTPRoute]
 	gateway              controllerutils.FetchResult[*gatewayapiv1.Gateway]
 
+	// legacyProfileConfigMap is the pre-ADR-0008 service-owned profile
+	// ConfigMap (<service>-profile-<hash>), fetched so PlanResources can
+	// garbage-collect it when a service that predates the runtime-reference
+	// rewrite is reconciled by the new operator. Absent (IsNotFound) for
+	// services created after the rewrite, in which case cleanup is a no-op.
+	legacyProfileConfigMap controllerutils.FetchResult[*corev1.ConfigMap]
+
 	mergedRuntimeConfig controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon]
 
 	// adapterDeps holds the per-adapter artifacts, staging Jobs, and resolved
@@ -120,14 +128,12 @@ type ServiceObservation struct {
 	hasModelSources   bool
 	profileCacheReady bool
 
-	// Pre-computed names and rendered profile artefacts. These are produced
-	// once in ComposeState so the ConfigMap, the InferenceService volume
-	// mount, and the AIM_PROFILE_ID env var cannot drift. On failure these
-	// stay empty and configErr is set, which getConfigHealth surfaces as an
-	// InvalidSpec condition on the AIMService.
+	// Pre-computed names and profile artefacts, produced once in ComposeState
+	// so the InferenceService name and the profile YAML filename wired into the
+	// runtime env cannot drift between planning and status decoration. On
+	// failure these stay empty and configErr is set, which getConfigHealth
+	// surfaces as an InvalidSpec condition on the AIMService.
 	isvcName         string
-	configMapName    string
-	profileYAML      []byte
 	profileYAMLName  string
 	profileAssembled bool
 
@@ -449,6 +455,12 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 
 	result.inferenceService = fetchInferenceService(ctx, c, service)
 
+	// Fetch the orphaned pre-ADR-0008 service-owned profile ConfigMap, if any,
+	// so PlanResources can garbage-collect it on the first post-upgrade
+	// reconcile. Only ever a Get by the deterministic legacy name; a name-gen
+	// failure or a not-found result is handled downstream (cleanup is skipped).
+	result.legacyProfileConfigMap = fetchLegacyProfileConfigMap(ctx, c, service)
+
 	// Fetch HPA and predictor pods if the InferenceService exists. The HPA is
 	// only present when KServe has created the predictor (KEDA names it
 	// keda-hpa-{isvc}-predictor). Pods feed the shared scale-to-zero idle
@@ -526,9 +538,9 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 }
 
 // ComposeState interprets the fetch result and pre-computes derived artefacts
-// (ISVC name, ConfigMap name, rendered profile YAML, runtime status) that
-// multiple plan steps and the status decorator consume. Computing these in
-// one place guarantees a single source of truth per reconcile cycle.
+// (ISVC name, profile YAML filename, runtime status) that multiple plan steps
+// and the status decorator consume. Computing these in one place guarantees a
+// single source of truth per reconcile cycle.
 func (r *ProfileServiceReconciler) ComposeState(
 	ctx context.Context,
 	_ controllerutils.ReconcileContext[*aimv1alpha1.AIMService],
@@ -621,10 +633,10 @@ func (obs *ServiceObservation) resolveFetchedProfile() {
 	}
 }
 
-// composeDerivedNames assembles the ISVC name, profile ConfigMap name, and the
-// rendered profile YAML (bytes + filename) on the observation. Any failure is
-// captured on configErr so the plan phase can skip cleanly while the
-// framework surfaces the error through the component health pipeline.
+// composeDerivedNames assembles the InferenceService name and the profile YAML
+// filename on the observation. Any failure is captured on configErr so the plan
+// phase can skip cleanly while the framework surfaces the error through the
+// component health pipeline.
 func (r *ProfileServiceReconciler) composeDerivedNames(ctx context.Context, obs *ServiceObservation) {
 	service := obs.service
 	logger := log.FromContext(ctx).WithName("compose").WithValues("pipeline", "profile")
@@ -637,26 +649,20 @@ func (r *ProfileServiceReconciler) composeDerivedNames(ctx context.Context, obs 
 	}
 	obs.isvcName = isvcName
 
-	cmName, err := profileConfigMapName(service.Name)
-	if err != nil {
-		logger.Error(err, "failed to generate profile ConfigMap name", "service", service.Name)
-		obs.configErr = fmt.Errorf("generate profile ConfigMap name: %w", err)
-		return
-	}
-	obs.configMapName = cmName
-
 	if obs.resolvedProfileSpec == nil {
 		return
 	}
 
-	yamlBytes, filename, err := assembleProfileYAML(obs.resolvedProfileSpec)
+	// Only the filename is consumed downstream (buildFrameworkEnvVars wires it
+	// into the runtime env); the referenced runtime now carries the projected
+	// profile ConfigMap, so the service no longer keeps the rendered YAML bytes.
+	_, filename, err := assembleProfileYAML(obs.resolvedProfileSpec)
 	if err != nil {
 		logger.Error(err, "failed to assemble profile YAML",
 			"service", service.Name, "profile", obs.profileName)
 		obs.configErr = fmt.Errorf("assemble profile YAML: %w", err)
 		return
 	}
-	obs.profileYAML = yamlBytes
 	obs.profileYAMLName = filename
 	obs.profileAssembled = true
 }
@@ -677,6 +683,14 @@ func (r *ProfileServiceReconciler) PlanResources(
 		logger.V(1).Info("Config error, skipping resource planning", "err", obs.configErr.Error())
 		return planResult
 	}
+
+	// Migration cleanup (independent of profile/cache readiness): a service that
+	// predates the runtime-reference rewrite left behind an orphaned
+	// service-owned profile ConfigMap the new reconcile no longer plans. Delete
+	// it once, strictly guarded, so it does not linger for the life of the
+	// service. Runs on every reconcile that gets past config validation so the
+	// orphan is reclaimed on the first post-upgrade pass.
+	planLegacyProfileConfigMapCleanup(&planResult, obs, logger)
 
 	// v1alpha2 quick-start: a service authored with spec.model.image and
 	// dispatched onto the profile pipeline via the reconciler-pipeline
@@ -782,13 +796,12 @@ func (r *ProfileServiceReconciler) PlanResources(
 		}
 	}
 
-	// 2. Plan the profile ConfigMap (owned by AIMService) using the YAML
-	// rendered once in ComposeState.
-	if obs.profileAssembled {
-		planResult.Apply(buildProfileConfigMap(service, obs.configMapName, obs.profileYAMLName, obs.profileYAML))
-	}
+	// The profile ConfigMap is no longer planned here: the referenced runtime
+	// (projected lazily by the InferenceService-watch reconciler or eagerly by
+	// the profile reconcilers) carries the colocated profile ConfigMap, so the
+	// service does not duplicate it.
 
-	// 3. Plan the InferenceService. When the service needs the adapter disk, mount
+	// 2. Plan the InferenceService. When the service needs the adapter disk, mount
 	// the service's adapter subtree read-only at /adapters — present even at zero
 	// adapters in dynamic mode, so add/remove never restarts the pod.
 	if isvc := buildInferenceServiceFromProfile(service, obs); isvc != nil {
@@ -809,7 +822,7 @@ func (r *ProfileServiceReconciler) PlanResources(
 		}
 	}
 
-	// 4. Plan the HTTPRoute if routing is enabled on the merged runtime
+	// 3. Plan the HTTPRoute if routing is enabled on the merged runtime
 	// config. The builder and naming scheme are shared with the v1alpha1
 	// pipeline so routing behaves identically regardless of which pipeline
 	// owns the service.
@@ -817,7 +830,7 @@ func (r *ProfileServiceReconciler) PlanResources(
 		planResult.Apply(route)
 	}
 
-	// 5. Plan the KEDA ScaledObject. effectiveResources is nil until the
+	// 4. Plan the KEDA ScaledObject. effectiveResources is nil until the
 	// profile is Ready, in which case PlanScaledObject falls back to its flat
 	// cooldown default and the next reconcile re-plans idempotently.
 	effectiveResources := resolveEffectiveResourcesFromProfile(service, obs.resolvedProfileSpec, obs.resolvedProfileStatus)
@@ -826,6 +839,53 @@ func (r *ProfileServiceReconciler) PlanResources(
 	}
 
 	return planResult
+}
+
+// planLegacyProfileConfigMapCleanup queues the orphaned pre-ADR-0008
+// service-owned profile ConfigMap (<service>-profile-<hash>) for deletion when
+// it is still present in observed state. Before the runtime-reference rewrite an
+// AIMService built its own profile ConfigMap; the referenced runtime now carries
+// the colocated one, so the old object is dead state that lingers for the life
+// of the service. It is deleted only when ALL of the following hold, so a
+// coincidentally-named user ConfigMap is never touched:
+//   - it exists (fetched by the deterministic legacy name — the name shape), and
+//   - it is owner-ref'd by THIS AIMService (UID match), and
+//   - it carries AIM Engine's managed-by label.
+//
+// The delete is idempotent: the framework ignores NotFound, so once the object
+// is gone the next reconcile observes IsNotFound and queues nothing.
+func planLegacyProfileConfigMapCleanup(plan *controllerutils.PlanResult, obs ServiceObservation, logger logr.Logger) {
+	configMap := obs.legacyProfileConfigMap.Value
+	if configMap == nil {
+		return
+	}
+	if !serviceOwnsConfigMap(configMap, obs.service) {
+		return
+	}
+	if configMap.Labels[constants.LabelK8sManagedBy] != constants.LabelValueManagedBy {
+		return
+	}
+
+	logger.V(1).Info("garbage-collecting orphaned legacy profile ConfigMap",
+		"configMap", configMap.Name, "service", obs.service.Name)
+	plan.Delete(configMap)
+}
+
+// serviceOwnsConfigMap reports whether the ConfigMap carries a controller-style
+// owner reference back to the given AIMService, matched by UID so a
+// delete-and-recreate of a same-named service can never adopt a stale orphan.
+// A missing service UID (never the case for a live object) short-circuits to
+// false so an empty-vs-empty UID comparison cannot yield a false positive.
+func serviceOwnsConfigMap(configMap *corev1.ConfigMap, service *aimv1alpha1.AIMService) bool {
+	if service.UID == "" {
+		return false
+	}
+	for _, ref := range configMap.GetOwnerReferences() {
+		if ref.Kind == "AIMService" && ref.UID == service.UID {
+			return true
+		}
+	}
+	return false
 }
 
 // DecorateStatus fills in profile-pipeline-specific status fields. Resolved

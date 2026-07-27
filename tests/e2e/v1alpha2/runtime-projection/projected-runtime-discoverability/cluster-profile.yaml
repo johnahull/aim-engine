@@ -1,0 +1,25 @@
+# Backing cluster profile for the projected-runtime-discoverability test.
+# No accelerator fields, so it reaches Ready in any cluster.
+# Deployable (aimId + modelSources) with an image, so under the default
+# Exhaustive mode the AIMClusterProfile reconciler eagerly projects a bare
+# ClusterServingRuntime under the hashed per-profile name.
+#
+# The distinctive aimId / modelId / precision / metric are what the test reads
+# back off the projected runtime's full-fidelity annotations and selectable
+# model / precision labels — the discoverability that offsets the opaque hashed
+# object name.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: discoverability-profile
+spec:
+  aimId: discoverability/model
+  modelId: discoverability/model-fp8
+  engine: vllm
+  metric: throughput
+  precision: fp8
+  type: general
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: discoverability/model-fp8
+      sourceUri: hf://discoverability/model-fp8

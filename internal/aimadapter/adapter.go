@@ -770,7 +770,8 @@ func BuildStagingJob(
 // scoped read-only to this service's subtree via subPath at /adapters, and sets
 // the adapter container-contract env vars on the container.
 func AddVolumeMount(isvc *servingv1beta1.InferenceService, service *aimv1alpha1.AIMService, adapterDiskPVC string) {
-	if adapterDiskPVC == "" || len(isvc.Spec.Predictor.Containers) == 0 {
+	container := predictorInferenceContainer(isvc)
+	if adapterDiskPVC == "" || container == nil {
 		return
 	}
 
@@ -784,7 +785,6 @@ func AddVolumeMount(isvc *servingv1beta1.InferenceService, service *aimv1alpha1.
 		},
 	})
 
-	container := &isvc.Spec.Predictor.Containers[0]
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      constants.VolumeAdapterDisk,
 		MountPath: constants.AIMAdapterMountPath,
@@ -817,6 +817,22 @@ func AddVolumeMount(isvc *servingv1beta1.InferenceService, service *aimv1alpha1.
 		})
 	}
 	container.Env = utils.MergeEnvVars(container.Env, env)
+}
+
+// predictorInferenceContainer returns the inference container the adapter
+// wiring should target. The v1alpha1 template pipeline inlines an explicit
+// kserve-container in Predictor.Containers; the v1alpha2 profile pipeline
+// references a runtime and overlays the container via Predictor.Model, so the
+// container fields live on the embedded ModelSpec container. Returns nil when
+// neither is present.
+func predictorInferenceContainer(isvc *servingv1beta1.InferenceService) *corev1.Container {
+	if len(isvc.Spec.Predictor.Containers) > 0 {
+		return &isvc.Spec.Predictor.Containers[0]
+	}
+	if isvc.Spec.Predictor.Model != nil {
+		return &isvc.Spec.Predictor.Model.Container
+	}
+	return nil
 }
 
 // DynamicModeAllowed reports whether dynamic adapter mode is permitted for a

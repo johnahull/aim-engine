@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Eager per-profile runtime gains a service-driven Shared cache mount (Exhaustive).
+#
+# This is the regression guard for the mode-dependent Shared-cache mount. Under
+# the default Exhaustive mode the profile controller eagerly projects a complete
+# namespace ServingRuntime for a projectable namespace profile. That eager runtime
+# must mount a Shared AIMProfileCache created out-of-band (as an AIMService in the
+# default Shared caching mode does) even though the profile never set
+# caching.enabled and the cache carries a hashed object name, not the profile
+# name. Previously the eager path only looked up a cache named after the profile
+# gated on caching.enabled, so the Shared cache went unmounted and the pod
+# cold-pulled its weights — while the same service worked in Reduced mode via the
+# lazy shadow. The mount is now resolved identically on both paths.
+#
+# The cache is applied LATE and frozen to Ready (apply-with-status.sh) so the test
+# also exercises the AIMProfileCache watch on the profile controller: the eager
+# runtime is first projected WITHOUT the PVC volume, then gains it once the cache
+# reaches Ready, with no manual re-reconcile.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-eager-shadow-late-cache
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Create the deployable namespace profile
+      try:
+        - apply:
+            file: profile.yaml
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: test-eager-cache
+              status:
+                status: Ready
+
+    - name: Assert the eager per-profile ServingRuntime is projected WITHOUT the cache volume
+      description: |
+        No AIMProfileCache exists yet, so the runtime carries the colocated
+        profile ConfigMap volume and the modelSources redirect env, but NO
+        PVC-backed cache volume.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-eager-cache-6d4bb9bf
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-eager-cache
+                (ownerReferences[?kind == 'AIMProfile']):
+                  - name: test-eager-cache
+              spec:
+                (volumes[?configMap.name == 'aim-test-eager-cache-6d4bb9bf']):
+                  - name: aim-profile
+                (volumes[?persistentVolumeClaim] | length(@)): 0
+
+    - name: Seed a Ready, Shared, namespace-scope AIMProfileCache (hashed name, caching.enabled unset)
+      try:
+        - apply:
+            file: profile-cache.yaml
+        - script:
+            timeout: 60s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              apply-with-status.sh profile-cache.yaml --status-only -n "$NAMESPACE"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                name: test-eager-cache-cache-5e1f0a3b
+              status:
+                status: Ready
+
+    - name: Assert the eager ServingRuntime gains the PVC cache volume, mount, and redirect env
+      description: |
+        The Ready cache re-enqueues the profile via the AIMProfileCache watch and
+        the eager runtime is re-projected with the profile-owned cache volume
+        (claim eager-cache-weights-pvc), its mount at the cache mountPoint, and the
+        modelSources redirect env (AIM_CACHE_PATH, AIM_MODEL_ID, AIM_ID="").
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-eager-cache-6d4bb9bf
+              spec:
+                (volumes[?persistentVolumeClaim.claimName == 'eager-cache-weights-pvc']):
+                  - name: eager-cache-weights
+                (containers[0].volumeMounts[?name == 'eager-cache-weights'].mountPath | [0]): /workspace/cache/Qwen/Qwen3-0.6B
+                (containers[0].env[?name == 'AIM_CACHE_PATH'].value | [0]): /workspace/cache
+                (containers[0].env[?name == 'AIM_MODEL_ID'].value | [0]): Qwen/Qwen3-0.6B
+                (containers[0].env[?name == 'AIM_ID'] | length(@)): 1
+                (containers[0].env[?name == 'AIM_ID' && value] | length(@)): 0

@@ -205,6 +205,9 @@ func (r *AIMModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Reconciler:     r.reconciler,
 		Scheme:         r.Scheme,
 		Clientset:      r.Clientset,
+		// The field manager was renamed from "model-v1alpha2" to "model"; force
+		// so the renamed manager reclaims fields still owned by the old name.
+		ForceApply: true,
 	}
 
 	if err := mgr.GetFieldIndexer().IndexField(ctx, &aimv1alpha1.AIMServiceTemplate{}, aimv1alpha1.ServiceTemplateModelNameIndexKey, func(obj client.Object) []string {

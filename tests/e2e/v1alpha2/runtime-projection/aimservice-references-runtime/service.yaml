@@ -1,0 +1,32 @@
+# A namespaced v1alpha2 AIMService that references a cluster profile by name.
+# Phase C: the service never inlines a predictor — it sets
+# predictor.model.runtime: aim-test-phase-c-fe2d5ebc and overlays only service-specific
+# fields. The runtime does not exist eagerly (this is a cluster profile and no
+# eager projection has run), so the always-on lazy InferenceService-watch
+# projection (slice 04) materializes a complete namespace ServingRuntime
+# (+ colocated ConfigMap) in this namespace, cross-scope from the cluster
+# profile.
+#
+# caching.env switches the AIMProfileCache's download Job into simulation mode
+# so the profile-owned (Shared) cache reaches Ready without a real download,
+# which is the gate the AIMService waits on before it creates the ISVC.
+#
+# The cluster-auth/* annotation must propagate to the ISVC overlay; the foreign
+# annotation must not.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: phase-c-consumer
+  annotations:
+    cluster-auth/allowed-group: phase-c-group
+    example.com/ignored: drop-me
+spec:
+  profile:
+    name: test-phase-c
+  replicas: 1
+  caching:
+    env:
+      - name: AIM_DEBUG_SIMULATE_HF_DOWNLOAD
+        value: "true"
+      - name: AIM_DEBUG_SIMULATE_HF_DURATION
+        value: "2"

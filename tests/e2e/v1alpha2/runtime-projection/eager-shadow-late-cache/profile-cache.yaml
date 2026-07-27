@@ -1,0 +1,41 @@
+# A service-driven Shared, namespace-scoped AIMProfileCache for the profile. Its
+# object name is deliberately NOT the profile name (it mimics the hashed name an
+# AIMService's GenerateProfileCacheName produces), and the profile itself never
+# sets caching.enabled — so this pins that the eager runtime projection resolves
+# the cache by spec.profileName + Shared, decoupled from the profile's caching
+# flag and the cache's object name.
+#
+# Frozen to Ready with a resolved artifact (PVC + mount point) via
+# apply-with-status.sh, and paused so the AIMProfileCache controller does not
+# overwrite the status. No real download or storage class is needed.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfileCache
+metadata:
+  name: test-eager-cache-cache-5e1f0a3b
+  annotations:
+    aim.eai.amd.com/reconciliation-paused: "true"
+spec:
+  profileName: test-eager-cache
+  profileScope: Namespace
+  mode: Shared
+status:
+  status: Ready
+  conditions:
+    - type: ProfileFound
+      status: "True"
+      reason: ProfileResolved
+      message: Profile resolved
+      lastTransitionTime: "2025-01-01T00:00:00Z"
+    - type: ArtifactsReady
+      status: "True"
+      reason: AllCachesReady
+      message: All artifacts are ready
+      lastTransitionTime: "2025-01-01T00:00:00Z"
+  artifacts:
+    eager-cache-weights:
+      uid: "00000000-0000-0000-0000-0000000e4c4e"
+      name: eager-cache-weights
+      model: Qwen/Qwen3-0.6B
+      status: Ready
+      persistentVolumeClaim: eager-cache-weights-pvc
+      mountPoint: /workspace/cache/Qwen/Qwen3-0.6B

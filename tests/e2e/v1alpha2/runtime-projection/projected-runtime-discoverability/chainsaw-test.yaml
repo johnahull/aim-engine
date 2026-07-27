@@ -1,0 +1,115 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Discoverability for projected runtimes. An earlier change made the
+# per-profile runtime object name opaque (prefix-reserved truncate+hash) and
+# dropped the reverse name->profile resolver. This test proves the replacements
+# restore full operability against the LIVE reconcile:
+#
+#   1. AIMProfileStatus.projectedRuntimeName equals the actual projected
+#      ClusterServingRuntime name — the deterministic profile->runtime lookup
+#      for humans and tooling.
+#   2. The projected runtime carries selectable model / precision labels
+#      (aim.eai.amd.com/model, aim.eai.amd.com/precision), sanitized, alongside
+#      the existing correlator labels (managed-by, component, profile).
+#   3. The projected runtime carries full-fidelity identity annotations — the
+#      untruncated profile name, aimId, modelId, precision, metric — so nothing
+#      is lost to the name truncation/hash.
+#   4. `kubectl get clusterservingruntime -l <model>,<precision>` selects it,
+#      i.e. the labels are genuinely usable for operator-facing discovery.
+#
+# No accelerator and no cache/PVC, so this runs in any cluster under the default
+# Exhaustive projection mode with no special infrastructure.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-projected-runtime-discoverability
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Apply the profile and assert status.projectedRuntimeName is published
+      description: |
+        The per-profile runtime name (aim-discoverability-profile-5e67fe21) is
+        recorded on status alongside RuntimeProjected=True, giving the
+        deterministic profile->runtime lookup that replaces the reverse strip.
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: discoverability-profile
+              status:
+                status: Ready
+                projectedRuntimeName: aim-discoverability-profile-5e67fe21
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+
+    - name: Assert the projected runtime carries selectable labels and full-fidelity annotations
+      description: |
+        The object name is truncated+hashed, so the identity lives in labels
+        (model / precision selectors + correlators) and annotations (untruncated
+        profile name, aimId, modelId, precision, metric).
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-discoverability-profile-5e67fe21
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: discoverability-profile
+                  aim.eai.amd.com/model: discoverability-model
+                  aim.eai.amd.com/precision: fp8
+                annotations:
+                  aim.eai.amd.com/projected.profile: discoverability-profile
+                  aim.eai.amd.com/projected.aim-id: discoverability/model
+                  aim.eai.amd.com/projected.model-id: discoverability/model-fp8
+                  aim.eai.amd.com/projected.precision: fp8
+                  aim.eai.amd.com/projected.metric: throughput
+
+    - name: Assert the model / precision labels actually select the runtime
+      description: |
+        The whole point of the selectable labels: an operator can find the
+        runtime a model+precision projected without knowing the hashed name.
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              set -eu
+              WANT=aim-discoverability-profile-5e67fe21
+              SELECTED=$(kubectl get clusterservingruntime \
+                -l aim.eai.amd.com/model=discoverability-model,aim.eai.amd.com/precision=fp8 \
+                -o jsonpath='{.items[*].metadata.name}')
+              echo "selected by model+precision labels: $SELECTED"
+              MATCH=false
+              for n in $SELECTED; do
+                if [ "$n" = "$WANT" ]; then MATCH=true; fi
+              done
+              if [ "$MATCH" != "true" ]; then
+                echo "ERROR: label selector did not return $WANT"
+                exit 1
+              fi
+              echo "OK: model+precision labels select the projected runtime"
+
+    - name: Delete the profile and assert the runtime is garbage-collected
+      try:
+        - delete:
+            ref:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              name: discoverability-profile
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-discoverability-profile-5e67fe21

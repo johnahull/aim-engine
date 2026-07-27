@@ -55,6 +55,7 @@ type AIMProfileSpec struct {
 // +kubebuilder:printcolumn:name="Primary",type=boolean,JSONPath=`.spec.primary`
 // +kubebuilder:printcolumn:name="Version",type=string,JSONPath=`.status.version`
 // +kubebuilder:printcolumn:name="Manual",type=boolean,priority=1,JSONPath=`.spec.manualSelectionOnly`
+// +kubebuilder:printcolumn:name="Runtime",type=string,priority=1,JSONPath=`.status.projectedRuntimeName`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:selectablefield:JSONPath=`.spec.aimId`
 // Deployable profiles have both aimId and modelSources populated; base
@@ -75,6 +76,15 @@ type AIMProfile struct {
 
 func (p *AIMProfile) GetStatus() *AIMProfileStatus {
 	return &p.Status
+}
+
+// GetProfileSpecCommon returns the profile fields shared with AIMClusterProfile.
+// It lets callers that treat either profile scope uniformly (e.g. the lazy
+// runtime projection, which materializes a namespace ServingRuntime from a
+// namespace AIMProfile or a cluster AIMClusterProfile) read the common spec
+// without a scope-specific type switch.
+func (p *AIMProfile) GetProfileSpecCommon() AIMProfileSpecCommon {
+	return p.Spec.AIMProfileSpecCommon
 }
 
 // AIMProfileList contains a list of AIMProfile.

@@ -58,6 +58,10 @@ spec:
       name: Manual
       priority: 1
       type: boolean
+    - jsonPath: .status.projectedRuntimeName
+      name: Runtime
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -1062,6 +1066,28 @@ spec:
                 - discovered
                 - derived
                 - user-authored
+                type: string
+              projectedModelSlugRuntimeName:
+                description: |-
+                  ProjectedModelSlugRuntimeName is the name of the readable model-slug
+                  primary runtime (aim-<model-slug>) this profile publishes when it is its
+                  model's primary under Reduced or Both projection mode. Empty otherwise
+                  (Exhaustive mode, or a non-primary / non-projectable profile). Like
+                  ProjectedRuntimeName it follows the additive/degrade lifecycle and is not
+                  cleared when the gate flips while the runtime survives.
+                type: string
+              projectedRuntimeName:
+                description: |-
+                  ProjectedRuntimeName is the name of the per-profile KServe
+                  ServingRuntime / ClusterServingRuntime this profile projects
+                  (aim-<truncated-profile>-<hash>). Because that object name is truncated and
+                  hashed for length-safety and collision-freedom, it is not reversible; this
+                  field is the authoritative profile→runtime lookup for humans and tooling.
+                  Set alongside RuntimeProjected=True. It follows the projection's
+                  additive/degrade lifecycle: it is kept in place when the projection gate
+                  later flips but the runtime is retained (RuntimeProjected=Degraded), and is
+                  empty when no per-profile runtime is projected (e.g. Reduced mode, or a
+                  profile that was never projectable).
                 type: string
               resolvedNodeAffinity:
                 description: |-

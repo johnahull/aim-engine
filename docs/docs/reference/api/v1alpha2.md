@@ -558,6 +558,8 @@ _Appears in:_
 | `hardwareSummary` _string_ | HardwareSummary is a human-readable string describing the hardware requirements.<br />Format: "\{count\} x \{model\}" for GPU (e.g., "1 x MI300X") or "CPU" for CPU-only. |  | Optional: \{\} <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources contains the definitive K8s resource requests/limits used for deployment.<br />Computed by AIM Engine from AcceleratorType, AcceleratorCount, and cluster-level<br />configuration, then merged with any spec.resources override. |  | Optional: \{\} <br /> |
 | `resolvedNodeAffinity` _[NodeAffinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#nodeaffinity-v1-core)_ | ResolvedNodeAffinity contains the computed node affinity rules derived from<br />spec.acceleratorModel. Used by AIMService when building InferenceService pods. |  | Optional: \{\} <br /> |
+| `projectedRuntimeName` _string_ | ProjectedRuntimeName is the name of the per-profile KServe<br />ServingRuntime / ClusterServingRuntime this profile projects<br />(aim-<truncated-profile>-<hash>). Because that object name is truncated and<br />hashed for length-safety and collision-freedom, it is not reversible; this<br />field is the authoritative profile→runtime lookup for humans and tooling.<br />Set alongside RuntimeProjected=True. It follows the projection's<br />additive/degrade lifecycle: it is kept in place when the projection gate<br />later flips but the runtime is retained (RuntimeProjected=Degraded), and is<br />empty when no per-profile runtime is projected (e.g. Reduced mode, or a<br />profile that was never projectable). |  | Optional: \{\} <br /> |
+| `projectedModelSlugRuntimeName` _string_ | ProjectedModelSlugRuntimeName is the name of the readable model-slug<br />primary runtime (aim-<model-slug>) this profile publishes when it is its<br />model's primary under Reduced or Both projection mode. Empty otherwise<br />(Exhaustive mode, or a non-primary / non-projectable profile). Like<br />ProjectedRuntimeName it follows the additive/degrade lifecycle and is not<br />cleared when the gate flips while the runtime survives. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions represent the latest observations of profile state. |  |  |
 
 
@@ -656,6 +658,8 @@ _Appears in:_
 | --- | --- |
 | `AIMModel` |  |
 | `AIMClusterModel` |  |
+
+
 
 
 

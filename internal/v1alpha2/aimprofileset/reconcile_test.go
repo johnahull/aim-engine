@@ -97,7 +97,7 @@ metadata:
 		},
 	}
 
-	candidates, err := loadNamespaceCandidates(context.Background(), fakeClient, set)
+	candidates, err := loadNamespaceCandidates(context.Background(), fakeClient, fakeClient, set)
 	if err != nil {
 		t.Fatalf("loadNamespaceCandidates() error = %v", err)
 	}
@@ -151,7 +151,7 @@ func TestLoadNamespaceCandidates_UsesNamespaceProfilesOnly(t *testing.T) {
 		Spec:       aimv1alpha1.AIMProfileSetSpec{},
 	}
 
-	candidates, err := loadNamespaceCandidates(context.Background(), fakeClient, set)
+	candidates, err := loadNamespaceCandidates(context.Background(), fakeClient, fakeClient, set)
 	if err != nil {
 		t.Fatalf("loadNamespaceCandidates() error = %v", err)
 	}
@@ -244,7 +244,7 @@ func TestProfileSetCandidateLoading_RequiresExplicitCopyOptIn(t *testing.T) {
 	namespaceSet := &aimv1alpha2.AIMProfileSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "qwen-profiles", Namespace: "team-a"},
 	}
-	namespaceCandidates, err := loadNamespaceCandidates(context.Background(), fakeClient, namespaceSet)
+	namespaceCandidates, err := loadNamespaceCandidates(context.Background(), fakeClient, fakeClient, namespaceSet)
 	if err != nil {
 		t.Fatalf("loadNamespaceCandidates() error = %v", err)
 	}
@@ -255,7 +255,7 @@ func TestProfileSetCandidateLoading_RequiresExplicitCopyOptIn(t *testing.T) {
 	clusterSet := &aimv1alpha2.AIMClusterProfileSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "qwen-cluster-profiles"},
 	}
-	clusterCandidates, err := loadClusterCandidates(context.Background(), fakeClient, clusterSet)
+	clusterCandidates, err := loadClusterCandidates(context.Background(), fakeClient, fakeClient, clusterSet)
 	if err != nil {
 		t.Fatalf("loadClusterCandidates() error = %v", err)
 	}
@@ -516,7 +516,7 @@ func TestLoadNamespaceCandidates_HonoursRoleAndModelRefLabels(t *testing.T) {
 		},
 	}
 
-	candidates, err := loadNamespaceCandidates(context.Background(), fakeClient, set)
+	candidates, err := loadNamespaceCandidates(context.Background(), fakeClient, fakeClient, set)
 	if err != nil {
 		t.Fatalf("loadNamespaceCandidates() error = %v", err)
 	}
@@ -575,7 +575,7 @@ func TestLoadNamespaceCandidates_BaseRoleMatchesNothingInIteration1(t *testing.T
 			},
 		},
 	}
-	candidates, err := loadNamespaceCandidates(context.Background(), fakeClient, set)
+	candidates, err := loadNamespaceCandidates(context.Background(), fakeClient, fakeClient, set)
 	if err != nil {
 		t.Fatalf("loadNamespaceCandidates() error = %v", err)
 	}

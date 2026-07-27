@@ -228,6 +228,23 @@ Reports whether the cluster has nodes matching the profile's accelerator labels 
 
 The profile controller watches node events and re-evaluates hardware availability whenever node labels change.
 
+### RuntimeProjected
+
+Reports whether the profile is currently projecting a native KServe runtime (`ServingRuntime` / `ClusterServingRuntime`). This is informational — it does **not** gate the profile's aggregate `Ready`. See [Bring Your Own KServe](../guides/bring-your-own-kserve.md) for the consumer-facing workflow.
+
+| Status | Reason | Description |
+|---|---|---|
+| `True` | `RuntimeProjected` | A runtime is projected for this profile |
+| `False` | `RuntimeDegraded` | The projection gate is no longer satisfied (e.g. matching nodes drained, or the profile is no longer deployable), but a previously-projected runtime is **kept, not deleted** |
+
+The condition is silent (absent) when the profile has never projected a runtime, and during a transient node-list failure (so an API hiccup doesn't flap it to `Degraded`).
+
+:::{admonition} Degraded without garbage collection
+:class: note
+
+Projection is additive with **asymmetric teardown**: a runtime is created only while the profile is projectable, but is never deleted merely because the gate later flips — only when the profile itself is deleted (owner-reference GC). So a runtime object can persist while its profile reports `RuntimeProjected=False / RuntimeDegraded`. This deliberately avoids yanking a runtime out from under a native `InferenceService` that references it. The `aim.eai.amd.com/runtime-projection-state` label on the runtime object marks provenance (`projected`) and does not currently flip to `degraded`, so this condition on the profile is the authoritative degraded signal; the runtime's ownerRef / `aim.eai.amd.com/projected.profile` annotation is the way back to it.
+:::
+
 ## AIMProfileCache conditions
 
 ### ArtifactsReady

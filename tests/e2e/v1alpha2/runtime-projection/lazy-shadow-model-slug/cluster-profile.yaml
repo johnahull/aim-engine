@@ -1,0 +1,26 @@
+# Primary, deployable, no-accelerator cluster profile whose model-slug primary
+# runtime the lazy watcher must be able to complete cross-namespace.
+#
+# Under --runtime-projection-mode=Reduced this profile publishes ONLY the
+# model-slug primary ClusterServingRuntime aim-<model-slug> (slug derived from
+# spec.aimId: "lazy-slug/model" -> "lazy-slug-model"), referenced by name
+# (autoSelect off), and NO per-profile runtime. It is deployable (aimId +
+# modelSources set, image present)
+# and has no accelerator fields, so it reaches Ready in any cluster (kind or GPU
+# vcluster).
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: lazy-slug-primary
+spec:
+  aimId: lazy-slug/model
+  modelId: lazy-slug/model
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  primary: true
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: lazy-slug/model
+      sourceUri: hf://lazy-slug/model

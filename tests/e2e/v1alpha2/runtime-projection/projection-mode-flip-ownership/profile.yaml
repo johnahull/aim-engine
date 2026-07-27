@@ -1,0 +1,36 @@
+# Backing namespace profile for the projection-mode-flip ownership test.
+#
+# NON-primary and no accelerator on purpose (mirrors reduced-namespace-service):
+#   - no accelerator => reaches Ready in any cluster (kind or GPU vcluster);
+#   - non-primary + Reduced => the eager AIMProfile reconciler projects NOTHING
+#     for it, so the referencing AIMService's runtime can only be materialized by
+#     the always-on LAZY InferenceService-watch projection (a shadow marked
+#     aim.eai.amd.com/runtime-projection: lazy). That lazy shadow is the object
+#     the mode flip below then hands over to the eager path.
+#
+# Deployable (aimId + modelSources both set), so once the mode flips to
+# Exhaustive the eager per-profile projection turns on for the SAME hashed name
+# (aim-flip-ns-profile-bba2ad9c) and reclaims the runtime.
+#
+# The image is a placeholder (registry.example.com): the test asserts the
+# ownership-settling contract (marker + resourceVersion stability), decided at
+# render time, not that a pod pulls and serves.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: flip-ns-profile
+spec:
+  aimId: Qwen/Qwen3-0.6B
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  primary: false
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B
+      # Small PVC: the download is simulated (no real bytes), so this only needs
+      # to provision, not hold real weights.
+      size: 1Gi

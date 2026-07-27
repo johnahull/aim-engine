@@ -66,10 +66,25 @@ func AnnotationProfileSetNamespace() string {
 
 type ProfileSetReconciler struct {
 	Scheme *runtime.Scheme
+	// APIReader is the uncached reader used to load a sourceRef catalog, which
+	// may be a user pre-populated ConfigMap absent from the label-scoped cache.
+	APIReader client.Reader
 }
 
 type ClusterProfileSetReconciler struct {
 	Scheme *runtime.Scheme
+	// APIReader is the uncached reader used to load a sourceRef catalog, which
+	// may be a user pre-populated ConfigMap absent from the label-scoped cache.
+	APIReader client.Reader
+}
+
+// catalogReader returns the reader used to load a sourceRef catalog ConfigMap.
+// Falls back to the cached client when APIReader is unset (unit tests).
+func catalogReader(apiReader client.Reader, cached client.Client) client.Reader {
+	if apiReader != nil {
+		return apiReader
+	}
+	return cached
 }
 
 type managedProfile struct {
@@ -127,7 +142,7 @@ func (r *ProfileSetReconciler) FetchRemoteState(
 	reconcileCtx controllerutils.ReconcileContext[*aimv1alpha2.AIMProfileSet],
 ) ProfileSetFetchResult {
 	set := reconcileCtx.Object
-	candidates, candidateErr := loadNamespaceCandidates(ctx, c, set)
+	candidates, candidateErr := loadNamespaceCandidates(ctx, c, catalogReader(r.APIReader, c), set)
 	managed, managedErr := listManagedNamespaceProfiles(ctx, c, set.Namespace, string(set.UID))
 	return ProfileSetFetchResult{
 		set:        set,
@@ -142,7 +157,7 @@ func (r *ClusterProfileSetReconciler) FetchRemoteState(
 	reconcileCtx controllerutils.ReconcileContext[*aimv1alpha2.AIMClusterProfileSet],
 ) ClusterProfileSetFetchResult {
 	set := reconcileCtx.Object
-	candidates, candidateErr := loadClusterCandidates(ctx, c, set)
+	candidates, candidateErr := loadClusterCandidates(ctx, c, catalogReader(r.APIReader, c), set)
 	managed, managedErr := listManagedClusterProfiles(ctx, c, string(set.UID))
 	return ClusterProfileSetFetchResult{
 		set:        set,
@@ -465,9 +480,9 @@ func buildComponentHealth(fetchErrs []error, buildErr error, managed aimv1alpha1
 	}}
 }
 
-func loadNamespaceCandidates(ctx context.Context, c client.Client, set *aimv1alpha2.AIMProfileSet) ([]aimprofile.ProfileCopyCandidate, error) {
+func loadNamespaceCandidates(ctx context.Context, c client.Client, reader client.Reader, set *aimv1alpha2.AIMProfileSet) ([]aimprofile.ProfileCopyCandidate, error) {
 	if set.Spec.SourceRef != nil {
-		_, catalog, err := aimprofile.LoadDiscoveryCatalog(ctx, c, *set.Spec.SourceRef, set.Namespace)
+		_, catalog, err := aimprofile.LoadDiscoveryCatalog(ctx, reader, *set.Spec.SourceRef, set.Namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -501,10 +516,10 @@ func loadNamespaceCandidates(ctx context.Context, c client.Client, set *aimv1alp
 	return listClusterProfileCandidatesWithLabels(ctx, c, aimIDFilter, provenance)
 }
 
-func loadClusterCandidates(ctx context.Context, c client.Client, set *aimv1alpha2.AIMClusterProfileSet) ([]aimprofile.ProfileCopyCandidate, error) {
+func loadClusterCandidates(ctx context.Context, c client.Client, reader client.Reader, set *aimv1alpha2.AIMClusterProfileSet) ([]aimprofile.ProfileCopyCandidate, error) {
 	if set.Spec.SourceRef != nil {
 		namespace := constants.GetOperatorNamespace()
-		_, catalog, err := aimprofile.LoadDiscoveryCatalog(ctx, c, *set.Spec.SourceRef, namespace)
+		_, catalog, err := aimprofile.LoadDiscoveryCatalog(ctx, reader, *set.Spec.SourceRef, namespace)
 		if err != nil {
 			return nil, fmt.Errorf("load sourceRef %q from operator namespace %q: %w", set.Spec.SourceRef.Name, namespace, err)
 		}

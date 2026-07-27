@@ -1,0 +1,105 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Projection-mode smoke (Reduced). Locks the eager output of the profile
+# reconcilers when the operator runs with --runtime-projection-mode=Reduced.
+# Reduced publishes ONLY a single model-slug primary runtime per model, named
+# aim-<model-slug> (derived from spec.aimId) with autoSelect OFF (native KServe
+# references it by name), and does NOT project the per-profile runtime.
+#
+# OPT-IN: gated `requires: reduced-mode`, so the default (Exhaustive) lane skips
+# it — its assertions only hold against an operator started in Reduced. Run it
+# with:
+#   make set-projection-mode MODE=Reduced
+#   make test-chainsaw \
+#     CHAINSAW_TEST_DIR=tests/e2e/v1alpha2/runtime-projection/mode-reduced \
+#     CHAINSAW_ENV_SELECTOR=''
+# (see docs/docs/contributing/testing.md).
+#
+# Assertions (ordered so the absence check never races the reconcile):
+#   1. model-slug CSR aim-mode-test-reduced present (autoSelect: false),
+#   2. per-profile CSR aim-mode-reduced-primary-7a132af4 absent,
+#   3. model-slug CSR garbage-collected on profile delete.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-mode-reduced
+  labels:
+    requires: reduced-mode
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Apply the primary cluster profile and wait for Ready
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: mode-reduced-primary
+              status:
+                status: Ready
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+
+    - name: Assert the model-slug ClusterServingRuntime is projected (Reduced)
+      description: |
+        Reduced names the primary aim-<model-slug> (aim-mode-test-reduced here),
+        which native KServe InferenceServices reference by name — one stable,
+        vendor-independent runtime name per model. autoSelect stays OFF (all
+        runtimes share one model format, so autoSelect would collide across
+        models), and the correlator labels point at the backing primary profile.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-test-reduced
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: mode-reduced-primary
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: mode-reduced-primary
+              spec:
+                supportedModelFormats:
+                  - name: huggingface
+                    autoSelect: false
+                containers:
+                  - name: kserve-container
+                    image: registry.example.com/aim-cpu-base:0.12.0
+
+    - name: Assert NO per-profile ClusterServingRuntime exists in Reduced mode
+      description: |
+        Reduced does not project the per-profile runtime aim-<profile.Name>. The
+        model-slug assertion above already proved the reconcile ran, so the
+        per-profile runtime is definitively absent, not merely not-yet-created.
+      try:
+        - error:
+            timeout: 30s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-reduced-primary-7a132af4
+
+    - name: Delete the profile and assert the model-slug runtime is garbage-collected
+      try:
+        - delete:
+            ref:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              name: mode-reduced-primary
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-test-reduced

@@ -68,19 +68,26 @@ spec:
                   name: test-cpu-basic-profile
                   scope: Cluster
 
-    - name: Assert profile ConfigMap is created
+    - name: Assert the colocated profile ConfigMap is materialized on the referenced runtime
+      # Post slice-06 the AIMService no longer emits its own profile ConfigMap.
+      # The runtime projection materializes a colocated ConfigMap named
+      # aim-<profile>, labeled with the profile (not the service).
       try:
         - assert:
             resource:
               apiVersion: v1
               kind: ConfigMap
               metadata:
+                name: aim-test-cpu-basic-profile-115fe67a
                 labels:
-                  aim.eai.amd.com/service: test-cpu-basic-service
                   app.kubernetes.io/managed-by: aim-engine
                   app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: test-cpu-basic-profile
 
-    - name: Assert InferenceService is created with CPU profile
+    - name: Assert the InferenceService references the projected runtime, inlining nothing
+      # Post slice-06 the overlay references aim-<profile> by name with the
+      # huggingface model format and carries no inline predictor container; the
+      # CPU profile image lives on the projected ServingRuntime asserted below.
       try:
         - assert:
             resource:
@@ -90,11 +97,35 @@ spec:
                 labels:
                   aim.eai.amd.com/service: test-cpu-basic-service
                   aim.eai.amd.com/profile: test-cpu-basic-profile
+                annotations:
+                  aim.eai.amd.com/runtime-profile: test-cpu-basic-profile
               spec:
                 predictor:
-                  containers:
-                    - name: kserve-container
-                      image: registry.example.com/aim-cpu-base:0.12.0
+                  model:
+                    runtime: aim-test-cpu-basic-profile-115fe67a
+                    modelFormat:
+                      name: huggingface
+
+    - name: Assert the projected ServingRuntime carries the CPU profile image
+      # The runtime projection materializes a ServingRuntime named aim-<profile>
+      # (owned by the cluster profile) that holds the CPU profile image and mounts
+      # the colocated profile ConfigMap.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-cpu-basic-profile-115fe67a
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-cpu-basic-profile
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-cpu-basic-profile
+              spec:
+                (containers[?name == 'kserve-container'].image | [0]): registry.example.com/aim-cpu-base:0.12.0
+                (volumes[?configMap.name == 'aim-test-cpu-basic-profile-115fe67a']):
+                  - name: aim-profile
 
     - name: Assert service reaches Starting status
       try:

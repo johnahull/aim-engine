@@ -41,6 +41,22 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+# Wire the runtimeProjectionMode value to the operator's --runtime-projection-mode
+# arg. The helm/v2-alpha plugin renders the manager args as a fixed
+# --health-probe-bind-address line followed by a range over .Values.manager.args,
+# so anchor on that fixed line and splice the flag right after it (preserving the
+# line's indentation). Guarded so an empty value renders no arg (the operator then
+# falls back to its compiled-in Exhaustive default); the shipped default value
+# keeps projection in Exhaustive mode.
+# ------------------------------------------------------------------------------
+echo "  - Wiring runtimeProjectionMode to --runtime-projection-mode arg..."
+if [[ -f "${MANAGER_YAML}" ]]; then
+    sed -i 's|^\( *\)- --health-probe-bind-address=:8081$|&\n\1{{- if .Values.manager.runtimeProjectionMode }}\n\1- --runtime-projection-mode={{ .Values.manager.runtimeProjectionMode }}\n\1{{- end }}|' "${MANAGER_YAML}"
+else
+    echo "    Warning: ${MANAGER_YAML} not found, skipping runtime-projection-mode arg wiring"
+fi
+
+# ------------------------------------------------------------------------------
 # Inject manager env block: scale-from-zero controller defaults, the dedicated
 # manager.artifactDownloaderImage override (exposed as
 # AIM_ARTIFACT_DOWNLOADER_IMAGE), plus any operator-supplied passthrough from

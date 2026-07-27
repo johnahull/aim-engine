@@ -1,0 +1,28 @@
+# Backing cluster profile for the migration test. No accelerator fields, so it
+# has no hardware requirement and reaches Ready in any cluster (kind CI lane or
+# GPU vcluster). Deployable: aimId + modelSources are both set, so the shared
+# builder can turn it into a complete namespace runtime and the consuming
+# AIMService stands up a profile-owned (Shared) cache for it.
+#
+# The image is a placeholder (registry.example.com): this test asserts the
+# UPGRADE contract (inline ISVC rewritten to a runtime reference + orphan
+# ConfigMap GC) which is decided at render time, not that the predictor pod
+# pulls and serves. See the test's pod-readiness note.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: test-migration
+spec:
+  aimId: Qwen/Qwen3-0.6B
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B
+      # Small PVC: the download is simulated (no real bytes), so this only
+      # needs to provision, not hold real weights.
+      size: 1Gi

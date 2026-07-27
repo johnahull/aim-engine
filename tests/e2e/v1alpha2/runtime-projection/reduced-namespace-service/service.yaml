@@ -1,0 +1,32 @@
+# A namespaced v1alpha2 AIMService that references a namespace AIMProfile in its
+# OWN namespace (Reduced mode).
+#
+# The service never inlines a predictor — it sets
+# predictor.model.runtime: aim-reduced-ns-profile-c1bdedde and overlays only
+# service-specific fields. Under Reduced the backing namespace profile has NO
+# eager per-profile runtime, so the reference cannot resolve eagerly. The
+# always-on lazy InferenceService-watch projection must rescue it: it resolves
+# the namespace AIMProfile from the runtime-profile annotation (now stamped for
+# namespace-scope services too) namespace-first, and materializes a complete
+# namespace ServingRuntime (+ colocated ConfigMap) owned by that namespace
+# profile.
+#
+# caching.env switches the AIMProfileCache's download Job into simulation mode so
+# the profile-owned (Shared) NAMESPACE cache reaches Ready without a real
+# download — the gate the AIMService waits on before it creates the ISVC, and
+# the scope-aware cache lookup the lazy watcher now performs (namespace cache for
+# a namespace-profile-backed shadow).
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: reduced-ns-consumer
+spec:
+  profile:
+    name: reduced-ns-profile
+  replicas: 1
+  caching:
+    env:
+      - name: AIM_DEBUG_SIMULATE_HF_DOWNLOAD
+        value: "true"
+      - name: AIM_DEBUG_SIMULATE_HF_DURATION
+        value: "2"

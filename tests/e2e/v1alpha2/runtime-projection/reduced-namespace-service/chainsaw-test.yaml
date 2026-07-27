@@ -1,0 +1,212 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# The lazy resolver is profile-scope-aware, so a Reduced-mode
+# namespace-AIMProfile-backed AIMService self-completes.
+#
+# Under --runtime-projection-mode=Reduced a NON-primary namespace AIMProfile gets
+# NO eager per-profile ServingRuntime (per-profile runtimes are Exhaustive/Both
+# only; the model-slug primary is published only for a model's primary profile).
+# A namespaced AIMService backed by that namespace profile still emits an ISVC
+# referencing aim-<profile.Name>. Before this fix the lazy InferenceService-watch
+# resolver was AIMClusterProfile-only, so it could not rescue the reference and
+# the ISVC sat at InvalidSpec forever. Now the resolver resolves a namespace
+# AIMProfile (annotation-first, in the ISVC namespace) and materializes a
+# complete namespace ServingRuntime (+ colocated ConfigMap) owned by it.
+#
+# The materialized runtime carries the lazy-projection marker label
+# (aim.eai.amd.com/runtime-projection: lazy) — proof it came from the LAZY path
+# and not an eager per-profile projection (which under Reduced does not exist,
+# and would carry the same AIMProfile ownerReference but no marker).
+#
+# Pod readiness is intentionally NOT asserted: the placeholder image
+# (registry.example.com) never pulls and the cache download is simulated. This
+# asserts the deterministic contract — scope-aware resolution, lazy runtime
+# materialization owned by the namespace profile, and KServe binding — all
+# decided at render time, independent of a live pod.
+#
+# OPT-IN: gated `requires: reduced-mode`, so the default (Exhaustive) lane skips
+# it — its assertions only hold against an operator started in Reduced. Run it
+# with:
+#   make set-projection-mode MODE=Reduced
+#   make test-chainsaw \
+#     CHAINSAW_TEST_DIR=tests/e2e/v1alpha2/runtime-projection/reduced-namespace-service \
+#     CHAINSAW_ENV_SELECTOR=''
+# (see docs/docs/contributing/testing.md).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-reduced-namespace-service
+  labels:
+    requires: reduced-mode
+spec:
+  timeouts:
+    assert: 120s
+    # This test provisions a real PVC-backed Shared namespace AIMProfileCache and
+    # a KServe InferenceService, whose finalizers make namespace teardown slower
+    # than the global 60s cleanup default on a loaded shared cluster (the GPU
+    # vcluster runs many test namespaces concurrently). Give teardown headroom so
+    # a slow-but-successful namespace deletion is not scored as a failure.
+    cleanup: 240s
+  steps:
+    - name: Apply the namespace profile and wait for Ready
+      description: |
+        A non-primary, no-accelerator, deployable namespace AIMProfile. It
+        reaches Ready under Reduced even though it projects no eager runtime —
+        RuntimeProjected is informational and stays silent for a non-primary
+        profile in Reduced, so it does not gate the aggregated Ready.
+      try:
+        - apply:
+            file: profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: reduced-ns-profile
+              status:
+                status: Ready
+
+    - name: Assert NO eager per-profile ServingRuntime exists before the service
+      description: |
+        Reduced does not project the per-profile runtime aim-<profile.Name> for a
+        namespace profile. The profile reached Ready above (its reconcile ran), so
+        the runtime is definitively absent, not merely not-yet-created. This is
+        the pre-condition that makes the lazy path the only thing that can
+        materialize the runtime below.
+      try:
+        - error:
+            timeout: 30s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-reduced-ns-profile-c1bdedde
+
+    - name: Create the AIMService that references the namespace profile
+      try:
+        - apply:
+            file: service.yaml
+
+    - name: Assert the service resolves the namespace profile
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: reduced-ns-consumer
+              status:
+                (conditions[?type == 'ProfileReady']):
+                  - status: "True"
+                    reason: ProfileResolved
+                resolvedProfile:
+                  name: reduced-ns-profile
+                  scope: Namespace
+
+    - name: Assert the profile-owned (Shared) NAMESPACE cache reaches Ready
+      description: |
+        The AIMService stands up a Shared, namespace-scoped AIMProfileCache for
+        the resolved namespace profile. caching.env put the download Job into
+        simulation mode, so it reaches Ready without a real download. This is the
+        gate the service waits on before it creates the InferenceService, and the
+        namespace-scope cache the lazy watcher's scope-aware lookup pairs with a
+        namespace-profile-backed shadow.
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: reduced-ns-consumer
+              spec:
+                profileName: reduced-ns-profile
+                profileScope: Namespace
+                mode: Shared
+              status:
+                status: Ready
+
+    - name: Assert the InferenceService references the runtime and stamps the profile annotation
+      description: |
+        The overlay sets predictor.model.runtime: aim-reduced-ns-profile-c1bdedde and
+        stamps the runtime-profile annotation — now emitted for namespace-scope
+        services too, so the lazy watcher can resolve the namespace AIMProfile
+        from it under Reduced (before any runtime exists).
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: reduced-ns-consumer
+                annotations:
+                  aim.eai.amd.com/runtime-profile: reduced-ns-profile
+              spec:
+                predictor:
+                  model:
+                    runtime: aim-reduced-ns-profile-c1bdedde
+                    modelFormat:
+                      name: huggingface
+
+    - name: Assert the colocated profile ConfigMap is lazily materialized
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-reduced-ns-profile-c1bdedde
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: reduced-ns-profile
+                  # Proof this is the lazy shadow (not an eager projection).
+                  aim.eai.amd.com/runtime-projection: lazy
+              data:
+                (keys(@)):
+                  - vllm-none-bf16-tp0-latency.yaml
+
+    - name: Assert a complete namespace ServingRuntime is materialized, owned by the namespace profile
+      description: |
+        The lazy watcher materialized aim-<profile.Name> in the service namespace,
+        owner-ref'd by the NAMESPACE AIMProfile (not an AIMClusterProfile), marked
+        with the lazy-projection label (so self-heal re-applies it and does not
+        mistake it for the profile's eager projection), and complete — it mounts
+        the colocated profile ConfigMap of the same name.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-reduced-ns-profile-c1bdedde
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: reduced-ns-profile
+                  aim.eai.amd.com/runtime-projection: lazy
+                (ownerReferences[?kind == 'AIMProfile']):
+                  - name: reduced-ns-profile
+              spec:
+                (volumes[?configMap.name == 'aim-reduced-ns-profile-c1bdedde']):
+                  - name: aim-profile
+
+    - name: Assert KServe binds the materialized namespace ServingRuntime
+      description: |
+        With the namespace SR present, the ISVC binds it by name
+        (status.servingRuntimeName) — the reference is rescued rather than stuck
+        at InvalidSpec / RuntimeNotRecognized.
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: reduced-ns-consumer
+              status:
+                (servingRuntimeName || ''): aim-reduced-ns-profile-c1bdedde

@@ -98,6 +98,14 @@ type PlanResult struct {
 	// Use this for shared resources or resources that should outlive the owner.
 	toApplyWithoutOwnerRef []client.Object
 
+	// toApplyWithForce are owned objects to create or update via Server-Side Apply
+	// with ForceOwnership. Use this for objects AIM Engine is authoritative over and
+	// must reassert drift on even when another field manager touched our fields (e.g.
+	// a projected runtime named under the reserved aim- prefix, which cannot collide
+	// with a hand-authored object). Like toApply, these receive owner references and
+	// are garbage collected with the owner.
+	toApplyWithForce []client.Object
+
 	// toDelete are objects to delete
 	toDelete []client.Object
 
@@ -119,6 +127,15 @@ func (pr *PlanResult) ApplyWithoutOwnerRef(obj client.Object) {
 	pr.toApplyWithoutOwnerRef = append(pr.toApplyWithoutOwnerRef, obj)
 }
 
+// ApplyWithForce adds an owned object to be applied via Server-Side Apply with
+// ForceOwnership. Use this for objects AIM Engine is authoritative over — e.g.
+// projected runtimes named under the reserved aim- prefix — to reassert managed
+// fields and reconcile drift; the object still gets an owner reference and is
+// garbage collected with the owner.
+func (pr *PlanResult) ApplyWithForce(obj client.Object) {
+	pr.toApplyWithForce = append(pr.toApplyWithForce, obj)
+}
+
 // Delete adds an object to be deleted
 func (pr *PlanResult) Delete(obj client.Object) {
 	pr.toDelete = append(pr.toDelete, obj)
@@ -132,6 +149,11 @@ func (pr *PlanResult) GetToApply() []client.Object {
 // GetToApplyWithoutOwnerRef returns the objects to be applied without owner references (for testing)
 func (pr *PlanResult) GetToApplyWithoutOwnerRef() []client.Object {
 	return pr.toApplyWithoutOwnerRef
+}
+
+// GetToApplyWithForce returns the objects to be force-applied with owner references (for testing)
+func (pr *PlanResult) GetToApplyWithForce() []client.Object {
+	return pr.toApplyWithForce
 }
 
 // GetToDelete returns the objects to be deleted (for testing)
@@ -149,6 +171,7 @@ func (pr *PlanResult) GetToDelete() []client.Object {
 func (pr *PlanResult) Merge(other PlanResult) {
 	pr.toApply = append(pr.toApply, other.toApply...)
 	pr.toApplyWithoutOwnerRef = append(pr.toApplyWithoutOwnerRef, other.toApplyWithoutOwnerRef...)
+	pr.toApplyWithForce = append(pr.toApplyWithForce, other.toApplyWithForce...)
 	pr.toDelete = append(pr.toDelete, other.toDelete...)
 	if other.RequeueAfter > 0 && (pr.RequeueAfter == 0 || other.RequeueAfter < pr.RequeueAfter) {
 		pr.RequeueAfter = other.RequeueAfter
@@ -237,6 +260,15 @@ type Pipeline[T ObjectWithStatus[S], S StatusWithConditions, F any, Obs any] str
 	Scheme         *runtime.Scheme
 	ControllerName string
 	Clientset      kubernetes.Interface // Optional: for health inspectors that need additional K8s API access
+
+	// ForceApply makes the owned (toApply) and unowned (toApplyWithoutOwnerRef)
+	// buckets apply with ForceOwnership. Enable it only for controllers whose
+	// field manager name changed (e.g. dropping a version suffix): the renamed
+	// manager must reassert ownership of fields whose managedFields still point
+	// at the previous name, otherwise SSA conflicts block reconciliation. Leave
+	// false to keep the default cooperative SSA; per-object force is still
+	// available via PlanResult.ApplyWithForce.
+	ForceApply bool
 }
 
 // GetKubernetesName returns the Kubernetes controller name (used in SetupWithManager's .Named()).
@@ -353,9 +385,16 @@ func (p *Pipeline[T, S, F, Obs]) Run(ctx context.Context, obj T) (ctrl.Result, e
 		}
 		ApplyControllerLabelsToResult(&planResult, controllerLabels)
 
+		// When ForceApply is set (field-manager rename migration), the owned and
+		// unowned buckets must reassert ownership from the previous field manager.
+		applyOwned := ApplyDesiredState
+		if p.ForceApply {
+			applyOwned = ApplyDesiredStateWithForce
+		}
+
 		// Apply owned resources (with owner references)
 		if len(planResult.toApply) > 0 {
-			applyErr = ApplyDesiredState(ctx, p.Client, p.GetFullName(), p.Scheme, planResult.toApply, obj)
+			applyErr = applyOwned(ctx, p.Client, p.GetFullName(), p.Scheme, planResult.toApply, obj)
 			if applyErr != nil {
 				applyErr = fmt.Errorf("failed to apply owned resources: %w", applyErr)
 			}
@@ -363,9 +402,17 @@ func (p *Pipeline[T, S, F, Obs]) Run(ctx context.Context, obj T) (ctrl.Result, e
 
 		// Apply unowned resources (without owner references)
 		if applyErr == nil && len(planResult.toApplyWithoutOwnerRef) > 0 {
-			applyErr = ApplyDesiredState(ctx, p.Client, p.GetFullName(), p.Scheme, planResult.toApplyWithoutOwnerRef, nil)
+			applyErr = applyOwned(ctx, p.Client, p.GetFullName(), p.Scheme, planResult.toApplyWithoutOwnerRef, nil)
 			if applyErr != nil {
 				applyErr = fmt.Errorf("failed to apply unowned resources: %w", applyErr)
+			}
+		}
+
+		// Apply force-owned resources (with owner references, SSA + ForceOwnership)
+		if applyErr == nil && len(planResult.toApplyWithForce) > 0 {
+			applyErr = ApplyDesiredStateWithForce(ctx, p.Client, p.GetFullName(), p.Scheme, planResult.toApplyWithForce, obj)
+			if applyErr != nil {
+				applyErr = fmt.Errorf("failed to force-apply owned resources: %w", applyErr)
 			}
 		}
 	}

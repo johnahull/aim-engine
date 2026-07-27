@@ -170,6 +170,10 @@ func (r *AIMClusterModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Reconciler:     r.reconciler,
 		Scheme:         r.Scheme,
 		Clientset:      r.Clientset,
+		// The field manager was renamed from "cluster-model-v1alpha2" to
+		// "cluster-model"; force so the renamed manager reclaims fields still
+		// owned by the old name.
+		ForceApply: true,
 	}
 
 	if err := mgr.GetFieldIndexer().IndexField(ctx, &aimv1alpha1.AIMClusterServiceTemplate{}, aimv1alpha1.ServiceTemplateModelNameIndexKey, func(obj client.Object) []string {

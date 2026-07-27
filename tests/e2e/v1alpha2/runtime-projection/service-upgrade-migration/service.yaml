@@ -1,0 +1,25 @@
+# A namespaced v1alpha2 AIMService that references a cluster profile by name.
+# This is the service being "upgraded": a hand-authored inline InferenceService
+# and an orphaned <service>-profile-<hash> ConfigMap are stood up first (see the
+# chainsaw steps) to simulate a service that was already running under the
+# retired inline-predictor path. When the new operator reconciles it, it must
+# rewrite the ISVC in place to reference the projected runtime
+# (aim-test-migration-c84b2956) and garbage-collect the orphaned ConfigMap.
+#
+# caching.env switches the AIMProfileCache's download Job into simulation mode so
+# the profile-owned (Shared) cache reaches Ready without a real download, which
+# is the gate the AIMService waits on before it (re)writes the ISVC.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: mig-svc
+spec:
+  profile:
+    name: test-migration
+  replicas: 1
+  caching:
+    env:
+      - name: AIM_DEBUG_SIMULATE_HF_DOWNLOAD
+        value: "true"
+      - name: AIM_DEBUG_SIMULATE_HF_DURATION
+        value: "2"

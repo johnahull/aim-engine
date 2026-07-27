@@ -50,6 +50,34 @@ func ApplyDesiredState(
 	desired []client.Object,
 	owner client.Object,
 ) error {
+	return applyDesiredState(ctx, k8sClient, fieldOwner, scheme, desired, owner, false)
+}
+
+// ApplyDesiredStateWithForce behaves like ApplyDesiredState but applies each
+// object with ForceOwnership, so the field manager reasserts ownership of any
+// of its fields another manager has touched. Use for objects AIM Engine is
+// authoritative over — e.g. projected runtimes named under the reserved aim-
+// prefix, which cannot collide with hand-authored objects.
+func ApplyDesiredStateWithForce(
+	ctx context.Context,
+	k8sClient client.Client,
+	fieldOwner string,
+	scheme *runtime.Scheme,
+	desired []client.Object,
+	owner client.Object,
+) error {
+	return applyDesiredState(ctx, k8sClient, fieldOwner, scheme, desired, owner, true)
+}
+
+func applyDesiredState(
+	ctx context.Context,
+	k8sClient client.Client,
+	fieldOwner string,
+	scheme *runtime.Scheme,
+	desired []client.Object,
+	owner client.Object,
+	force bool,
+) error {
 	if len(desired) == 0 {
 		return nil
 	}
@@ -83,19 +111,26 @@ func ApplyDesiredState(
 	// conflict on one resource should not hide a real misconfiguration
 	// on a sibling, and the framework's InfrastructureError unwrap
 	// surfaces every collected error to the categorizer.
+	// Use Server-Side Apply (SSA) to create/update desired objects.
+	// The FieldOwner parameter ensures this controller owns only the fields it manages.
+	// Without ForceOwnership, SSA cooperates with kubectl and other controllers:
+	// if another manager has changed fields, this apply only updates fields owned
+	// by this controller's field manager. With ForceOwnership, this manager takes
+	// over conflicting fields to reassert drift on objects we are authoritative over.
+	patchOpts := []client.PatchOption{client.FieldOwner(fieldOwner)}
+	if force {
+		patchOpts = append(patchOpts, client.ForceOwnership)
+	}
+
 	var applyErrs []error
 	for _, obj := range sorted {
 		gvk := obj.GetObjectKind().GroupVersionKind()
 		key := client.ObjectKeyFromObject(obj)
-
-		// Server-Side Apply. ForceOwnership converges resources still owned by the
-		// previous version-suffixed field managers onto the stable ones.
 		if err := k8sClient.Patch(
 			ctx,
 			obj,
 			client.Apply,
-			client.FieldOwner(fieldOwner),
-			client.ForceOwnership,
+			patchOpts...,
 		); err != nil {
 			applyErrs = append(applyErrs, fmt.Errorf("failed to apply %s %s/%s: %w", gvk.Kind, key.Namespace, key.Name, err))
 		}
@@ -204,6 +239,9 @@ func PropagateLabelsForResult(parent client.Object, planResult *PlanResult, conf
 	for _, obj := range planResult.toApplyWithoutOwnerRef {
 		PropagateLabels(parent, obj, config)
 	}
+	for _, obj := range planResult.toApplyWithForce {
+		PropagateLabels(parent, obj, config)
+	}
 }
 
 // ApplyControllerLabelsToResult adds controller-specific labels to all resources in the PlanResult.
@@ -214,6 +252,9 @@ func ApplyControllerLabelsToResult(planResult *PlanResult, labels map[string]str
 		applyControllerLabels(obj, labels)
 	}
 	for _, obj := range planResult.toApplyWithoutOwnerRef {
+		applyControllerLabels(obj, labels)
+	}
+	for _, obj := range planResult.toApplyWithForce {
 		applyControllerLabels(obj, labels)
 	}
 }

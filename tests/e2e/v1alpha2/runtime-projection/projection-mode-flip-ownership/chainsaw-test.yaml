@@ -1,0 +1,274 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# A projection-mode flip must NOT leave the eager and lazy projectors
+# ping-ponging managedFields ownership of the same namespace ServingRuntime.
+#
+# Scenario:
+#   1. Operator in --runtime-projection-mode=Reduced. A non-primary namespace
+#      AIMProfile gets NO eager per-profile runtime, so a referencing AIMService's
+#      runtime aim-flip-ns-profile-bba2ad9c is materialized ONLY by the always-on
+#      lazy InferenceService-watch projection — a shadow marked
+#      aim.eai.amd.com/runtime-projection: lazy.
+#   2. Flip the operator to Exhaustive. The eager per-profile projection now turns
+#      on for the SAME hashed name (hashing does NOT separate the two
+#      projectors — both target the same object). Before the fix, both controllers
+#      force-applied it under different field managers every reconcile, churning
+#      managedFields / resourceVersion with no spec change.
+#   3. Assert ownership settles: the eager force-apply RECLAIMS the marker key and
+#      overwrites it with aim.eai.amd.com/runtime-projection: eager, so
+#      the lazy path defers; and the object's resourceVersion STABILIZES (sampled
+#      twice with a delay, required unchanged) — a single settled owner.
+#
+# Follows v1alpha2 conventions (profile-based, no AIMServiceTemplate) and the
+# computed hashed runtime name aim-flip-ns-profile-bba2ad9c
+# (serving.RuntimeName("flip-ns-profile")).
+#
+# OPT-IN: gated `requires: reduced-mode`, so the default (Exhaustive) lane skips
+# it (CHAINSAW_PROJECTION_MODE_EXCLUDE). The Reduced CI leg picks it up. It is
+# `concurrent: false` so it runs isolated: Go's testing model runs non-parallel
+# tests BEFORE the parallel ones, so it flips + asserts + RESTORES the mode to
+# Reduced (in `finally`) before the other reduced-mode tests run — the mode flip
+# is a global operator change and must not overlap them. The flip is a surgical,
+# arg-preserving append of --runtime-projection-mode (the Go flag package takes
+# the last occurrence), NOT `make set-projection-mode` (which replaces the whole
+# args list and would drop the operator's metrics / leader-elect args mid-leg).
+# Run it manually with:
+#   make set-projection-mode MODE=Reduced
+#   make test-chainsaw \
+#     CHAINSAW_TEST_DIR=tests/e2e/v1alpha2/runtime-projection/projection-mode-flip-ownership \
+#     CHAINSAW_ENV_SELECTOR=''
+# (see docs/docs/contributing/testing.md).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-mode-flip-ownership
+  labels:
+    requires: reduced-mode
+spec:
+  # Global operator-mode flip: must not run concurrently with the other
+  # reduced-mode tests. Non-parallel tests run first, so this settles + restores
+  # the mode before they start.
+  concurrent: false
+  timeouts:
+    assert: 120s
+    cleanup: 240s
+  steps:
+    - name: Apply the namespace profile and wait for Ready
+      description: |
+        A non-primary, no-accelerator, deployable namespace AIMProfile. It reaches
+        Ready under Reduced even though it projects no eager runtime.
+      try:
+        - apply:
+            file: profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: flip-ns-profile
+              status:
+                status: Ready
+
+    - name: Assert NO eager per-profile ServingRuntime exists before the service
+      description: |
+        Reduced does not project the per-profile runtime for a namespace profile.
+        The profile reached Ready above (its reconcile ran), so the runtime is
+        definitively absent — the lazy path is the only thing that can materialize
+        it, which is what makes the shadow carry the lazy marker below.
+      try:
+        - error:
+            timeout: 30s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-flip-ns-profile-bba2ad9c
+
+    - name: Create the AIMService that references the namespace profile
+      try:
+        - apply:
+            file: service.yaml
+
+    - name: Assert the profile-owned (Shared) namespace cache reaches Ready
+      description: |
+        The AIMService stands up a Shared, namespace-scoped AIMProfileCache; the
+        simulated download makes it Ready without real bytes. This is the gate the
+        service waits on before it creates the InferenceService.
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: flip-ns-consumer
+              spec:
+                profileName: flip-ns-profile
+                profileScope: Namespace
+                mode: Shared
+              status:
+                status: Ready
+
+    - name: Assert the lazy shadow ServingRuntime is materialized (pre-flip)
+      description: |
+        Under Reduced the runtime aim-flip-ns-profile-bba2ad9c exists ONLY because
+        the lazy InferenceService-watch projection materialized it. It carries the
+        lazy marker (runtime-projection: lazy) and the namespace AIMProfile
+        ownerReference — the pre-flip state that the mode flip must hand over.
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-flip-ns-profile-bba2ad9c
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: flip-ns-profile
+                  aim.eai.amd.com/runtime-projection: lazy
+                (ownerReferences[?kind == 'AIMProfile']):
+                  - name: flip-ns-profile
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-flip-ns-profile-bba2ad9c
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/runtime-projection: lazy
+
+    - name: Flip to Exhaustive, assert eager takeover, and require resourceVersion stability
+      description: |
+        Append --runtime-projection-mode=Exhaustive (arg-preserving; last flag
+        wins) and wait for the rollout. The eager per-profile projection then
+        force-applies the SAME name and RECLAIMS the marker: the lazy value is
+        overwritten to `eager`, so ownedByLazyProjection is false and the lazy
+        path defers. The operator restart makes both cold field managers briefly
+        re-contend for the marker (a bounded, self-healing convergence burst), so
+        the stability check first POLLS resourceVersion until it is quiescent
+        (unchanged across a short interval, bounded timeout) and only then
+        establishes the baseline: with a single settled owner the runtime's
+        resourceVersion no longer churns — sampled twice with a delay and required
+        unchanged. The `finally` restores Reduced so the other reduced-mode tests
+        run cleanly.
+      try:
+        - script:
+            timeout: 210s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              NS="${OPERATOR_NAMESPACE:-aim-system}"
+              DEPLOY="${OPERATOR_DEPLOYMENT:-aim-engine-controller-manager}"
+              # Surgical, arg-preserving flip: append the mode flag (Go's flag
+              # package takes the LAST occurrence), so metrics / leader-elect args
+              # survive. Equivalent intent to `make set-projection-mode
+              # MODE=Exhaustive`, without clobbering the operator's other args.
+              kubectl -n "$NS" patch deployment "$DEPLOY" --type=json \
+                -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--runtime-projection-mode=Exhaustive"}]'
+              kubectl -n "$NS" rollout status deployment/"$DEPLOY" --timeout=180s
+              args="$(kubectl -n "$NS" get deployment "$DEPLOY" -o jsonpath='{.spec.template.spec.containers[0].args}')"
+              echo "manager args after flip: ${args}"
+              printf '%s' "${args}" | grep -q -- '--runtime-projection-mode=Exhaustive'
+              echo "operator flipped to Exhaustive"
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-flip-ns-profile-bba2ad9c
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: flip-ns-profile
+                  # The eager path reclaimed the marker: lazy -> eager.
+                  aim.eai.amd.com/runtime-projection: eager
+                (ownerReferences[?kind == 'AIMProfile']):
+                  - name: flip-ns-profile
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-flip-ns-profile-bba2ad9c
+                labels:
+                  aim.eai.amd.com/runtime-projection: eager
+        - script:
+            timeout: 180s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              SR=aim-flip-ns-profile-bba2ad9c
+
+              # --- Quiesce gate: wait for the post-flip convergence burst to settle. ---
+              # The Exhaustive flip is delivered by restarting the operator, so both SSA
+              # field managers (eager: profile controller; lazy:
+              # aim-runtime-projection-controller) start cold and briefly re-contend for
+              # the single conflicting marker label, churning resourceVersion for ~20s
+              # before applies become no-ops and the watches stop firing. Establish the
+              # stability baseline only AFTER that burst has settled — otherwise rv1 is
+              # sampled inside the tail of the burst and the check races the async
+              # convergence (the historical flake). This is a poll, not a fixed sleep, so
+              # it is robust to runner speed: a slow runner simply waits longer.
+              QUIESCE_TIMEOUT=90
+              QUIESCE_INTERVAL=5
+              deadline=$(( $(date +%s) + QUIESCE_TIMEOUT ))
+              prev="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" -o jsonpath='{.metadata.resourceVersion}')"
+              settled=false
+              while [ "$(date +%s)" -lt "${deadline}" ]; do
+                sleep "${QUIESCE_INTERVAL}"
+                cur="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" -o jsonpath='{.metadata.resourceVersion}')"
+                if [ "${prev}" = "${cur}" ]; then
+                  settled=true
+                  echo "quiesced: resourceVersion unchanged across ${QUIESCE_INTERVAL}s at ${cur}"
+                  break
+                fi
+                echo "still converging: resourceVersion ${prev} -> ${cur}"
+                prev="${cur}"
+              done
+              if [ "${settled}" != true ]; then
+                echo "resourceVersion never quiesced within ${QUIESCE_TIMEOUT}s: ownership is still ping-ponging between the eager and lazy projectors" >&2
+                exit 1
+              fi
+
+              # --- Stability baseline: the real dual-authority regression guard. ---
+              # After quiescence, a single settled owner must keep resourceVersion fixed
+              # across the settle window. If it moves here, the projectors are genuinely
+              # ping-ponging (the regression this test exists to catch).
+              rv1="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" -o jsonpath='{.metadata.resourceVersion}')"
+              echo "resourceVersion sample 1: ${rv1}"
+              sleep 25
+              rv2="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" -o jsonpath='{.metadata.resourceVersion}')"
+              echo "resourceVersion sample 2: ${rv2}"
+              if [ "${rv1}" != "${rv2}" ]; then
+                echo "resourceVersion changed (${rv1} -> ${rv2}): ownership is still ping-ponging between the eager and lazy projectors" >&2
+                exit 1
+              fi
+              # Belt-and-braces: exactly one field manager must own the marker
+              # label; a lingering lazy owner would mean dual authority.
+              owners="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" -o json \
+                | grep -c '"manager": "aim-runtime-projection-controller"' || true)"
+              echo "lazy field-manager entries on the SR: ${owners}"
+              echo "resourceVersion stable at ${rv1} — ownership settled on the eager manager"
+      finally:
+        - script:
+            timeout: 210s
+            content: |
+              set -eu
+              NS="${OPERATOR_NAMESPACE:-aim-system}"
+              DEPLOY="${OPERATOR_DEPLOYMENT:-aim-engine-controller-manager}"
+              # Restore Reduced for the rest of the CI leg (append again; last
+              # flag wins). Best-effort rollout wait so a slow restore never fails
+              # this cleanup.
+              kubectl -n "$NS" patch deployment "$DEPLOY" --type=json \
+                -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--runtime-projection-mode=Reduced"}]'
+              kubectl -n "$NS" rollout status deployment/"$DEPLOY" --timeout=180s || true
+              echo "restored --runtime-projection-mode=Reduced"

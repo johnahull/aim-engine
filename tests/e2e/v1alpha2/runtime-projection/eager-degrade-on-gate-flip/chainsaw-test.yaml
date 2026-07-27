@@ -1,0 +1,176 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Asymmetric teardown is additive. ADR 0008 specifies that eager
+# runtime projection is gated on "projectable" for CREATION, but once a runtime
+# exists a later gate flip (e.g. matching nodes vanish) must NOT delete it — the
+# runtime is kept and the profile is marked Degraded. This test validates that
+# contract live, for BOTH scopes, regardless of implementation:
+#
+#   1. Apply a projectable AIMClusterProfile + AIMProfile (acceleratorModel:
+#      MI300X, matched by this vcluster's MI300X nodes) → each projects its
+#      runtime (CSR / SR) and reports RuntimeProjected=True.
+#   2. Patch acceleratorModel to an unsatisfiable value → matchingNodes drops to
+#      0, so the projection gate flips false.
+#   3. Assert each profile reports RuntimeProjected=False/RuntimeDegraded (proves
+#      the reconcile observed the flip — so the next check does not race it).
+#   4. Assert both runtimes STILL EXIST (additive teardown never deletes them:
+#      the plan just stops emitting them and the apply pipeline does not prune
+#      owned objects absent from the plan).
+#   5. Delete the profiles → the runtimes are garbage-collected via ownerRef,
+#      which is the ONLY removal path.
+#
+# Runs under the default Exhaustive projection mode — no special lane needed.
+# Requires MI300X nodes (GPU vcluster); the GPU chainsaw selector applies.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-eager-degrade-on-gate-flip
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Apply projectable profiles and wait for RuntimeProjected=True
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - apply:
+            file: profile.yaml
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-degrade-csr
+              status:
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: test-degrade-sr
+              status:
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+
+    - name: Assert both runtimes are projected
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-test-degrade-csr-025c3022
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-degrade-sr-02fbf3be
+
+    - name: Flip the projection gate by making acceleratorModel unsatisfiable
+      description: |
+        Patch acceleratorModel to a value no node carries, so matchingNodes drops
+        to 0 and runtimeProjectable becomes false on the next reconcile. Node
+        listing still succeeds (nodeErr == nil), so this is a genuine gate flip,
+        not a transient error.
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              kubectl patch aimclusterprofile test-degrade-csr \
+                --type=merge \
+                -p '{"spec":{"acceleratorModel":"NO_SUCH_ACCELERATOR"}}'
+              kubectl patch aimprofile test-degrade-sr -n "$NAMESPACE" \
+                --type=merge \
+                -p '{"spec":{"acceleratorModel":"NO_SUCH_ACCELERATOR"}}'
+              echo "flipped acceleratorModel to an unsatisfiable value on both profiles"
+
+    - name: Assert both profiles degrade (gate flipped; reconcile observed it)
+      description: |
+        Asserting the Degraded condition FIRST proves the reconcile ran after the
+        flip, so the subsequent "runtime still exists" check is not racing the
+        reconcile. The reason is the stable PascalCase RuntimeDegraded.
+      try:
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-degrade-csr
+              status:
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "False"
+                    reason: RuntimeDegraded
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: test-degrade-sr
+              status:
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "False"
+                    reason: RuntimeDegraded
+
+    - name: Assert both runtimes SURVIVE the gate flip (additive teardown)
+      description: |
+        Asymmetric teardown: a gate flip never deletes an existing runtime. The
+        plan stops emitting it and the apply pipeline does not prune owned
+        objects absent from the plan, so both runtimes still exist. Removal
+        happens only on profile delete (next step).
+      try:
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-test-degrade-csr-025c3022
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-degrade-sr-02fbf3be
+
+    - name: Delete the profiles and assert the runtimes are garbage-collected
+      try:
+        - delete:
+            ref:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              name: test-degrade-csr
+        - delete:
+            ref:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              name: test-degrade-sr
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-test-degrade-csr-025c3022
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-degrade-sr-02fbf3be

@@ -1,0 +1,20 @@
+# Primary, deployable, no-accelerator cluster profile for the Reduced
+# projection-mode smoke test. See mode-exhaustive/cluster-profile.yaml for the
+# shared rationale; the aimId + name are unique per lane so the cluster-scoped
+# objects never collide with the other mode smokes.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: mode-reduced-primary
+spec:
+  aimId: mode-test/reduced
+  modelId: mode-test/reduced
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  primary: true
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: mode-test/reduced
+      sourceUri: hf://mode-test/reduced

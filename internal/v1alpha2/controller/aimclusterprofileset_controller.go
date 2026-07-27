@@ -80,7 +80,7 @@ func (r *AIMClusterProfileSetReconciler) Reconcile(ctx context.Context, req ctrl
 func (r *AIMClusterProfileSetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ctx := context.Background()
 	r.Recorder = mgr.GetEventRecorderFor("aim-" + clusterProfileSetControllerName + "-controller")
-	r.reconciler = &aimprofileset.ClusterProfileSetReconciler{Scheme: r.Scheme}
+	r.reconciler = &aimprofileset.ClusterProfileSetReconciler{Scheme: r.Scheme, APIReader: mgr.GetAPIReader()}
 	r.pipeline = controllerutils.Pipeline[
 		*aimv1alpha2.AIMClusterProfileSet,
 		*aimv1alpha1.AIMProfileSetStatus,

@@ -3,7 +3,11 @@
 # AIMService Frozen Test: Profile Ready (v1alpha2)
 #
 # This test validates that a v1alpha2 AIMService correctly resolves a Ready
-# AIMClusterProfile, creates a profile ConfigMap and InferenceService.
+# AIMClusterProfile and emits an InferenceService that references the projected
+# runtime (aim-<profile>) instead of inlining a predictor. The always-on lazy
+# runtime-projection reconciler materializes the colocated profile ConfigMap and
+# the namespace ServingRuntime (which carries the profile image), even though the
+# profile itself is reconciliation-paused.
 #
 # Test type: Frozen dependency test
 # Frozen resources: AIMClusterProfile (Ready)
@@ -63,6 +67,11 @@ spec:
               fi
               echo "Found AIMProfileCache=$PC_NAME AIMArtifact=$ART_NAME"
 
+              # AIMProfileCache.status.artifacts[*].uid is a required field, so
+              # mirror the real AIMArtifact's UID into the frozen cache status.
+              ART_UID=$(kubectl get aimartifact "$ART_NAME" -n "$NAMESPACE" \
+                -o jsonpath='{.metadata.uid}')
+
               kubectl annotate aimprofilecache "$PC_NAME" -n "$NAMESPACE" \
                 aim.eai.amd.com/reconciliation-paused=true --overwrite
               kubectl annotate aimartifact "$ART_NAME" -n "$NAMESPACE" \
@@ -117,6 +126,7 @@ spec:
                     "artifacts": {
                       "'"$ART_NAME"'": {
                         "name": "'"$ART_NAME"'",
+                        "uid": "'"$ART_UID"'",
                         "model": "test/profile-model",
                         "status": "Ready",
                         "persistentVolumeClaim": "'"$ART_NAME"'-pvc",
@@ -144,19 +154,26 @@ spec:
                   name: test-profile-ready
                   scope: Cluster
 
-    - name: Assert profile ConfigMap is created with correct labels
+    - name: Assert the colocated profile ConfigMap is materialized on the referenced runtime
+      # Post slice-06 the AIMService no longer emits its own profile ConfigMap.
+      # The runtime projection materializes a colocated ConfigMap named
+      # aim-<profile>, labeled with the profile (not the service).
       try:
         - assert:
             resource:
               apiVersion: v1
               kind: ConfigMap
               metadata:
+                name: aim-test-profile-ready-512bfbd6
                 labels:
-                  aim.eai.amd.com/service: test-service
                   app.kubernetes.io/managed-by: aim-engine
                   app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: test-profile-ready
 
-    - name: Assert InferenceService is created with profile image and volume mount
+    - name: Assert the InferenceService references the projected runtime, inlining nothing
+      # Post slice-06 the overlay references aim-<profile> by name with the
+      # huggingface model format and carries no inline predictor container; the
+      # profile image lives on the projected ServingRuntime asserted below.
       try:
         - assert:
             resource:
@@ -166,11 +183,35 @@ spec:
                 labels:
                   aim.eai.amd.com/service: test-service
                   aim.eai.amd.com/profile: test-profile-ready
+                annotations:
+                  aim.eai.amd.com/runtime-profile: test-profile-ready
               spec:
                 predictor:
-                  containers:
-                    - name: kserve-container
-                      image: registry.example.com/test-image:1.0.0
+                  model:
+                    runtime: aim-test-profile-ready-512bfbd6
+                    modelFormat:
+                      name: huggingface
+
+    - name: Assert the projected namespace ServingRuntime carries the profile image
+      # The lazy InferenceService-watch reconciler materializes a complete
+      # namespace ServingRuntime (owned by the cluster profile) that holds the
+      # profile image and mounts the colocated profile ConfigMap.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-profile-ready-512bfbd6
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-profile-ready
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-profile-ready
+              spec:
+                (containers[?name == 'kserve-container'].image | [0]): registry.example.com/test-image:1.0.0
+                (volumes[?configMap.name == 'aim-test-profile-ready-512bfbd6']):
+                  - name: aim-profile
 
     - name: Assert service reaches a runtime bring-up state (not Ready/Failed)
       # The predictor image is intentionally fake, so the pod never runs and the

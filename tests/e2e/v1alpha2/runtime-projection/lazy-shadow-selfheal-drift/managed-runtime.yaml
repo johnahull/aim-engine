@@ -1,0 +1,27 @@
+# A bare, managed ClusterServingRuntime named aim-<profile>, standing in for the
+# eager projection. It carries the managed-by + profile correlator labels so the
+# lazy watcher can follow the runtime back to its backing AIMClusterProfile (the
+# native, annotation-free resolution path). It is intentionally incomplete: it
+# has no colocated profile ConfigMap, which is exactly what the lazy watcher
+# completes by shadowing it with a complete namespace ServingRuntime.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: aim-test-selfheal-drift-a41c39a9
+  labels:
+    app.kubernetes.io/managed-by: aim-engine
+    app.kubernetes.io/component: inference
+    aim.eai.amd.com/profile: test-selfheal-drift
+spec:
+  supportedModelFormats:
+    - name: huggingface
+      autoSelect: false
+  protocolVersions:
+    - v2
+  containers:
+    - name: kserve-container
+      image: registry.example.com/aim-cpu-base:0.12.0
+      ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP

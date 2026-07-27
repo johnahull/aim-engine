@@ -1,0 +1,32 @@
+# Backing cluster profile for the long-profile-name test. Its name is
+# a realistic 63-character ProfileSet-style name (model + accelerator + metric +
+# precision + parallelism), so the naive aim-<profile.Name> would be 67 chars and
+# blow past the repo's 63-char runtime-name convention.
+# RuntimeName instead reserves the aim- prefix and truncate+hashes the profile
+# part, so the projected runtime name is always <=63 and valid.
+#
+# The name is kept at 63 chars (not longer) on purpose: the shared reconciler
+# stamps the reconciled object's own name as a traceability label value
+# (aim.eai.amd.com/<controller>.name), which is capped at 63 like any label
+# value. That cap is a generic pipeline concern, independent of the runtime-name
+# overflow this test targets, so the profile name stays within it.
+#
+# No accelerator fields, so it has no hardware requirement and reaches Ready in
+# any cluster. Deployable (aimId + modelSources set) and has an image, so it is
+# projectable and the AIMClusterProfile reconciler eagerly projects a bare
+# ClusterServingRuntime under the hashed name (status.projectedRuntimeName).
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: amdenterpriseai-aim-gpt-oss-120b-1x-mi300x-throughput-fp8-tp8pp
+spec:
+  aimId: Qwen/Qwen3-0.6B
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B

@@ -1,0 +1,29 @@
+# A plain, native KServe InferenceService referencing the managed runtime by
+# name — no AIM-specific spec, no annotations. This is the "native KServe user"
+# story: applying a stock InferenceService that points at a managed runtime just
+# works once the lazy watcher materializes the colocated profile ConfigMap.
+#
+# Standard (raw) deployment + external autoscaler render a predictor Deployment
+# directly (the cluster default in this KServe build), so the test can assert on
+# the rendered pod spec without Knative/Serverless in the loop.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: native-lazy-consumer
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: external
+spec:
+  predictor:
+    minReplicas: 1
+    model:
+      runtime: aim-test-lazy-shadow-4fd56759
+      modelFormat:
+        name: huggingface
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi

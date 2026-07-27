@@ -84,18 +84,49 @@ jobs:
           fi
 
   test-e2e:
-    name: test-e2e
+    name: test-e2e (${{ matrix.mode }})
     runs-on: self-hosted
     timeout-minutes: 60
+    # Matrix on the operator's eager runtime-projection mode. The default
+    # `Exhaustive` leg is the full kind suite exactly as before (mode-gated tests
+    # stay excluded via CHAINSAW_PROJECTION_MODE_EXCLUDE). The `Reduced` leg
+    # exists because the Reduced/model-slug projection paths
+    # (planClusterModelSlugRuntime / planNamespaceModelSlugRuntime, the scope-aware
+    # lazy resolver, model-slug lazy completion) are otherwise CI-dark: no CI job
+    # ever starts the operator in a non-default mode, which is exactly how the
+    # Reduced-only bugs in the first review round shipped undetected. It starts an
+    # operator in that mode (Helm value) and runs ONLY the matching mode-gated
+    # tests. `slug` is the lowercase form used in resource / artifact names that
+    # must differ per leg.
+    #
+    # `Both` is intentionally NOT a matrix leg: it is the pure additive union of
+    # Exhaustive + Reduced (no Both-only code path — the per-profile and model-slug
+    # plan branches fire independently), so a dedicated cluster leg would only
+    # re-run branches these two legs already cover. Its one unique property (both
+    # runtimes coexist) is pinned cheaply by the Both-mode unit tests in
+    # internal/v1alpha2/aimprofile/runtime_projection_test.go. The Exhaustive and
+    # Reduced legs additionally assert the mutually-exclusive absence of the other
+    # mode's runtime, which a Both leg structurally cannot.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: Exhaustive
+            slug: exhaustive
+          - mode: Reduced
+            slug: reduced
     concurrency:
-      group: test-e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+      # Include the mode so the matrix legs do not cancel each other under the
+      # shared cancel-in-progress group.
+      group: test-e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ matrix.mode }}
       cancel-in-progress: true
     env:
-      KIND_CLUSTER: aim-${{ github.run_id }}-${{ github.run_attempt }}
-      ARTIFACT_DOWNLOADER_IMAGE: aim-artifact-downloader:${{ github.run_id }}-${{ github.run_attempt }}
+      # Per-leg cluster / image names so concurrent matrix legs never collide.
+      KIND_CLUSTER: aim-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
+      ARTIFACT_DOWNLOADER_IMAGE: aim-artifact-downloader:${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
       OPERATOR_IMAGE_REPOSITORY: aim-engine
-      OPERATOR_IMAGE_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
-      OPERATOR_IMAGE: aim-engine:${{ github.run_id }}-${{ github.run_attempt }}
+      OPERATOR_IMAGE_TAG: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
+      OPERATOR_IMAGE: aim-engine:${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
       # AIM_DUMMY_TAG pins the aim-dummy test image (BYO base-image, custom-model,
       # discovery fixtures). It defines the canonical
       # docker.io/amdenterpriseai/aim-dummy:<tag> ref the fixtures hardcode; the
@@ -160,7 +191,7 @@ jobs:
             go-v2-${{ runner.os }}-
 
       - name: Set per-run kubeconfig path
-        run: echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_ENV}"
+        run: echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slug }}" >> "${GITHUB_ENV}"
 
       - name: Set per-run isolated Helm config
         # Per-run isolated Helm config (job-scoped via GITHUB_ENV) so the GHCR login is shared across steps to prevent rate limiting.
@@ -294,10 +325,27 @@ jobs:
         run: make cache-warm
 
       - name: Install operator via Helm
-        run: helm install aim-engine dist/chart --namespace aim-system --create-namespace --set manager.image.repository="${OPERATOR_IMAGE_REPOSITORY}" --set manager.image.tag="${OPERATOR_IMAGE_TAG}" --set acceleratorDetector.enable=false
+        # manager.runtimeProjectionMode is set at install time (deterministic, no
+        # post-install patch race) so each matrix leg's operator starts in its
+        # mode. Exhaustive equals the shipped default, so that leg is unchanged.
+        run: helm install aim-engine dist/chart --namespace aim-system --create-namespace --set manager.image.repository="${OPERATOR_IMAGE_REPOSITORY}" --set manager.image.tag="${OPERATOR_IMAGE_TAG}" --set manager.runtimeProjectionMode="${{ matrix.mode }}" --set acceleratorDetector.enable=false
 
       - name: Wait for operator to be ready
         run: kubectl wait --for=condition=Available --timeout=120s deployment/aim-engine-controller-manager -n aim-system
+
+      - name: Assert operator runtime-projection mode
+        # Fail loudly before the gated tests run if the mode did not take: the
+        # Reduced tests silently mis-pass (assert the wrong shape) against an
+        # operator in the wrong mode, so gate on the live arg first.
+        run: |
+          set -euo pipefail
+          args="$(kubectl -n aim-system get deployment aim-engine-controller-manager -o jsonpath='{.spec.template.spec.containers[?(@.name=="manager")].args}')"
+          echo "manager args: ${args}"
+          if ! printf '%s' "${args}" | grep -q -- '--runtime-projection-mode=${{ matrix.mode }}'; then
+            echo "expected --runtime-projection-mode=${{ matrix.mode }} on the operator but it was not set" >&2
+            exit 1
+          fi
+          echo "confirmed operator running with --runtime-projection-mode=${{ matrix.mode }}"
       
       - name: Wait for kgateway metrics collector to be ready
         run: |
@@ -357,13 +405,24 @@ jobs:
           kubectl get crds | grep aim || true
 
       - name: Run Chainsaw tests
-        # Builds aim-dummy, pushes it to an ephemeral ttl.sh ref, kind-loads it,
-        # and runs the kind suite against a throwaway copy of tests/e2e whose
-        # aim-dummy ref is rewritten to the ttl.sh ref. This lets discovery
-        # (which reads image labels from a registry inside the operator) work
-        # before aim-dummy is published to the public docker.io/amdenterpriseai
-        # mirror. Switch back to `make test-chainsaw-kind` once it's public.
+        # DEFAULT lane (Exhaustive). Builds aim-dummy, pushes it to an ephemeral
+        # ttl.sh ref, kind-loads it, and runs the kind suite against a throwaway
+        # copy of tests/e2e whose aim-dummy ref is rewritten to the ttl.sh ref.
+        # This lets discovery (which reads image labels from a registry inside the
+        # operator) work before aim-dummy is published to the public
+        # docker.io/amdenterpriseai mirror. Switch back to `make test-chainsaw-kind`
+        # once it's public. The mode-gated tests stay excluded here via
+        # CHAINSAW_PROJECTION_MODE_EXCLUDE.
+        if: matrix.mode == 'Exhaustive'
         run: make test-chainsaw-kind-ttl
+
+      - name: Run mode-gated Chainsaw projection tests
+        # NON-DEFAULT lane (Reduced). Runs ONLY the mode-gated projection tests
+        # (selector flipped to INCLUDE requires in (<mode>-mode)) against the
+        # operator started in this mode above. These paths are otherwise CI-dark;
+        # they need no aim-dummy/ttl rewrite (they reference no aim-dummy image).
+        if: matrix.mode != 'Exhaustive'
+        run: make test-chainsaw-projection-mode ENV=kind MODE=${{ matrix.mode }}
 
       # Dump the poller's accumulated time-series (TS-marked metric snapshots).
       # Runs always() so we capture history for both passing and failing runs.
@@ -397,7 +456,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chainsaw-report-${{ github.run_id }}-${{ github.run_attempt }}
+          name: chainsaw-report-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
           path: .tmp/chainsaw-reports/
           if-no-files-found: warn
           retention-days: 14
@@ -409,7 +468,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chainsaw-debug-${{ github.run_id }}-${{ github.run_attempt }}
+          name: chainsaw-debug-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
           path: .tmp/chainsaw-debug/
           if-no-files-found: ignore
           retention-days: 14
@@ -418,7 +477,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: metrics-history-${{ github.run_id }}-${{ github.run_attempt }}
+          name: metrics-history-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
           path: .tmp/metrics-history/
           if-no-files-found: ignore
           retention-days: 14

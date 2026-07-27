@@ -178,6 +178,15 @@ const (
 	LabelKeySourceModelScope = AimLabelDomain + "/source-model-scope"
 
 	// ==========================================================================
+	// Projected runtime correlator labels (v1alpha2 runtime projection)
+	// ==========================================================================
+
+	// LabelKeyAcceleratorClass records the accelerator model a projected KServe
+	// runtime targets (e.g. MI300X), so a runtime can be filtered by hardware
+	// class and traced back to the profile's accelerator requirement.
+	LabelKeyAcceleratorClass = AimLabelDomain + "/accelerator-class"
+
+	// ==========================================================================
 	// AIMProfile provenance label values
 	// ==========================================================================
 

@@ -1,0 +1,207 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# A late-Ready cache completes a MODEL-SLUG primary shadow WITHOUT re-applying the
+# InferenceService — the model-slug analogue of lazy-shadow-late-cache.
+#
+# This is the end-to-end guard for the cache-event fan-out fix: the profile-owned
+# cache watch must re-enqueue consumers of the model-slug primary runtime, not
+# only the per-profile runtime. The AIMProfileCache carries spec.profileName but
+# NO aimId, so before the fix the cache-event handler derived only the per-profile
+# name (aim-<profile>-<hash>) and silently dropped the model-slug name
+# (aim-<model-slug>). A native ISVC referencing aim-<model-slug> whose cache goes
+# Ready AFTER the shadow already exists was therefore never woken by the cache
+# event, so the profile-owned cache mount was stranded until some unrelated
+# reconcile (in an air-gapped cluster: cold-pulls weights on every pod start).
+#
+# Flow (Reduced mode): a primary AIMClusterProfile publishes only the bare
+# model-slug ClusterServingRuntime aim-qwen-qwen3-0-6b (slug from
+# spec.aimId="Qwen/Qwen3-0.6B"). A native ISVC references it by name; the lazy
+# watcher materializes a complete namespace ServingRuntime + ConfigMap under the
+# slug name WITHOUT the cache volume (no AIMProfileCache yet). A Ready, Shared,
+# cluster-scope AIMProfileCache is then seeded; the cache watch must resolve the
+# cache's backing profile to recover the aimId, derive the model-slug name, and
+# re-enqueue the ISVC so the shadow gains the PVC volume/mount — all WITHOUT the
+# ISVC being re-applied.
+#
+# The cache is frozen to Ready (apply-with-status.sh) with a fabricated PVC, so
+# no real download or storage class is needed and it runs in any cluster.
+#
+# OPT-IN: gated `requires: reduced-mode`, so the default (Exhaustive) lane skips
+# it — its assertions only hold against an operator started in Reduced (or Both).
+# Run it with:
+#   make set-projection-mode MODE=Reduced
+#   make test-chainsaw \
+#     CHAINSAW_TEST_DIR=tests/e2e/v1alpha2/runtime-projection/lazy-shadow-model-slug-late-cache \
+#     CHAINSAW_ENV_SELECTOR=''
+# (see docs/docs/contributing/testing.md).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-lazy-shadow-model-slug-late-cache
+  labels:
+    requires: reduced-mode
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Apply the primary cluster profile and wait for Ready
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: slug-late-cache
+              status:
+                status: Ready
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+
+    - name: Assert the eager model-slug ClusterServingRuntime is projected (bare, autoSelect off)
+      description: |
+        Reduced names the primary aim-<model-slug> (aim-qwen-qwen3-0-6b here) with
+        autoSelect off, correlated to the backing primary profile. It is bare (no
+        colocated ConfigMap) — exactly what the lazy watcher completes below.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-qwen-qwen3-0-6b
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: slug-late-cache
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: slug-late-cache
+              spec:
+                supportedModelFormats:
+                  - name: huggingface
+                    autoSelect: false
+
+    - name: Apply the native InferenceService referencing the model-slug runtime
+      try:
+        - apply:
+            file: inference-service.yaml
+
+    - name: Assert the shadow ServingRuntime is materialized under the slug name WITHOUT the cache volume
+      description: |
+        No AIMProfileCache exists yet, so the lazy shadow (marked runtime-projection
+        lazy, owned by the backing primary profile) carries the colocated profile
+        ConfigMap volume and the modelSources redirect env, but NO PVC-backed cache
+        volume.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-qwen-qwen3-0-6b
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: slug-late-cache
+                  aim.eai.amd.com/runtime-projection: lazy
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: slug-late-cache
+              spec:
+                (volumes[?configMap.name == 'aim-qwen-qwen3-0-6b']):
+                  - name: aim-profile
+                (volumes[?persistentVolumeClaim] | length(@)): 0
+
+    - name: Record the InferenceService identity before the cache is seeded
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              # Trailing newline is required so the reader's `read` returns 0
+              # (a newline-less file makes `read` hit EOF and exit non-zero).
+              kubectl get inferenceservice native-slug-late-cache -n "$NAMESPACE" \
+                -o jsonpath='{.metadata.uid} {.metadata.generation}{"\n"}' \
+                > "/tmp/slug-late-cache-$NAMESPACE.txt"
+              echo "recorded ISVC identity: $(cat /tmp/slug-late-cache-$NAMESPACE.txt)"
+
+    - name: Seed a Ready, Shared, cluster-scope AIMProfileCache in the namespace
+      try:
+        - apply:
+            file: profile-cache.yaml
+        - script:
+            timeout: 60s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              apply-with-status.sh profile-cache.yaml --status-only -n "$NAMESPACE"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                name: slug-late-cache-cache
+              status:
+                status: Ready
+
+    - name: Assert the model-slug shadow gains the PVC cache volume, mount, and redirect env
+      description: |
+        The late cache re-enqueues the MODEL-SLUG consumer via the AIMProfileCache
+        watch — the fix under test: the handler resolves the cache's backing
+        profile to recover aimId "Qwen/Qwen3-0.6B", derives the slug name
+        aim-qwen-qwen3-0-6b, and wakes the ISVC. The shadow is re-materialized with
+        the profile-owned cache volume (claim slug-late-cache-weights-pvc), its
+        mount at the cache mountPoint, and the modelSources redirect env
+        (AIM_CACHE_PATH, AIM_MODEL_ID, AIM_ID="").
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-qwen-qwen3-0-6b
+              spec:
+                (volumes[?persistentVolumeClaim.claimName == 'slug-late-cache-weights-pvc']):
+                  - name: slug-late-cache-weights
+                (containers[0].volumeMounts[?name == 'slug-late-cache-weights'].mountPath | [0]): /workspace/cache/Qwen/Qwen3-0.6B
+                (containers[0].env[?name == 'AIM_CACHE_PATH'].value | [0]): /workspace/cache
+                (containers[0].env[?name == 'AIM_MODEL_ID'].value | [0]): Qwen/Qwen3-0.6B
+                (containers[0].env[?name == 'AIM_ID'] | length(@)): 1
+                (containers[0].env[?name == 'AIM_ID' && value] | length(@)): 0
+
+    - name: Assert the InferenceService was never re-applied
+      description: |
+        The self-heal completes the shadow only. Fail if the ISVC uid changed
+        (recreated) or its generation changed (spec re-applied) between the
+        pre-cache snapshot and now.
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              read -r OLD_UID OLD_GEN < "/tmp/slug-late-cache-$NAMESPACE.txt" || true
+              if [ -z "${OLD_UID:-}" ] || [ -z "${OLD_GEN:-}" ]; then
+                echo "ERROR: could not read recorded ISVC identity from /tmp/slug-late-cache-$NAMESPACE.txt"
+                exit 1
+              fi
+              NEW_UID=$(kubectl get inferenceservice native-slug-late-cache -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+              NEW_GEN=$(kubectl get inferenceservice native-slug-late-cache -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')
+              rm -f "/tmp/slug-late-cache-$NAMESPACE.txt"
+              if [ "$NEW_UID" != "$OLD_UID" ]; then
+                echo "ERROR: InferenceService was recreated (uid $OLD_UID -> $NEW_UID)"
+                exit 1
+              fi
+              if [ "$NEW_GEN" != "$OLD_GEN" ]; then
+                echo "ERROR: InferenceService spec was re-applied (generation $OLD_GEN -> $NEW_GEN)"
+                exit 1
+              fi
+              echo "OK: model-slug shadow gained the cache mount without re-applying the InferenceService"

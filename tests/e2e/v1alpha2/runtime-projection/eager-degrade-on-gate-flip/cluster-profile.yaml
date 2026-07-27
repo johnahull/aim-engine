@@ -1,0 +1,30 @@
+# Backing cluster profile for the eager-degrade-on-gate-flip test (asymmetric
+# teardown is additive). It carries a GPU accelerator requirement
+# (acceleratorModel: MI300X) so it is projectable in this MI300X vcluster:
+# deployable (aimId + modelSources) && image != "" && matchingNodes > 0. The
+# AIMClusterProfile reconciler (Exhaustive, the operator default) eagerly
+# projects a bare ClusterServingRuntime named aim-<profile.Name>.
+#
+# The test then patches acceleratorModel to an unsatisfiable value so
+# matchingNodes drops to 0 and the projection gate flips false. It asserts the
+# already-projected CSR SURVIVES (additive teardown never deletes) while the
+# profile reports RuntimeProjected=False/RuntimeDegraded. The image is a
+# placeholder: the test asserts the projection lifecycle, not that a pod serves.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: test-degrade-csr
+spec:
+  aimId: Qwen/Qwen3-0.6B
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  acceleratorModel: MI300X
+  acceleratorType: gpu
+  acceleratorCount: 1
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B

@@ -288,16 +288,32 @@ CHAINSAW_CONFIG_DIR := tests/chainsaw/config
 # specific test directory.
 CHAINSAW_NEEDS_SECRET_EXCLUDE := needs-secret notin (hf_token,dockerhub_pull_secret)
 
+# reduced-mode gates the eager-runtime-projection-mode tests, which only pass
+# against an operator started with a non-default --runtime-projection-mode
+# (Reduced). The default lanes run the operator in Exhaustive, so these are
+# excluded from both selectors; run them via `make set-projection-mode MODE=...`
+# then point CHAINSAW_TEST_DIR at the specific mode dir with the selector cleared
+# (see docs/docs/contributing/testing.md). Both mode has no dedicated e2e leg: it
+# is the additive union of Exhaustive + Reduced (covered by those legs plus the
+# Both-mode unit tests), so there is no both-mode gate.
+CHAINSAW_PROJECTION_MODE_EXCLUDE := reduced-mode
+
+# The mode-gated projection tests all live under one tree. The
+# `test-chainsaw-projection-mode` target below is the inverse entry point of the
+# exclusion above: it runs ONLY the gated tests for a chosen MODE by flipping the
+# selector to INCLUDE `requires in (<mode>-mode)`.
+CHAINSAW_PROJECTION_MODE_DIR := tests/e2e/v1alpha2/runtime-projection
+
 # Kind environment: exclude tests requiring GPU, longhorn storage, external
 # network, or an HF token. Expensive / operator-gated tests (e.g. multi-hundred-
 # GiB live model downloads) gate themselves via one of these `requires` values
 # (e.g. requires=hf_token) rather than a separate tier axis.
-CHAINSAW_SELECTOR_KIND := requires notin (gpu,longhorn,hf_token,nfd),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+CHAINSAW_SELECTOR_KIND := requires notin (gpu,longhorn,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
 
 # GPU environment: exclude tests that only work on Kind (mocked node labels) or
 # need an HF token. GPU tests are otherwise fully end-to-end. Run an excluded
 # test explicitly by invoking chainsaw directly against its dir without a selector.
-CHAINSAW_SELECTOR_GPU := requires notin (kind,hf_token,nfd),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+CHAINSAW_SELECTOR_GPU := requires notin (kind,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
 
 # Select appropriate config based on ENV and CI detection
 # CI is detected via CI env var (set by GitHub Actions, GitLab CI, etc.)
@@ -324,6 +340,15 @@ test-chainsaw: ## Run chainsaw e2e tests (selector based on ENV). Pass CHAINSAW_
 .PHONY: test-chainsaw-kind
 test-chainsaw-kind: ## Run chainsaw e2e tests for KIND environment
 	$(MAKE) test-chainsaw ENV=kind
+
+.PHONY: test-chainsaw-projection-mode
+test-chainsaw-projection-mode: ## Run ONLY the mode-gated projection tests (MODE=Reduced) against an operator ALREADY running in that mode. Inverse of the default lanes' CHAINSAW_PROJECTION_MODE_EXCLUDE: the selector INCLUDES requires in (<mode>-mode). Set the mode first via the Helm value manager.runtimeProjectionMode or `make set-projection-mode MODE=...`.
+	@gate="$(if $(filter Reduced,$(MODE)),reduced-mode,)"; \
+	if [ -z "$$gate" ]; then echo "MODE must be Reduced (got '$(MODE)')"; exit 1; fi; \
+	echo "Running gated projection-mode tests for MODE=$(MODE) (selector: requires in ($$gate))"; \
+	$(MAKE) test-chainsaw \
+		CHAINSAW_TEST_DIR=$(CHAINSAW_PROJECTION_MODE_DIR) \
+		CHAINSAW_ENV_SELECTOR="--selector \"requires in ($$gate)\""
 
 .PHONY: aim-dummy-ttl-push
 aim-dummy-ttl-push: ## Build aim-dummy once and push it to ephemeral ttl.sh refs under every tag the fixtures reference (also loads it into the local docker daemon).
@@ -528,6 +553,28 @@ tilt-down: ## Tear down Tilt resources.
 wait-ready: ## Wait for operator readiness probe to succeed.
 	@until curl -sf http://localhost:8081/readyz >/dev/null 2>&1; do sleep 0.5; done
 	@echo "Operator ready"
+
+# Namespace/deployment of the in-cluster operator (kustomize/Tilt or Helm install).
+OPERATOR_NAMESPACE ?= aim-system
+OPERATOR_DEPLOYMENT ?= aim-engine-controller-manager
+
+.PHONY: set-projection-mode
+set-projection-mode: ## Redeploy the in-cluster operator with a chosen eager runtime projection mode (MODE=Exhaustive|Reduced|Both) and wait for rollout. No rebuild needed; the flag is compiled in. Used by the opt-in projection-mode chainsaw lane.
+	@MODE="$(MODE)"; \
+	case "$$MODE" in \
+	  Exhaustive|Reduced|Both) ;; \
+	  *) echo "MODE must be one of Exhaustive, Reduced, Both (got '$$MODE')"; exit 1 ;; \
+	esac; \
+	command -v jq >/dev/null 2>&1 || { echo "jq is not installed"; exit 1; }; \
+	echo "Setting --runtime-projection-mode=$$MODE on $(OPERATOR_DEPLOYMENT) (namespace $(OPERATOR_NAMESPACE))..."; \
+	current="$$(kubectl -n $(OPERATOR_NAMESPACE) get deployment $(OPERATOR_DEPLOYMENT) -o jsonpath='{.spec.template.spec.containers[0].args}')"; \
+	[ -n "$$current" ] || current='[]'; \
+	args="$$(printf '%s' "$$current" | jq -c --arg mode "$$MODE" '[.[] | select(startswith("--runtime-projection-mode=") | not)] + ["--runtime-projection-mode=" + $$mode]')"; \
+	echo "Preserving existing args, setting projection mode: $$args"; \
+	kubectl -n $(OPERATOR_NAMESPACE) patch deployment $(OPERATOR_DEPLOYMENT) --type=json \
+	  -p "[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":$$args}]"; \
+	kubectl -n $(OPERATOR_NAMESPACE) rollout status deployment/$(OPERATOR_DEPLOYMENT) --timeout=180s; \
+	echo "Operator now running with --runtime-projection-mode=$$MODE."
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

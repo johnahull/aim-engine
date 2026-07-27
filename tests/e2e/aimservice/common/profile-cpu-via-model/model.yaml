@@ -1,4 +1,4 @@
-# AIMModel that derives a child AIMProfile from the seed via profileCopy.
+# AIMModel that derives a child AIMProfile from the seed via spec.profiles.
 # No discovery Job runs here - the selector matches the seed by aimId/modelId
 # so the model+profileset controllers produce the derived profile directly.
 apiVersion: aim.eai.amd.com/v1alpha2
@@ -6,8 +6,9 @@ kind: AIMModel
 metadata:
   name: test-cpu-via-model
 spec:
-  profileCopy:
-    selector:
-      aimId: Qwen/Qwen3-0.6B
-      modelId: Qwen/Qwen3-0.6B
+  profiles:
+    derivedFrom:
+      selector:
+        aimId: Qwen/Qwen3-0.6B
+        modelId: Qwen/Qwen3-0.6B
     versionPolicy: latest

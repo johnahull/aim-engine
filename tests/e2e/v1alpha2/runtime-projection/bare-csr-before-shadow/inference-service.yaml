@@ -1,0 +1,30 @@
+# A plain, native KServe InferenceService referencing the bare managed CSR by
+# name — no AIM-specific spec, no annotations. When it is applied, the ONLY
+# runtime resolving aim-test-bare-csr-899eadd9 is the bare CSR (whose
+# AIM_PROFILE_ID dangles), so this forces the pre-shadow binding ordering
+# hazard: KServe may bind the bare CSR before the lazy watcher materializes the
+# complete namespace shadow. The test asserts it self-heals onto the namespace SR.
+#
+# Standard (raw) deployment + external autoscaler render a predictor Deployment
+# directly, so the test can assert on the rendered pod spec without Knative.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: native-bare-csr-consumer
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    serving.kserve.io/autoscalerClass: external
+spec:
+  predictor:
+    minReplicas: 1
+    model:
+      runtime: aim-test-bare-csr-899eadd9
+      modelFormat:
+        name: huggingface
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi

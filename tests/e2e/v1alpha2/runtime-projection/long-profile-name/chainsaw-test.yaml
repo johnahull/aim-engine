@@ -1,0 +1,105 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# A profile whose name would overflow aim-<profile.Name> still
+# projects under a valid, length-safe runtime name.
+#
+# The backing AIMClusterProfile has a realistic 63-character ProfileSet-style
+# name, so the pre-fix aim-<profile.Name> (67 chars) would bust the repo's
+# 63-char runtime-name convention. RuntimeName reserves the aim- prefix and
+# truncate+hashes the profile part, so the projected ClusterServingRuntime name
+# is always <=63 and unguessable.
+#
+# This asserts, against the LIVE reconcile:
+#   1. the profile reaches Ready and RuntimeProjected=True (the long name no
+#      longer wedges projection),
+#   2. status.projectedRuntimeName is the hashed aim-<truncated>-<hash> name
+#      (the deterministic profile->runtime lookup that replaces the reverse
+#      name strip that was removed),
+#   3. a ClusterServingRuntime with exactly that name exists,
+#   4. the name is a valid Kubernetes object name (<=63 chars), verified by a
+#      script so the length bound is checked explicitly.
+#
+# No accelerator and no cache/PVC, so this runs in any cluster under the default
+# Exhaustive projection mode with no special infrastructure.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-long-profile-name
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Apply the long-named cluster profile and wait for Ready + RuntimeProjected
+      description: |
+        The projected runtime name is published on status.projectedRuntimeName as
+        aim-amdenterpriseai-aim-gpt-oss-120b-1x-mi300x-through-458fe339 — the
+        aim- prefix is preserved, the profile part is truncated to fit, and the
+        8-char SHA-256 suffix disambiguates. It is exactly 63 characters, where
+        the naive aim-<profile.Name> would have been 67.
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: amdenterpriseai-aim-gpt-oss-120b-1x-mi300x-throughput-fp8-tp8pp
+              status:
+                status: Ready
+                projectedRuntimeName: aim-amdenterpriseai-aim-gpt-oss-120b-1x-mi300x-through-458fe339
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+
+    - name: Assert the ClusterServingRuntime is projected under the hashed name
+      description: |
+        The runtime lands at the hashed name (not the overflowing aim-<profile>),
+        carries the correlator labels, and is owner-ref'd by the profile for GC.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-amdenterpriseai-aim-gpt-oss-120b-1x-mi300x-through-458fe339
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: amdenterpriseai-aim-gpt-oss-120b-1x-mi300x-throughput-fp8-tp8pp
+
+    - name: Assert the projected runtime name is a valid Kubernetes name (<=63 chars)
+      description: |
+        The whole point of this test: the derived name never exceeds the 63-char
+        limit no matter how long the profile name is. Verify the bound explicitly.
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              set -eu
+              NAME=aim-amdenterpriseai-aim-gpt-oss-120b-1x-mi300x-through-458fe339
+              LEN=${#NAME}
+              echo "projected runtime name length: $LEN"
+              if [ "$LEN" -gt 63 ]; then
+                echo "ERROR: projected runtime name exceeds 63 characters"
+                exit 1
+              fi
+              kubectl get clusterservingruntime "$NAME" -o name
+
+    - name: Delete the profile and assert the runtime is garbage-collected
+      try:
+        - delete:
+            ref:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              name: amdenterpriseai-aim-gpt-oss-120b-1x-mi300x-throughput-fp8-tp8pp
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-amdenterpriseai-aim-gpt-oss-120b-1x-mi300x-through-458fe339

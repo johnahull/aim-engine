@@ -1,0 +1,23 @@
+# A deployable, namespace-scoped AIMProfile. Under the default Exhaustive
+# projection mode the profile controller eagerly projects a complete namespace
+# ServingRuntime (aim-<profile>-<hash>) + colocated ConfigMap for it. It declares
+# modelSources (so the framework redirect env AIM_CACHE_PATH / AIM_MODEL_ID /
+# AIM_ID="" is emitted) but has NO caching block of its own — the Shared cache is
+# created out-of-band (as an AIMService would), so this pins that the eager
+# runtime mounts a service-driven Shared cache even though the profile never set
+# caching.enabled. No accelerator, so it reaches Ready in any cluster.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: test-eager-cache
+spec:
+  aimId: Qwen/Qwen3-0.6B
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B

@@ -1,0 +1,80 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Backing-profile drift propagates to the materialized shadow.
+#
+# After the lazy watcher materializes a complete namespace ServingRuntime from a
+# cluster profile, the backing AIMClusterProfile's spec.image is patched. The
+# controller `.Watches` the AIMClusterProfile and maps the change back to every
+# ISVC whose referenced runtime resolves to that profile, so the materialized
+# namespace runtime is re-projected with the new image.
+#
+# No accelerator is involved, so this runs in any cluster (kind or GPU vcluster).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-lazy-shadow-profile-drift
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Create the backing cluster profile and bare managed CSR
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - apply:
+            file: managed-runtime.yaml
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-profile-drift
+              status:
+                status: Ready
+
+    - name: Apply the native InferenceService referencing the managed runtime
+      try:
+        - apply:
+            file: inference-service.yaml
+
+    - name: Assert the shadow ServingRuntime is materialized with the original profile image
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-profile-drift-30d527e6
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-profile-drift
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-profile-drift
+              spec:
+                (containers[?name == 'kserve-container'].image | [0]): registry.example.com/aim-cpu-base:0.12.0
+
+    - name: Patch the backing AIMClusterProfile spec.image
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              set -eu
+              kubectl patch aimclusterprofile test-profile-drift \
+                --type=merge \
+                -p '{"spec":{"image":"registry.example.com/aim-cpu-drift:9.9.9"}}'
+              echo "patched cluster profile spec.image"
+
+    - name: Assert the materialized namespace ServingRuntime image updates
+      description: |
+        The AIMClusterProfile watch enqueues the consuming ISVC and the shadow is
+        re-materialized from the profile's new spec.image. Chainsaw polls until
+        the namespace runtime's container image reflects the patched value.
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-profile-drift-30d527e6
+              spec:
+                (containers[?name == 'kserve-container'].image | [0]): registry.example.com/aim-cpu-drift:9.9.9
