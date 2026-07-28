@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hostile-s3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hostile-s3
+  template:
+    metadata:
+      labels:
+        app: hostile-s3
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+      containers:
+      - name: stub
+        image: python:3.12-slim
+        command: ["python", "/stub/hostile_s3.py"]
+        env:
+        # tree/config.json is the legitimate 100 B object. The 200 B
+        # tree/../escape.bin has a relative path of "../escape.bin" against the
+        # s3://models/tree prefix, so a downloader that joined it onto the
+        # target directory unchecked would write outside the PVC mount.
+        - name: HOSTILE_KEYS
+          value: "tree/config.json:100,tree/../escape.bin:200"
+        ports:
+        - containerPort: 9000
+        readinessProbe:
+          tcpSocket:
+            port: 9000
+          initialDelaySeconds: 2
+          periodSeconds: 2
+        volumeMounts:
+        - name: stub
+          mountPath: /stub
+      volumes:
+      - name: stub
+        configMap:
+          name: hostile-s3

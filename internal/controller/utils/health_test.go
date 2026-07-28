@@ -416,6 +416,38 @@ func TestCategorizeErrorFromLogs(t *testing.T) {
 			expected: errorCategoryAuth,
 		},
 		{
+			// Verbatim from a check-size pod reading a private bucket with
+			// credentials that are not allowed to list it. Nothing says "s3"
+			// after "denied" and there is no literal 403, so this only
+			// classifies via the AccessDenied error code.
+			name:     "botocore 403 on listing -> auth",
+			logs:     "2026-07-27 09:01:23 ERROR s3_downloader: S3 operation failed: An error occurred (AccessDenied) when calling the ListObjects operation: Access Denied.",
+			expected: errorCategoryAuth,
+		},
+		{
+			name:     "botocore NoCredentialsError -> auth",
+			logs:     "botocore.exceptions.NoCredentialsError: Unable to locate credentials",
+			expected: errorCategoryAuth,
+		},
+		{
+			name:     "s3_downloader exhausted credential chain -> auth",
+			logs:     "ERROR s3_downloader: S3 operation failed: Unable to locate credentials: no AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY were set and boto3 found no other credential source",
+			expected: errorCategoryAuth,
+		},
+		{
+			// The resource-not-found patterns run before the auth ones, which is
+			// what keeps the broad AccessDenied pattern from swallowing a
+			// missing bucket. Backends report both facts in the same failure.
+			name:     "missing bucket reported alongside a 403 -> resource not found",
+			logs:     "An error occurred (NoSuchBucket) when calling ListObjects\nAccessDenied",
+			expected: errorCategoryResourceNotFound,
+		},
+		{
+			name:     "empty listing -> resource not found",
+			logs:     "ERROR s3_downloader: No objects found at s3://models/nope (after applying download filter)",
+			expected: errorCategoryResourceNotFound,
+		},
+		{
 			name:     "no space left -> storage full",
 			logs:     "OSError: [Errno 28] No space left on device",
 			expected: errorCategoryStorageFull,

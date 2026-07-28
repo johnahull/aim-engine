@@ -37,28 +37,10 @@ case "$URL" in
     SIZE_BYTES="$SIZE_OUTPUT"
     ;;
     s3://*)
-        S3CMD_ARGS=""
-        [ -n "${AWS_ACCESS_KEY_ID:-}" ] && S3CMD_ARGS="$S3CMD_ARGS --access_key=$AWS_ACCESS_KEY_ID"
-        [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && S3CMD_ARGS="$S3CMD_ARGS --secret_key=$AWS_SECRET_ACCESS_KEY"
-        [ "${S3_NO_SSL:-}" = "true" ] && S3CMD_ARGS="$S3CMD_ARGS --no-ssl"
-
-        if [ -n "${AWS_ENDPOINT_URL:-}" ]; then
-            S3_HOST=$(echo "$AWS_ENDPOINT_URL" | sed 's|^https\?://||')
-            S3CMD_ARGS="$S3CMD_ARGS --host=$S3_HOST --host-bucket= --signature-v2"
-            
-            case "$AWS_ENDPOINT_URL" in
-                http://*) S3CMD_ARGS="$S3CMD_ARGS --no-ssl" ;;
-            esac
-        fi
-        
-        # Capture both stdout and stderr
-        if ! S3_OUTPUT=$(s3cmd $S3CMD_ARGS du "$URL" 2>&1); then
-            echo "Error: s3cmd failed for $URL" >&2
-            echo "$S3_OUTPUT" >&2
+        if ! SIZE_BYTES=$(python -m s3_downloader size "$URL"); then
+            echo "Error: failed to determine S3 size for $URL" >&2
             exit 1
         fi
-        
-        SIZE_BYTES=$(echo "$S3_OUTPUT" | awk '{print $1}')
         ;;
     *)
         echo "Error: Unknown protocol. URL must start with hf:// or s3:// - was $URL" >&2

@@ -107,25 +107,7 @@ case "$URL" in
         ;;
     s3://*)
         echo "Syncing from S3: $URL to $TARGET_DIR"
-        
-        S3CMD_ARGS=""
-        
-        # Credentials (support both naming conventions)
-        [ -n "${AWS_ACCESS_KEY_ID:-}" ] && S3CMD_ARGS="$S3CMD_ARGS --access_key=$AWS_ACCESS_KEY_ID"
-        [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && S3CMD_ARGS="$S3CMD_ARGS --secret_key=$AWS_SECRET_ACCESS_KEY"
-        [ "${S3_NO_SSL:-}" = "true" ] && S3CMD_ARGS="$S3CMD_ARGS --no-ssl"
-        
-        if [ -n "${AWS_ENDPOINT_URL:-}" ]; then
-            S3_HOST=$(echo "$AWS_ENDPOINT_URL" | sed 's|^https\?://||')
-            S3CMD_ARGS="$S3CMD_ARGS --host=$S3_HOST --host-bucket= --signature-v2"
-            
-            case "$AWS_ENDPOINT_URL" in
-                http://*) S3CMD_ARGS="$S3CMD_ARGS --no-ssl" ;;
-            esac
-        fi
-        
-        # shellcheck disable=SC2086
-        s3cmd $S3CMD_ARGS sync --stop-on-error "${URL%/}/" "$TARGET_DIR/"
+        python -m s3_downloader download "$URL" "$TARGET_DIR"
         stop_progress_monitor
         echo "Sync complete"
         ;;

@@ -38,8 +38,8 @@ if [ -z "${EXPECTED_SIZE_BYTES:-}" ]; then
             EXPECTED_SIZE_BYTES=$(python /check-size/check-hf-size.py 2>/dev/null || echo 0)
             ;;
         s3://*)
-            # Get size from S3 (s3cmd du returns human-readable, need bytes)
-            EXPECTED_SIZE_BYTES=$(s3cmd du "$URL" 2>/dev/null | awk '{print $1}' || echo 0)
+            # Get total size from S3 (bytes)
+            EXPECTED_SIZE_BYTES=$(python -m s3_downloader size "$URL" 2>/dev/null || echo 0)
             ;;
     esac
     export EXPECTED_SIZE_BYTES
@@ -98,7 +98,11 @@ measure_size() {
         && [ "$du_calls" -le "${AIM_DEBUG_SIMULATE_DU_HANG_CALLS:-1}" ]; then
         sleep "$AIM_DEBUG_SIMULATE_DU_HANG_SECONDS"
     fi
-    du -sb "$TARGET_DIR"
+    # Use allocated blocks (not -b/--apparent-size): boto3/s3transfer writes ranged
+    # multipart chunks at byte offsets, so a large file can be temporarily sparse
+    # and its apparent size can run ahead of bytes actually on disk. Allocated
+    # blocks track real written data and avoid false stall detection.
+    du -s --block-size=1 "$TARGET_DIR"
 }
 
 echo "Progress monitor started: expected=${expected_size} bytes, interval=${log_interval}s, stall_timeout=${stall_timeout}s, du_timeout=${du_timeout}s" >&2
@@ -161,8 +165,24 @@ while [ "$terminated" = "false" ]; do
         last_change_time=$now
     elif [ $((now - last_change_time)) -ge "$stall_timeout" ]; then
         echo "Download stalled for ${stall_timeout}s, killing download process" >&2
-        pkill -9 -f "python|s3cmd" 2>/dev/null || true
-        # Keep monitoring: hf-download.sh will retry the next protocol.
+        # Deliberate carpet kill of ALL python in this container, NOT a
+        # PID-targeted kill. The download workhorse (HF downloader or
+        # `python -m s3_downloader`) may spawn child python processes, and a
+        # stalled child must die with its parent; matching the whole `python`
+        # process group is the only fork-safe way to guarantee that. This is
+        # safe because the container's durable base is this shell script
+        # (/bin/sh, so the monitor itself survives) and python is purely
+        # ephemeral work -- there is no other python to protect (the operator
+        # injects EXPECTED_SIZE_BYTES, so the monitor runs no concurrent `size`
+        # probe). Do NOT narrow this to a recorded PID: that would let a forked
+        # child escape the kill and keep the Job wedged.
+        #
+        # After the kill: for hf://, hf-download.sh retries the next protocol;
+        # for s3://, the entrypoint exits non-zero and the Job's BackoffLimit
+        # restarts it -- and because S3 downloads are skip-existing (and write
+        # atomically), the retry only re-pulls files that aren't already
+        # complete.
+        pkill -9 -f "python" 2>/dev/null || true
         last_size=0
         last_change_time=$now
     fi

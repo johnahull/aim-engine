@@ -1,0 +1,19 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: explicit-anonymous
+spec:
+  # Anonymous access is requested explicitly with the "anonymous" sentinel. This
+  # is the form the built-in SeaweedFS artifact cache config uses
+  # (hack/default-cluster-runtime-config.yaml), so it has to keep selecting
+  # unsigned requests.
+  sourceUri: s3://public-models/tree
+  env:
+    - name: AWS_ACCESS_KEY_ID
+      value: anonymous
+    - name: AWS_SECRET_ACCESS_KEY
+      value: anonymous
+    - name: AWS_ENDPOINT_URL
+      value: http://minio:9000
+    - name: AWS_DEFAULT_REGION
+      value: us-east-1

@@ -1,0 +1,21 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: degenerate-keys-s3
+spec:
+  # size is omitted so the check-size job runs too: both jobs must agree on the
+  # same file set, otherwise the PVC could be sized for objects that never land.
+  sourceUri: s3://models/tree
+  env:
+    # The stub does no signature checking. Anonymity is stated explicitly with
+    # the "anonymous" sentinel rather than by omitting the keys, so this test
+    # keeps testing degenerate-key handling (not credential resolution) however
+    # the no-credentials default is settled.
+    - name: AWS_ACCESS_KEY_ID
+      value: anonymous
+    - name: AWS_SECRET_ACCESS_KEY
+      value: anonymous
+    - name: AWS_ENDPOINT_URL
+      value: http://hostile-s3:9000
+    - name: AWS_DEFAULT_REGION
+      value: us-east-1

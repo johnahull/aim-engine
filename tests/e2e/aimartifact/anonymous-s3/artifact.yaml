@@ -1,0 +1,18 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: anonymous-s3
+spec:
+  # AIM_S3_ANONYMOUS asks for anonymous (UNSIGNED) access against the public
+  # bucket. It has to be explicit: absent credentials mean "resolve them via the
+  # boto3 chain" (IRSA, instance role, shared profile), not "public bucket".
+  # size is omitted so the check-size job runs too -- proving anonymous
+  # list + stat + download.
+  sourceUri: s3://models/tree
+  env:
+    - name: AIM_S3_ANONYMOUS
+      value: "true"
+    - name: AWS_ENDPOINT_URL
+      value: http://minio:9000
+    - name: AWS_DEFAULT_REGION
+      value: us-east-1

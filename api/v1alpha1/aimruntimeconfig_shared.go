@@ -238,7 +238,11 @@ type ArtifactCacheConfig struct {
 
 	// Env provides S3 endpoint configuration for the cache bucket.
 	// Injected into download jobs when the source is rewritten to s3://.
-	// Typical vars: AWS_ENDPOINT_URL, S3_NO_SSL. Credentials optional (anonymous access).
+	// Typical var: AWS_ENDPOINT_URL (http:// vs https:// selects TLS automatically).
+	// For an unauthenticated cache bucket, request anonymous access explicitly with
+	// AIM_S3_ANONYMOUS=true (or AWS_ACCESS_KEY_ID=anonymous). Omitting the
+	// credentials instead means "resolve them the normal boto3 way" (IRSA,
+	// instance role, shared profile), which will fail if none is available.
 	// +optional
 	// +listType=map
 	// +listMapKey=name

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- Populate this section during release-prep, then rename to the release version -->
 
+### Added
+- **`s3://` artifact downloads rewritten on boto3**, replacing the `s3cmd` shell path. Credentials now resolve through the standard boto3 chain when `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` are unset, so IRSA, EKS Pod Identity, ECS task roles, EC2 instance profiles, shared profiles and credential processes work for the first time. Note that download Jobs run under the namespace's `default` ServiceAccount, so IRSA and Pod Identity require annotating it. New `AIM_S3_*` env knobs tune addressing style, signature version, region and multipart concurrency. (#158)
+- **Anonymous (unsigned) S3 access** for public buckets, requested explicitly with `AIM_S3_ANONYMOUS=true` or by setting a credential variable to `anonymous`. Omitting the credentials instead means "resolve them from the environment" — it is not read as a public bucket, because every role-based credential source deliberately leaves those variables unset. Partial credentials, and a real key combined with an `anonymous` sentinel, are now rejected with a specific error instead of silently falling back to unsigned requests. (#158)
+
+### Changed
+- **`s3://` downloads against a custom `AWS_ENDPOINT_URL` now sign with Signature V4 by default**, where the previous `s3cmd`-based downloader forced Signature V2. Backends that only accept V2 need `AIM_S3_SIGNATURE_VERSION=s3`. (#158)
+
+### Fixed
+- S3 authentication failures are now classified as auth errors rather than an invalid spec. `AccessDenied` and botocore's "Unable to locate credentials" matched none of the existing patterns, so a credentials problem surfaced as `ConfigValid=False`/`InvalidSpec` and pointed at the artifact's `sourceUri`. Missing buckets and empty prefixes still classify as source problems. (#158)
+
 ## [0.2.5] - 2026-07-09
 
 ### Added

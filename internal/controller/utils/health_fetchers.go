@@ -70,11 +70,22 @@ var (
 	authPatterns = []*regexp.Regexp{
 		// S3/AWS auth errors
 		regexp.MustCompile(`(?i)access.*denied.*s3`),
+		// botocore renders a 403 as "An error occurred (AccessDenied) when
+		// calling the ListObjects operation: Access Denied." -- the patterns
+		// above miss it because nothing says "s3" after "denied" and there is no
+		// literal 403. Matching the error code directly is safe: the
+		// resource-not-found patterns (NoSuchBucket/NoSuchKey/no objects found)
+		// are evaluated before these, so a missing bucket still classifies as a
+		// source problem rather than an auth one.
+		regexp.MustCompile(`(?i)AccessDenied`),
 		regexp.MustCompile(`(?i)s3.*403`),
 		regexp.MustCompile(`(?i)InvalidAccessKeyId`),
 		regexp.MustCompile(`(?i)SignatureDoesNotMatch`),
 		regexp.MustCompile(`(?i)s3.*unauthorized`),
 		regexp.MustCompile(`(?i)aws.*credentials.*not.*found`),
+		// botocore's NoCredentialsError, and the s3_downloader message raised
+		// when no static keys are set and the credential chain resolves nothing.
+		regexp.MustCompile(`(?i)Unable to locate credentials`),
 		regexp.MustCompile(`(?i)NoCredentialProviders`),
 		// HuggingFace auth errors (excluding "Repository not found" which is handled separately)
 		regexp.MustCompile(`(?i)Access to model .* is restricted`),
@@ -110,16 +121,23 @@ var (
 		regexp.MustCompile(`(?i)model.*not.*found`),
 		regexp.MustCompile(`(?i)file.*not.*found`),
 		regexp.MustCompile(`(?i)s3.*404`),
+		// S3 downloader emits this when a listing is empty (valid bucket, but a
+		// missing/typo'd prefix yields no objects and raises no ClientError).
+		regexp.MustCompile(`(?i)no objects found`),
 	}
 )
 
-// fetchPodLogs retrieves the last 50 lines of logs from a pod container
+// fetchPodLogs retrieves the last 200 lines of logs from a pod container.
+// The tail is generous because the download container interleaves per-object
+// progress lines (and the progress monitor logs every few seconds), so a
+// failure late in a large parallel download must not be pushed out of view of
+// the error classifier.
 func fetchPodLogs(ctx context.Context, clientset kubernetes.Interface, pod *corev1.Pod, containerName string) (string, error) {
 	if clientset == nil {
 		return "", fmt.Errorf("clientset is nil")
 	}
 
-	tailLines := int64(50)
+	tailLines := int64(200)
 	req := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
 		Container: containerName,
 		TailLines: &tailLines,

@@ -95,7 +95,7 @@ The `GetPodsHealth` utility automatically inspects pod logs to categorize failur
 
 **How it works**:
 1. Checks for image pull errors (auth, not found, backoff)
-2. For failed pods, fetches the last 50 lines of logs from the failed container
+2. For failed pods, fetches the last 200 lines of logs from the failed container
 3. Matches log patterns to categorize the failure type
 4. Returns categorized error with log excerpt for debugging
 

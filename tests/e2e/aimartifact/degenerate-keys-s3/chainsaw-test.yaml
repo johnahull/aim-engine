@@ -1,0 +1,147 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: degenerate-keys-s3
+spec:
+  description: >
+    Verifies that an object key containing a "../" segment cannot make the
+    downloader write outside the PVC mount, and cannot make an artifact go Ready
+    while a file it counted is missing from the PVC.
+
+    The source prefix is s3://models/tree and the bucket advertises two objects:
+    a legitimate 100 B tree/config.json and a 200 B tree/../escape.bin whose
+    path relative to the prefix is "../escape.bin". Joining that onto the target
+    directory unchecked resolves to /cache/escape.bin, one level above the
+    /cache/models mount.
+
+    The size and download jobs enumerate objects through the same generator, so
+    discoveredSizeBytes reports exactly which objects were selected: 100 means
+    only the legitimate object was taken, 300 would mean the degenerate key was
+    accepted as a download target. Ready then proves the download job's
+    post-download file-presence check passed, and the final step mounts the PVC
+    to confirm the bytes really are there and that nothing named escape.bin
+    landed anywhere in the volume.
+
+    MinIO and SeaweedFS reject "../" keys server-side, so this test uses a
+    stub S3 endpoint (see hostile-s3-configmap.yaml) to reproduce AWS S3, which
+    accepts them.
+  steps:
+    - name: Deploy the stub S3 endpoint
+      try:
+        - apply:
+            file: hostile-s3-configmap.yaml
+        - apply:
+            file: hostile-s3-service.yaml
+        - apply:
+            file: hostile-s3-deployment.yaml
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: hostile-s3
+              status:
+                availableReplicas: 1
+
+    - name: Create artifact against the prefix containing the degenerate key
+      try:
+        - apply:
+            file: artifact.yaml
+
+    - name: Assert only the legitimate object was enumerated and the cache is Ready
+      try:
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: degenerate-keys-s3
+              status:
+                status: Ready
+                # 100 = config.json only. 300 would mean tree/../escape.bin was
+                # accepted as a download target.
+                discoveredSizeBytes: 100
+                progress:
+                  percentage: 100
+      catch:
+        - describe:
+            apiVersion: aim.eai.amd.com/v1alpha1
+            kind: AIMArtifact
+        - podLogs:
+            selector: aim.eai.amd.com/cache.name=degenerate-keys-s3
+            tail: 100
+        - podLogs:
+            selector: app=hostile-s3
+            tail: 100
+
+    - name: Assert the PVC holds the legitimate file and nothing escaped into it
+      try:
+        - script:
+            timeout: 5m
+            content: |
+              set -eu
+              PVC=$(kubectl get aimartifact degenerate-keys-s3 -n "$NAMESPACE" \
+                -o jsonpath='{.status.persistentVolumeClaim}')
+              echo "Inspecting PVC: $PVC"
+
+              cat <<EOF | kubectl apply -n "$NAMESPACE" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: verify-cache
+              spec:
+                backoffLimit: 0
+                template:
+                  spec:
+                    restartPolicy: Never
+                    securityContext:
+                      runAsUser: 1000
+                      runAsGroup: 1000
+                      fsGroup: 1000
+                      runAsNonRoot: true
+                    containers:
+                      - name: verify
+                        image: alpine:latest
+                        command: ["/bin/sh", "-c"]
+                        args:
+                          - |
+                            set -eu
+                            echo "=== cache contents ==="
+                            find /cache -mindepth 1 | sort
+                            if [ ! -s /cache/config.json ]; then
+                              echo "FAIL: /cache/config.json missing or empty"
+                              exit 1
+                            fi
+                            SIZE=\$(wc -c < /cache/config.json)
+                            if [ "\$SIZE" != "100" ]; then
+                              echo "FAIL: config.json is \$SIZE bytes, want 100"
+                              exit 1
+                            fi
+                            if find /cache -name 'escape.bin' | grep -q .; then
+                              echo "FAIL: escape.bin was written into the volume"
+                              exit 1
+                            fi
+                            FILES=\$(find /cache -type f | wc -l)
+                            if [ "\$FILES" != "1" ]; then
+                              echo "FAIL: \$FILES files in the volume, want exactly 1"
+                              exit 1
+                            fi
+                            echo "PASS: exactly config.json (100 B), no escaped file"
+                        volumeMounts:
+                          - name: cache
+                            mountPath: /cache
+                            readOnly: true
+                    volumes:
+                      - name: cache
+                        persistentVolumeClaim:
+                          claimName: ${PVC}
+                          readOnly: true
+              EOF
+
+              kubectl wait --for=condition=complete job/verify-cache -n "$NAMESPACE" --timeout=4m
+              kubectl logs -n "$NAMESPACE" job/verify-cache
+      catch:
+        - script:
+            content: kubectl logs -n "$NAMESPACE" job/verify-cache --tail=50 || true

@@ -32,6 +32,15 @@ import (
 )
 
 func TestResolveDownloadFilter(t *testing.T) {
+	// hfArtifact returns an empty artifact with an hf:// source so the implicit
+	// subdir-exclude default applies (the default is hf://-only).
+	hfArtifact := func() *aimv1alpha1.AIMArtifact {
+		return &aimv1alpha1.AIMArtifact{Spec: aimv1alpha1.AIMArtifactSpec{SourceURI: "hf://org/model"}}
+	}
+	s3Artifact := func() *aimv1alpha1.AIMArtifact {
+		return &aimv1alpha1.AIMArtifact{Spec: aimv1alpha1.AIMArtifactSpec{SourceURI: "s3://bucket/model"}}
+	}
+
 	tests := []struct {
 		name          string
 		artifact      *aimv1alpha1.AIMArtifact
@@ -39,24 +48,37 @@ func TestResolveDownloadFilter(t *testing.T) {
 		wantInclude   []string
 		wantExclude   []string
 		wantIsDefault bool
+		wantNil       bool
 	}{
 		{
-			name:          "no filter anywhere → default excludes subdirs",
-			artifact:      &aimv1alpha1.AIMArtifact{},
+			name:          "hf source, no filter anywhere → default excludes subdirs",
+			artifact:      hfArtifact(),
 			runtimeConfig: nil,
 			wantExclude:   []string{"*/*"},
 			wantIsDefault: true,
 		},
 		{
-			name:          "runtime config with empty storage → default",
-			artifact:      &aimv1alpha1.AIMArtifact{},
+			name:          "hf source, runtime config with empty storage → default",
+			artifact:      hfArtifact(),
 			runtimeConfig: &aimv1alpha1.AIMRuntimeConfigCommon{AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{Storage: &aimv1alpha1.AIMStorageConfig{}}},
 			wantExclude:   []string{"*/*"},
 			wantIsDefault: true,
 		},
 		{
-			name:     "runtime config sets filter → used",
-			artifact: &aimv1alpha1.AIMArtifact{},
+			name:          "s3 source, no filter anywhere → nil (download whole prefix)",
+			artifact:      s3Artifact(),
+			runtimeConfig: nil,
+			wantNil:       true,
+		},
+		{
+			name:          "s3 source, runtime config with empty storage → nil",
+			artifact:      s3Artifact(),
+			runtimeConfig: &aimv1alpha1.AIMRuntimeConfigCommon{AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{Storage: &aimv1alpha1.AIMStorageConfig{}}},
+			wantNil:       true,
+		},
+		{
+			name:     "runtime config sets filter → used (applies to any scheme)",
+			artifact: s3Artifact(),
 			runtimeConfig: &aimv1alpha1.AIMRuntimeConfigCommon{
 				AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
 					Storage: &aimv1alpha1.AIMStorageConfig{
@@ -70,6 +92,7 @@ func TestResolveDownloadFilter(t *testing.T) {
 			name: "artifact filter overrides runtime config",
 			artifact: &aimv1alpha1.AIMArtifact{
 				Spec: aimv1alpha1.AIMArtifactSpec{
+					SourceURI:      "hf://org/model",
 					DownloadFilter: &aimv1alpha1.AIMDownloadFilter{Exclude: []string{"*.bin"}},
 				},
 			},
@@ -86,6 +109,7 @@ func TestResolveDownloadFilter(t *testing.T) {
 			name: "explicit empty filter on artifact → no filtering (overrides default)",
 			artifact: &aimv1alpha1.AIMArtifact{
 				Spec: aimv1alpha1.AIMArtifactSpec{
+					SourceURI:      "hf://org/model",
 					DownloadFilter: &aimv1alpha1.AIMDownloadFilter{},
 				},
 			},
@@ -93,7 +117,7 @@ func TestResolveDownloadFilter(t *testing.T) {
 		},
 		{
 			name:     "explicit empty filter on runtime config → no filtering",
-			artifact: &aimv1alpha1.AIMArtifact{},
+			artifact: hfArtifact(),
 			runtimeConfig: &aimv1alpha1.AIMRuntimeConfigCommon{
 				AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
 					Storage: &aimv1alpha1.AIMStorageConfig{
@@ -108,8 +132,15 @@ func TestResolveDownloadFilter(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := resolveDownloadFilter(tt.artifact, tt.runtimeConfig)
 
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("expected nil filter, got %+v", got)
+				}
+				return
+			}
+
 			if got == nil {
-				t.Fatal("resolveDownloadFilter returned nil, should always return a filter")
+				t.Fatal("resolveDownloadFilter returned nil unexpectedly")
 			}
 
 			if tt.wantIsDefault && got != defaultDownloadFilter {

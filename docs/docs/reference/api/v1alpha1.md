@@ -2390,7 +2390,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled controls whether the S3 artifact cache is active. |  | Optional: \{\} <br /> |
 | `s3Uri` _string_ | S3URI is the base S3 path for cached artifacts (e.g. s3://aim-cache/artifacts). |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env provides S3 endpoint configuration for the cache bucket.<br />Injected into download jobs when the source is rewritten to s3://.<br />Typical vars: AWS_ENDPOINT_URL, S3_NO_SSL. Credentials optional (anonymous access). |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env provides S3 endpoint configuration for the cache bucket.<br />Injected into download jobs when the source is rewritten to s3://.<br />Typical var: AWS_ENDPOINT_URL (http:// vs https:// selects TLS automatically).<br />For an unauthenticated cache bucket, request anonymous access explicitly with<br />AIM_S3_ANONYMOUS=true (or AWS_ACCESS_KEY_ID=anonymous). Omitting the<br />credentials instead means "resolve them the normal boto3 way" (IRSA,<br />instance role, shared profile), which will fail if none is available. |  | Optional: \{\} <br /> |
 
 
 #### DiscoveredProfileCounts

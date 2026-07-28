@@ -1,0 +1,21 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: failure-missing-prefix-s3
+spec:
+  # The bucket exists and is non-empty, but THIS prefix has no objects. boto3
+  # raises no NoSuchBucket/NoSuchKey error -- the listing is simply empty -- so
+  # the downloader exits with "No objects found", which the operator must
+  # classify as SourceNotFound (not a generic PodFailed). size is set so only
+  # the download job runs and surfaces the message.
+  sourceUri: s3://models/this-prefix-does-not-exist
+  size: 1Gi
+  env:
+    - name: AWS_ACCESS_KEY_ID
+      value: minioadmin
+    - name: AWS_SECRET_ACCESS_KEY
+      value: minioadmin
+    - name: AWS_ENDPOINT_URL
+      value: http://minio:9000
+    - name: AWS_DEFAULT_REGION
+      value: us-east-1

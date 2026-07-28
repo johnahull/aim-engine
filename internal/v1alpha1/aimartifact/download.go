@@ -101,6 +101,9 @@ func buildRoleBinding(mc *aimv1alpha1.AIMArtifact) *rbacv1.RoleBinding {
 }
 
 // defaultDownloadFilter excludes subdirectory files when no explicit filter is configured.
+// This default reflects HuggingFace repo conventions (skip nested dirs like
+// original/, onnx/, ...). It is NOT applied to s3:// sources, where the natural
+// expectation is to download the whole prefix verbatim (see resolveDownloadFilter).
 var defaultDownloadFilter = &aimv1alpha1.AIMDownloadFilter{Exclude: []string{"*/*"}}
 
 // downloadJobActiveDeadlineSeconds is a hard 24h wall-clock backstop on the
@@ -111,8 +114,14 @@ var defaultDownloadFilter = &aimv1alpha1.AIMDownloadFilter{Exclude: []string{"*/
 const downloadJobActiveDeadlineSeconds = int64(24 * 60 * 60)
 
 // resolveDownloadFilter returns the effective download filter.
-// Precedence: artifact spec > runtime config storage > default (exclude subdirs).
+// Precedence: artifact spec > runtime config storage > default (hf:// only).
 // An explicit empty filter (downloadFilter: {}) on the artifact disables all filtering.
+//
+// The implicit subdir-exclude default applies only to hf:// sources. For s3://
+// sources (including hf:// artifacts whose source was rewritten to a cache
+// s3:// path on a cache hit) the default is no filter, so the entire prefix is
+// downloaded. Both the size-check and download jobs call this, so the file set
+// they select stays identical and the cache PVC is never undersized.
 func resolveDownloadFilter(mc *aimv1alpha1.AIMArtifact, runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon) *aimv1alpha1.AIMDownloadFilter {
 	if mc.Spec.DownloadFilter != nil {
 		return mc.Spec.DownloadFilter
@@ -120,7 +129,10 @@ func resolveDownloadFilter(mc *aimv1alpha1.AIMArtifact, runtimeConfig *aimv1alph
 	if runtimeConfig != nil && runtimeConfig.Storage != nil && runtimeConfig.Storage.DownloadFilter != nil {
 		return runtimeConfig.Storage.DownloadFilter
 	}
-	return defaultDownloadFilter
+	if strings.HasPrefix(effectiveSourceURI(mc), "hf://") {
+		return defaultDownloadFilter
+	}
+	return nil
 }
 
 func downloadFilterEnvVars(filter *aimv1alpha1.AIMDownloadFilter) []corev1.EnvVar {

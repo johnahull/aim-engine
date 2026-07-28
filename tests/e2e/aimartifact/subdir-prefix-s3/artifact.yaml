@@ -1,0 +1,19 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: subdir-prefix-s3
+spec:
+  # No downloadFilter: for s3:// sources the implicit subdir-exclude default
+  # does NOT apply (it is hf://-only), so the WHOLE prefix -- including the
+  # nested/ subdirectory -- must be downloaded. size is omitted so the size
+  # job discovers the full byte total (asserted to be 300 = 100 + 200).
+  sourceUri: s3://models/tree
+  env:
+    - name: AWS_ACCESS_KEY_ID
+      value: minioadmin
+    - name: AWS_SECRET_ACCESS_KEY
+      value: minioadmin
+    - name: AWS_ENDPOINT_URL
+      value: http://minio:9000
+    - name: AWS_DEFAULT_REGION
+      value: us-east-1

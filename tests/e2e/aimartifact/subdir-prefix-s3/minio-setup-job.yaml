@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-setup
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: mc
+        image: minio/mc:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          #!/bin/sh
+          set -e
+          echo "Waiting for Minio to be ready..."
+          until mc alias set myminio http://minio:9000 minioadmin minioadmin; do
+            echo "Waiting for Minio..."
+            sleep 2
+          done
+          echo "Creating bucket 'models'..."
+          mc mb myminio/models || true
+          # Seed a tree with a root file (100 B) and a nested subdir file (200 B)
+          # => 300 B total. The exact total lets the test assert that the subdir
+          # object is included by the whole-prefix (nil-filter) download path.
+          echo "Seeding root + nested objects..."
+          mkdir -p /tmp/m/nested
+          head -c 100 /dev/zero > /tmp/m/config.json
+          head -c 200 /dev/zero > /tmp/m/nested/extra.bin
+          mc cp --recursive /tmp/m/ myminio/models/tree/
+          echo "Setup complete"

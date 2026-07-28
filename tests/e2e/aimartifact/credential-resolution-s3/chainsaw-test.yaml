@@ -1,0 +1,118 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: credential-resolution-s3
+spec:
+  description: >
+    Pins when the S3 downloader is allowed to fall back to anonymous (unsigned)
+    requests. Two artifacts read from one MinIO, which serves an anonymously
+    readable bucket and a private one.
+
+    explicit-anonymous asks for anonymous access with the "anonymous" sentinel
+    against the public bucket and must reach Ready. That is the form the built-in
+    SeaweedFS artifact cache config uses, so it has to keep working.
+
+    no-credentials supplies no credentials at all against the private bucket and
+    must fail as an authentication problem. This is the case that matters for
+    IRSA, EKS Pod Identity, ECS/EC2 instance roles, shared profiles and
+    credential processes: those all leave AWS_ACCESS_KEY_ID and
+    AWS_SECRET_ACCESS_KEY unset on purpose, so those variables being absent means
+    "resolve credentials the normal boto3 way", never "the bucket is public".
+    Nothing supplies credentials in this namespace, so the chain comes up empty
+    and the downloader reports "Unable to locate credentials".
+
+    Asserting AuthError here is the point of the test: it has to name credentials
+    as the cause. Reading absent keys as a public bucket instead produces a 403
+    and a log line announcing anonymous access, which sends the user looking at
+    their sourceUri.
+  steps:
+    - name: Deploy Minio
+      try:
+        - apply:
+            file: minio-service.yaml
+        - apply:
+            file: minio-deployment.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: minio
+              status:
+                availableReplicas: 1
+
+    - name: Create a public bucket and a private bucket, seeded identically
+      try:
+        - apply:
+            file: minio-setup-job.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: minio-setup
+              status:
+                (succeeded != null): true
+                succeeded: 1
+      catch:
+        - podLogs:
+            selector: job-name=minio-setup
+            tail: 50
+
+    - name: Create both artifacts
+      try:
+        - apply:
+            file: artifact-explicit-anonymous.yaml
+        - apply:
+            file: artifact-no-credentials.yaml
+
+    - name: Assert explicitly-anonymous access to the public bucket reaches Ready
+      try:
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: explicit-anonymous
+              status:
+                status: Ready
+                discoveredSizeBytes: 100
+                progress:
+                  percentage: 100
+      catch:
+        - describe:
+            apiVersion: aim.eai.amd.com/v1alpha1
+            kind: AIMArtifact
+            name: explicit-anonymous
+        - podLogs:
+            selector: aim.eai.amd.com/cache.name=explicit-anonymous
+            tail: 100
+
+    - name: Assert no credentials against a private bucket fails as an auth error
+      try:
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: no-credentials
+              status:
+                status: Failed
+                (conditions[?type == 'Ready']):
+                  - status: "False"
+                    reason: "AuthError"
+                (conditions[?type == 'AuthValid']):
+                  - status: "False"
+                    reason: "AuthError"
+      catch:
+        - describe:
+            apiVersion: aim.eai.amd.com/v1alpha1
+            kind: AIMArtifact
+            name: no-credentials
+        - podLogs:
+            selector: aim.eai.amd.com/cache.name=no-credentials
+            tail: 100
