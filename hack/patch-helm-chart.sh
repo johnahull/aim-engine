@@ -68,39 +68,102 @@ fi
 echo "  - Adding manager env injection (scale-from-zero + artifactDownloaderImage)..."
 if [[ -f "${MANAGER_YAML}" ]]; then
     python3 - "${MANAGER_YAML}" <<'PYEOF'
+import re
 import sys
 path = sys.argv[1]
 with open(path) as f:
     content = f.read()
 
-marker = "                  imagePullPolicy: {{ .Values.manager.image.pullPolicy }}\n"
-if marker not in content:
+match = re.search(
+    r"^(?P<indent>[ \t]*)imagePullPolicy: "
+    r"\{\{ \.Values\.manager\.image\.pullPolicy \}\}\n",
+    content,
+    flags=re.MULTILINE,
+)
+if not match:
     sys.stderr.write(f"WARN: imagePullPolicy marker not found in {path}; "
                      "skipping env injection\n")
     sys.exit(0)
 
+indent = match.group("indent")
+child_indent = indent + "  "
 env_block = (
-    "                  env:\n"
-    "                    - name: AIM_KEDA_OTEL_SCALER_ADDRESS\n"
-    "                      value: {{ .Values.scaleFromZero.scalerAddress | quote }}\n"
-    "                    - name: AIM_COOLDOWN_SECONDS_PER_GI_MEMORY\n"
-    "                      value: {{ .Values.scaleFromZero.cooldownSecondsPerGiMemory | quote }}\n"
-    "                    {{- if .Values.manager.artifactDownloaderImage }}\n"
-    "                    - name: AIM_ARTIFACT_DOWNLOADER_IMAGE\n"
-    "                      value: {{ .Values.manager.artifactDownloaderImage | quote }}\n"
-    "                    {{- end }}\n"
-    "                    {{- with .Values.manager.env }}\n"
-    "                    {{- toYaml . | nindent 20 }}\n"
-    "                    {{- end }}\n"
+    f"{indent}env:\n"
+    f"{child_indent}- name: AIM_KEDA_OTEL_SCALER_ADDRESS\n"
+    f"{child_indent}  value: {{{{ .Values.scaleFromZero.scalerAddress | quote }}}}\n"
+    f"{child_indent}- name: AIM_COOLDOWN_SECONDS_PER_GI_MEMORY\n"
+    f"{child_indent}  value: {{{{ .Values.scaleFromZero.cooldownSecondsPerGiMemory | quote }}}}\n"
+    f"{child_indent}{{{{- if .Values.manager.artifactDownloaderImage }}}}\n"
+    f"{child_indent}- name: AIM_ARTIFACT_DOWNLOADER_IMAGE\n"
+    f"{child_indent}  value: {{{{ .Values.manager.artifactDownloaderImage | quote }}}}\n"
+    f"{child_indent}{{{{- end }}}}\n"
+    f"{child_indent}{{{{- with .Values.manager.env }}}}\n"
+    f"{child_indent}{{{{- toYaml . | nindent {len(child_indent)} }}}}\n"
+    f"{child_indent}{{{{- end }}}}\n"
 )
 
 if "AIM_KEDA_OTEL_SCALER_ADDRESS" not in content:
-    content = content.replace(marker, marker + env_block, 1)
+    insert_at = match.end()
+    content = content[:insert_at] + env_block + content[insert_at:]
     with open(path, "w") as f:
         f.write(content)
 PYEOF
 else
     echo "    Warning: ${MANAGER_YAML} not found, skipping env injection"
+fi
+
+# ------------------------------------------------------------------------------
+# Add manager extraVolumes / extraVolumeMounts support. The generated manager
+# deployment contains fixed empty arrays, so replace those exact anchors with
+# values-driven blocks. This is used by the Kind stack to mount Zot's private
+# CA, and is generally useful for other controller-side trust/config files.
+# ------------------------------------------------------------------------------
+echo "  - Adding manager extra volume support..."
+if [[ -f "${MANAGER_YAML}" ]]; then
+    python3 - "${MANAGER_YAML}" <<'PYEOF'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+
+def replace_empty_list(content, field, value_path):
+    if value_path in content:
+        return content
+
+    marker = re.search(
+        rf"^(?P<indent>[ \t]*){re.escape(field)}: \[\]\n",
+        content,
+        flags=re.MULTILINE,
+    )
+    if not marker:
+        sys.stderr.write(f"ERROR: manager {field} marker not found in {path}\n")
+        sys.exit(1)
+
+    indent = marker.group("indent")
+    child_indent = indent + "  "
+    block = (
+        f"{indent}{{{{- with {value_path} }}}}\n"
+        f"{indent}{field}:\n"
+        f"{child_indent}{{{{- toYaml . | nindent {len(child_indent)} }}}}\n"
+        f"{indent}{{{{- else }}}}\n"
+        f"{indent}{field}: []\n"
+        f"{indent}{{{{- end }}}}\n"
+    )
+    return content[:marker.start()] + block + content[marker.end():]
+
+
+content = replace_empty_list(
+    content, "volumeMounts", ".Values.manager.extraVolumeMounts"
+)
+content = replace_empty_list(content, "volumes", ".Values.manager.extraVolumes")
+
+with open(path, "w") as f:
+    f.write(content)
+PYEOF
+else
+    echo "    Warning: ${MANAGER_YAML} not found, skipping extra volume support"
 fi
 
 # ------------------------------------------------------------------------------

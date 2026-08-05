@@ -50,7 +50,5 @@ tmp
 .local
 .assay
 
-# Throwaway copy of the e2e fixtures produced by `make test-chainsaw-kind-ttl`
-# (the aim-dummy ref is rewritten to an ephemeral ttl.sh ref in this copy).
+# Throwaway copy used by the external-GPU ttl.sh fallback.
 tests/e2e-ttl/
-

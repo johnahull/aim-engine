@@ -1,0 +1,14 @@
+# Trust the private CA used by the Kind-only Zot registry. The public system
+# roots remain available because SSL_CERT_DIR accepts a colon-separated list.
+manager:
+  env:
+    - name: SSL_CERT_DIR
+      value: /etc/ssl/certs:/var/run/aim-engine/zot-ca
+  extraVolumeMounts:
+    - name: zot-ca
+      mountPath: /var/run/aim-engine/zot-ca
+      readOnly: true
+  extraVolumes:
+    - name: zot-ca
+      configMap:
+        name: aim-engine-zot-ca

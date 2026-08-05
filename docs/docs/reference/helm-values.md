@@ -19,6 +19,8 @@ Controller manager configuration
 | `manager.runtimeProjectionMode` | Eager runtime projection mode for the profile reconcilers, rendered as the operator's --runtime-projection-mode arg. Exhaustive projects one runtime per projectable profile. Reduced projects one model-slug primary runtime per model that native KServe references by name. Both runs the two together. Every projected runtime keeps autoSelect off (all share one model format, so autoSelect would collide across models). The lazy InferenceService-watch projection is always on and is not governed by this value. See the runtime-projection ADR (docs/adr). | `Exhaustive` |
 | `manager.artifactDownloaderImage` | Override the artifact-downloader image the operator spawns for model download and size-check Jobs. Empty uses the public mirror image baked into the operator binary at build time. Set this to install from a private downloader mirror instead. Per-resource (spec.modelDownloadImage) and runtime-config overrides still take precedence over this install-time default. | `` |
 | `manager.env` | Additional environment variables for the controller | `[]` |
+| `manager.extraVolumeMounts` | Additional volume mounts for the controller | `[]` |
+| `manager.extraVolumes` | Additional volumes for the controller pod | `[]` |
 | `manager.podSecurityContext.runAsNonRoot` | Require non-root user | `true` |
 | `manager.podSecurityContext.seccompProfile.type` | Seccomp profile type | `RuntimeDefault` |
 | `manager.securityContext.allowPrivilegeEscalation` | Prevent privilege escalation | `false` |

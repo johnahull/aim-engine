@@ -54,6 +54,14 @@ manager:
   # -- Additional environment variables for the controller
   env: []
 
+  # -- Additional volume mounts for the controller
+  # @default -- `[]`
+  extraVolumeMounts: []
+
+  # -- Additional volumes for the controller pod
+  # @default -- `[]`
+  extraVolumes: []
+
   # Pod-level security settings
   podSecurityContext:
     # -- Require non-root user

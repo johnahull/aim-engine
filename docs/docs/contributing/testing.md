@@ -27,6 +27,31 @@ make test-chainsaw
 make test-chainsaw CHAINSAW_TEST_DIR=tests/e2e/aimservice/frozen
 ```
 
+For the full Kind suite, install the operator in the cluster with the Kind
+values and use the local Zot-backed target:
+
+```bash
+make kind-create
+make helm
+helm upgrade --install aim-engine dist/chart \
+  --namespace aim-system \
+  --create-namespace \
+  -f hack/kind/operator-values.yaml \
+  --set acceleratorDetector.enable=false
+make test-chainsaw-kind-zot KIND_CLUSTER=aim-engine
+```
+
+`make kind-create` installs an ephemeral Zot registry with a cert-manager-issued
+TLS certificate. The test target builds `aim-dummy` once, pushes every fixture
+tag through a temporary localhost port-forward, and kind-loads the exact
+in-cluster references used by workload pods. The operator trusts the private CA
+through `hack/kind/operator-values.yaml`; normal public certificate roots remain
+available.
+
+The Zot service name is only resolvable inside the cluster. Run this target
+against an operator installed in Kind, rather than an operator started on the
+host with `make watch`.
+
 ### Environment Selectors
 
 Tests are filtered by environment. When `ENV=kind` (default), tests tagged with `requires=longhorn` or other infrastructure requirements are excluded automatically.

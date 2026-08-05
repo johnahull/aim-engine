@@ -29,18 +29,35 @@ LDFLAGS ?= -X 'github.com/amd-enterprise-ai/aim-engine/api/v1alpha1.DefaultDownl
 AIM_DUMMY_TAG ?= 0.2.0
 AIM_DUMMY_IMAGE ?= docker.io/amdenterpriseai/aim-dummy:$(AIM_DUMMY_TAG)
 
-# --- ttl.sh ephemeral-registry fallback (pre-publish dev / CI loop) ----------
+# --- Kind-local Zot registry -------------------------------------------------
+# AIMModel discovery reads image OCI labels from inside the operator, so loading
+# an image into Kind's containerd is not sufficient by itself. The Kind dev
+# stack installs an ephemeral Zot registry with cert-manager TLS. Test images
+# are pushed through a localhost port-forward, while in-cluster clients use the
+# service FQDN. Workload images are also kind-loaded under that exact FQDN so
+# kubelet never needs to resolve Kubernetes service DNS.
+ZOT_NAMESPACE ?= zot-system
+ZOT_SERVICE ?= zot
+ZOT_CA_CONFIGMAP ?= aim-engine-zot-ca
+ZOT_CLUSTER_REGISTRY ?= $(ZOT_SERVICE).$(ZOT_NAMESPACE).svc.cluster.local:5000
+ZOT_AIM_DUMMY_REPO ?= $(ZOT_CLUSTER_REGISTRY)/aim-dummy
+# Zot creates an inotify watcher for configuration hot-reload at startup.
+# Shared CI hosts can exhaust the kernel's per-user instance limit while
+# multiple Kind clusters are running, so ensure a modest minimum before Zot
+# starts. Override this if the host has a stricter policy or a larger workload.
+ZOT_INOTIFY_MAX_USER_INSTANCES ?= 1024
+
+# --- ttl.sh ephemeral-registry fallback for external GPU clusters ------------
 # AIMModel discovery reads a model image's OCI labels *inside the operator* via
 # go-containerregistry remote.Get (see internal/v1alpha1/aimmodel/inspector.go).
 # `kind load` only satisfies kubelet pod pulls, NOT that in-operator registry
 # read, so discovery against a not-yet-public ref (e.g. the new
 # docker.io/amdenterpriseai mirror before it's published) fails with
 # UNAUTHORIZED -> AIMModel Degraded. Publishing to the public mirror is slow and
-# gated, which is impractical when iterating on operator logic. `make
-# test-chainsaw-kind-ttl` instead builds aim-dummy, pushes it to ttl.sh
-# (anonymous, public, ephemeral), and runs the kind suite against a throwaway
-# copy of tests/e2e whose hardcoded aim-dummy ref is rewritten to the ttl.sh
-# ref. Content-addressed so unchanged source re-uses the same push. Recursively
+# gated, which is impractical when iterating on operator logic. External GPU
+# environments cannot use the Kind-local Zot service, so
+# `make test-chainsaw-gpu-ttl` retains the anonymous public ttl.sh fallback.
+# Content-addressing lets unchanged source re-use the same push. Recursively
 # expanded (=) so the find/hash only runs when a ttl target is invoked.
 #
 # The TAG is preserved per fixture: the operator derives
@@ -195,6 +212,8 @@ kind-create: manifests ## Create kind cluster with all dependencies for local de
 	@# Install core dependencies (cert-manager, kgateway, kserve)
 	@echo "Installing core dependencies..."
 	@helmfile sync -f hack/dependencies/helmfile.yaml.gotmpl
+	@# Install the Kind-local TLS registry after cert-manager is ready.
+	@$(MAKE) kind-zot-install KIND_CLUSTER=aim-engine
 	@# Install scale-from-zero activation prereq (kgateway-metrics-collector).
 	@# Cluster-wide OpenTelemetryCollector that scrapes Envoy from kgateway
 	@# data-plane pods and forwards the request counter to keda-otel-scaler;
@@ -211,13 +230,9 @@ kind-create: manifests ## Create kind cluster with all dependencies for local de
 	@$(MAKE) seaweedfs-init-bucket
 	@$(MAKE) seaweedfs-default-config
 	@$(MAKE) cache-warm
-	@# Build the aim-dummy test image locally and load it under the exact public
-	@# ref the e2e fixtures reference, so kind serves it via IfNotPresent without
-	@# pulling from docker.io.
-	@echo "Building aim-dummy test image ($(AIM_DUMMY_IMAGE))..."
-	@docker build -t $(AIM_DUMMY_IMAGE) images/aim-dummy
-	@echo "Loading aim-dummy image into kind..."
-	@kind load docker-image $(AIM_DUMMY_IMAGE) --name aim-engine 2>/dev/null || true
+	@# Publish aim-dummy to Zot for operator-side metadata discovery and load the
+	@# exact in-cluster references into Kind for workload pods.
+	@$(MAKE) aim-dummy-zot-push KIND_CLUSTER=aim-engine
 	@echo ""
 	@echo "=== Kind cluster setup complete ==="
 	@echo "Run 'make watch' to start the operator with live reload."
@@ -258,6 +273,50 @@ cache-warm: ## Pre-warm the S3 artifact cache with test models.
 		exit 1; \
 	fi
 	@echo "S3 cache warm complete."
+
+.PHONY: kind-zot-inotify-limit
+kind-zot-inotify-limit: ## Ensure Kind's host kernel has enough inotify instances for Zot.
+	@set -eu; \
+	nodes="$$(kind get nodes --name "$(KIND_CLUSTER)")"; \
+	if [ -z "$$nodes" ]; then \
+		echo "No nodes found for Kind cluster '$(KIND_CLUSTER)'."; \
+		exit 1; \
+	fi; \
+	for node in $$nodes; do \
+		current="$$(docker exec "$$node" sysctl -n fs.inotify.max_user_instances)"; \
+		if [ "$$current" -lt "$(ZOT_INOTIFY_MAX_USER_INSTANCES)" ]; then \
+			echo "Raising fs.inotify.max_user_instances on $$node from $$current to $(ZOT_INOTIFY_MAX_USER_INSTANCES)..."; \
+			docker exec "$$node" sysctl -w fs.inotify.max_user_instances=$(ZOT_INOTIFY_MAX_USER_INSTANCES); \
+		else \
+			echo "fs.inotify.max_user_instances on $$node is $$current."; \
+		fi; \
+	done
+
+.PHONY: kind-zot-install
+kind-zot-install: kind-zot-inotify-limit ## Install the ephemeral TLS-enabled Zot registry used by Kind tests.
+	@echo "Installing Kind-local Zot registry..."
+	@helmfile sync -f hack/kind/zot/helmfile.yaml.gotmpl
+	@kubectl create namespace aim-system --dry-run=client -o yaml | kubectl apply -f -
+	@set -euo pipefail; \
+	ca_file=$$(mktemp /tmp/aim-engine-zot-ca.XXXXXX); \
+	trap 'rm -f "$$ca_file"' EXIT; \
+	kubectl get secret zot-ca -n $(ZOT_NAMESPACE) -o jsonpath='{.data.tls\.crt}' | base64 -d >"$$ca_file"; \
+	kubectl create configmap $(ZOT_CA_CONFIGMAP) -n aim-system \
+		--from-file=ca.crt="$$ca_file" --dry-run=client -o yaml | kubectl apply -f -; \
+	kubectl wait --for=condition=Available --timeout=120s \
+		deployment/$(ZOT_SERVICE) -n $(ZOT_NAMESPACE)
+	@echo "Zot is ready at https://$(ZOT_CLUSTER_REGISTRY)"
+
+.PHONY: aim-dummy-zot-push
+aim-dummy-zot-push: ## Build aim-dummy, push all fixture tags to Kind-local Zot, and load those exact refs into Kind.
+	@KIND_CLUSTER="$(KIND_CLUSTER)" \
+	CHAINSAW_TEST_DIR="$(CHAINSAW_TEST_DIR)" \
+	ZOT_NAMESPACE="$(ZOT_NAMESPACE)" \
+	ZOT_SERVICE="$(ZOT_SERVICE)" \
+	ZOT_CA_CONFIGMAP="$(ZOT_CA_CONFIGMAP)" \
+	ZOT_CLUSTER_REGISTRY="$(ZOT_CLUSTER_REGISTRY)" \
+	ZOT_AIM_DUMMY_REPO="$(ZOT_AIM_DUMMY_REPO)" \
+		./hack/kind/publish-aim-dummy.sh
 
 .PHONY: kind-delete
 kind-delete: ## Delete the kind cluster.
@@ -369,6 +428,26 @@ test-chainsaw-projection-mode: ## Run ONLY the mode-gated projection tests (MODE
 		CHAINSAW_TEST_DIR=$(CHAINSAW_PROJECTION_MODE_DIR) \
 		CHAINSAW_ENV_SELECTOR="--selector \"requires in ($$gate)\""
 
+.PHONY: test-chainsaw-kind-zot
+test-chainsaw-kind-zot: aim-dummy-zot-push ## Run Kind e2e against the ephemeral in-cluster Zot registry.
+	@set -euo pipefail; \
+	mkdir -p "$(CURDIR)/.tmp"; \
+	zot_dir=$$(mktemp -d "$(CURDIR)/.tmp/e2e-zot.XXXXXX"); \
+	trap 'rm -rf "$$zot_dir"' EXIT; \
+	cp -a "$(CHAINSAW_TEST_DIR)/." "$$zot_dir/"; \
+	echo "Rewriting docker.io/amdenterpriseai/aim-dummy:<tag> -> $(ZOT_AIM_DUMMY_REPO):<tag> across $$zot_dir"; \
+	matches=$$(grep -rlF "docker.io/amdenterpriseai/aim-dummy:" "$$zot_dir" || true); \
+	if [ -z "$$matches" ]; then echo "ERROR: no fixtures under $$zot_dir reference docker.io/amdenterpriseai/aim-dummy:"; exit 1; fi; \
+	echo "$$matches" | xargs sed -i "s|docker.io/amdenterpriseai/aim-dummy:|$(ZOT_AIM_DUMMY_REPO):|g"; \
+	: "Derivation tests assert an aim-base ref rebased onto the source image's registry."; \
+	: "Do not rewrite image-discovery-happy-path: status.baseImage is the literal"; \
+	: "AIM_BASE_IMAGE_REF baked into aim-dummy, not a derived registry reference."; \
+	base_matches=$$(grep -rlF "docker.io/amdenterpriseai/aim-base:" "$$zot_dir" | grep -vE '/image-discovery-happy-path/' || true); \
+	if [ -n "$$base_matches" ]; then \
+		echo "$$base_matches" | xargs sed -i "s|docker.io/amdenterpriseai/aim-base:|$(ZOT_CLUSTER_REGISTRY)/aim-base:|g"; \
+	fi; \
+	$(MAKE) test-chainsaw ENV=kind CHAINSAW_TEST_DIR="$$zot_dir"
+
 .PHONY: aim-dummy-ttl-push
 aim-dummy-ttl-push: ## Build aim-dummy once and push it to ephemeral ttl.sh refs under every tag the fixtures reference (also loads it into the local docker daemon).
 	@set -euo pipefail; \
@@ -385,33 +464,6 @@ aim-dummy-ttl-push: ## Build aim-dummy once and push it to ephemeral ttl.sh refs
 		[ "$$t" = "$$first" ] || docker tag "$(TTL_AIM_DUMMY_REPO):$$first" "$(TTL_AIM_DUMMY_REPO):$$t"; \
 		docker push "$(TTL_AIM_DUMMY_REPO):$$t"; \
 	done
-
-.PHONY: test-chainsaw-kind-ttl
-test-chainsaw-kind-ttl: aim-dummy-ttl-push ## Run kind e2e against an ephemeral ttl.sh aim-dummy (use while amdenterpriseai images aren't public yet).
-	@set -euo pipefail; \
-	ttl_dir="$(CHAINSAW_TEST_DIR)-ttl"; \
-	echo "Loading $(TTL_AIM_DUMMY_REPO) tags into kind cluster '$(KIND_CLUSTER)' (best-effort; pods otherwise pull from public ttl.sh)"; \
-	for t in $$(grep -rhoE 'docker\.io/amdenterpriseai/aim-dummy:[A-Za-z0-9._-]+' "$(CHAINSAW_TEST_DIR)" | sed 's|^.*:||' | sort -u); do \
-		kind load docker-image "$(TTL_AIM_DUMMY_REPO):$$t" --name $(KIND_CLUSTER) 2>/dev/null || true; \
-	done; \
-	rm -rf "$$ttl_dir"; cp -r "$(CHAINSAW_TEST_DIR)" "$$ttl_dir"; \
-	trap 'rm -rf "$$ttl_dir"' EXIT; \
-	echo "Rewriting docker.io/amdenterpriseai/aim-dummy:<tag> -> $(TTL_AIM_DUMMY_REPO):<tag> across $$ttl_dir"; \
-	matches=$$(grep -rlF "docker.io/amdenterpriseai/aim-dummy:" "$$ttl_dir" || true); \
-	if [ -z "$$matches" ]; then echo "ERROR: no fixtures under $$ttl_dir reference docker.io/amdenterpriseai/aim-dummy:"; exit 1; fi; \
-	echo "$$matches" | xargs sed -i "s|docker.io/amdenterpriseai/aim-dummy:|$(TTL_AIM_DUMMY_REPO):|g"; \
-	: "Cascade: derivation tests assert a derived image that RebaseRegistry grafts"; \
-	: "onto the *source* image's registry+org. With the ttl source ref the prefix"; \
-	: "collapses to '$(TTL_REGISTRY)', so rewrite the docker.io/amdenterpriseai aim-base"; \
-	: "assertions to match (tag preserved). No-op for the real-CI docker.io ref."; \
-	: "EXCLUDE image-discovery-happy-path: its status.baseImage is the literal"; \
-	: "AIM_BASE_IMAGE_REF env baked into aim-dummy (NOT rebased), so it stays"; \
-	: "docker.io/amdenterpriseai/aim-base:dummy regardless of the source registry."; \
-	base_matches=$$(grep -rlF "docker.io/amdenterpriseai/aim-base:" "$$ttl_dir" | grep -vE '/image-discovery-happy-path(-ttl)?/' || true); \
-	if [ -n "$$base_matches" ]; then \
-		echo "$$base_matches" | xargs sed -i "s|docker.io/amdenterpriseai/aim-base:|$(TTL_REGISTRY)/aim-base:|g"; \
-	fi; \
-	$(MAKE) test-chainsaw ENV=kind CHAINSAW_TEST_DIR="$$ttl_dir"
 
 .PHONY: test-chainsaw-gpu
 test-chainsaw-gpu: ## Run chainsaw e2e tests for GPU environment

@@ -130,9 +130,9 @@ jobs:
       # AIM_DUMMY_TAG pins the aim-dummy test image (BYO base-image, custom-model,
       # discovery fixtures). It defines the canonical
       # docker.io/amdenterpriseai/aim-dummy:<tag> ref the fixtures hardcode; the
-      # `make test-chainsaw-kind-ttl` step rewrites that ref to an ephemeral
-      # ttl.sh ref so the operator can read image metadata from a registry while
-      # the public mirror is unpublished. Keep in sync with the Makefile default.
+      # `make test-chainsaw-kind-zot` step rewrites that ref to the ephemeral
+      # in-cluster Zot registry so the operator can read image metadata without
+      # depending on an external registry. Keep in sync with the Makefile default.
       AIM_DUMMY_TAG: "0.2.0"
     steps:
       - name: Free up disk space
@@ -194,16 +194,22 @@ jobs:
         run: echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slug }}" >> "${GITHUB_ENV}"
 
       - name: Set per-run isolated Helm config
-        # Per-run isolated Helm config (job-scoped via GITHUB_ENV) so the GHCR login is shared across steps to prevent rate limiting.
+        # Per-run isolated Helm and Helmfile config. Helmfile keeps unpacked OCI
+        # charts in its own cache (separate from HELM_CACHE_HOME); sharing that
+        # cache between the concurrent matrix legs lets one job remove a chart
+        # path while the other is installing it.
         run: |
           HELM_BASE="${RUNNER_TEMP}/helm"
+          HELMFILE_BASE="${RUNNER_TEMP}/helmfile"
           {
             echo "HELM_CACHE_HOME=${HELM_BASE}/cache"
             echo "HELM_CONFIG_HOME=${HELM_BASE}/config"
             echo "HELM_DATA_HOME=${HELM_BASE}/data"
             echo "HELM_REGISTRY_CONFIG=${HELM_BASE}/registry/config.json"
+            echo "HELMFILE_CACHE_HOME=${HELMFILE_BASE}/cache"
           } >> "${GITHUB_ENV}"
           mkdir -p "${HELM_BASE}/cache" "${HELM_BASE}/config" "${HELM_BASE}/data" "${HELM_BASE}/registry"
+          mkdir -p "${HELMFILE_BASE}/cache"
           echo '{}' > "${HELM_BASE}/registry/config.json"
 
       - name: Create Kind cluster
@@ -261,6 +267,9 @@ jobs:
       - name: Install core dependencies
         run: helmfile sync -f hack/dependencies/helmfile.yaml.gotmpl
 
+      - name: Install Kind-local Zot registry
+        run: make kind-zot-install
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -290,13 +299,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # NOTE: aim-dummy is built, pushed to ttl.sh, and kind-loaded by the
-      # `make test-chainsaw-kind-ttl` step below (see the Run Chainsaw tests
-      # step). It is NOT built/loaded here because AIMModel discovery reads the
-      # image's OCI labels from a registry inside the operator (remote.Get),
-      # which a bare `kind load` can't satisfy; ttl.sh gives us an anonymous,
-      # public, ephemeral registry to read from until the public
-      # docker.io/amdenterpriseai mirror is published.
+      # NOTE: aim-dummy is built, pushed to Zot, and kind-loaded by the
+      # `make test-chainsaw-kind-zot` step below. AIMModel discovery reads the
+      # image's OCI labels from a registry inside the operator (remote.Get), while
+      # workload pods use the exact same refs preloaded into Kind's containerd.
       - name: Load images into Kind
         run: |
           set -euo pipefail
@@ -327,8 +333,9 @@ jobs:
       - name: Install operator via Helm
         # manager.runtimeProjectionMode is set at install time (deterministic, no
         # post-install patch race) so each matrix leg's operator starts in its
-        # mode. Exhaustive equals the shipped default, so that leg is unchanged.
-        run: helm install aim-engine dist/chart --namespace aim-system --create-namespace --set manager.image.repository="${OPERATOR_IMAGE_REPOSITORY}" --set manager.image.tag="${OPERATOR_IMAGE_TAG}" --set manager.runtimeProjectionMode="${{ matrix.mode }}" --set acceleratorDetector.enable=false
+        # mode. The Kind values mount Zot's public CA without replacing the
+        # operator's normal public root set.
+        run: helm install aim-engine dist/chart --namespace aim-system --create-namespace -f hack/kind/operator-values.yaml --set manager.image.repository="${OPERATOR_IMAGE_REPOSITORY}" --set manager.image.tag="${OPERATOR_IMAGE_TAG}" --set manager.runtimeProjectionMode="${{ matrix.mode }}" --set acceleratorDetector.enable=false
 
       - name: Wait for operator to be ready
         run: kubectl wait --for=condition=Available --timeout=120s deployment/aim-engine-controller-manager -n aim-system
@@ -405,16 +412,14 @@ jobs:
           kubectl get crds | grep aim || true
 
       - name: Run Chainsaw tests
-        # DEFAULT lane (Exhaustive). Builds aim-dummy, pushes it to an ephemeral
-        # ttl.sh ref, kind-loads it, and runs the kind suite against a throwaway
-        # copy of tests/e2e whose aim-dummy ref is rewritten to the ttl.sh ref.
-        # This lets discovery (which reads image labels from a registry inside the
-        # operator) work before aim-dummy is published to the public
-        # docker.io/amdenterpriseai mirror. Switch back to `make test-chainsaw-kind`
-        # once it's public. The mode-gated tests stay excluded here via
-        # CHAINSAW_PROJECTION_MODE_EXCLUDE.
+        # DEFAULT lane (Exhaustive). Builds aim-dummy, pushes it through a
+        # TLS-valid localhost port-forward into the Kind-local Zot registry,
+        # kind-loads the exact in-cluster refs, and runs against a throwaway copy
+        # of tests/e2e with only the registry/repository prefix rewritten.
         if: matrix.mode == 'Exhaustive'
-        run: make test-chainsaw-kind-ttl
+        env:
+          MISE_OVERRIDE_CONFIG_FILENAMES: "mise.toml"
+        run: mise exec -- make test-chainsaw-kind-zot
 
       - name: Run mode-gated Chainsaw projection tests
         # NON-DEFAULT lane (Reduced). Runs ONLY the mode-gated projection tests
@@ -497,6 +502,9 @@ jobs:
           kubectl get events -A --field-selector type=Warning --sort-by='.lastTimestamp' || true
           echo "=== Storage classes ==="
           kubectl get storageclass -o wide || true
+          echo "=== Zot registry ==="
+          kubectl get certificate,issuer,deploy,pod,service -n zot-system || true
+          kubectl logs deployment/zot -n zot-system --tail=200 || true
           echo "=== PVs ==="
           kubectl get pv || true
           echo "=== PVCs ==="

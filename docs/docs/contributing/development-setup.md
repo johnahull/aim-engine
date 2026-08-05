@@ -55,6 +55,10 @@ make kind-create  # Create Kind cluster
 make install      # Install CRDs
 ```
 
+The Kind stack includes an ephemeral, TLS-enabled Zot registry for image
+metadata discovery in e2e tests. cert-manager issues the registry certificate,
+and `make kind-create` publishes the local `aim-dummy` fixture tags to it.
+
 ## Running the Operator
 
 ### Standard Mode

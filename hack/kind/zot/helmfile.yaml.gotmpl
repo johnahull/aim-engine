@@ -1,0 +1,53 @@
+---
+releases:
+  - name: zot
+    namespace: zot-system
+    chart: oci://ghcr.io/project-zot/helm-charts/zot
+    version: 0.1.122
+    createNamespace: true
+    wait: true
+    timeout: 300
+    hooks:
+      - events: ["presync"]
+        showlogs: true
+        command: sh
+        args:
+          - -ec
+          - |
+            kubectl apply -f certificates.yaml
+            kubectl wait --for=condition=Ready --timeout=120s \
+              certificate/zot-ca certificate/zot-server -n zot-system
+    values:
+      - service:
+          type: ClusterIP
+          port: 5000
+        persistence: false
+        strategy:
+          type: Recreate
+        mountConfig: true
+        configFiles:
+          config.json: |-
+            {
+              "storage": {
+                "rootDirectory": "/var/lib/registry"
+              },
+              "http": {
+                "address": "0.0.0.0",
+                "port": "5000",
+                "readTimeout": "5m",
+                "writeTimeout": "5m",
+                "tls": {
+                  "cert": "/tls/tls.crt",
+                  "key": "/tls/tls.key"
+                }
+              },
+              "log": {
+                "level": "info"
+              }
+            }
+        externalSecrets:
+          - secretName: zot-server-tls
+            mountPath: /tls
+        httpGet:
+          scheme: HTTPS
+          port: 5000
