@@ -6,7 +6,7 @@ The AIM Engine operator binary accepts the following command-line flags.
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--metrics-bind-address` | string | `"0"` | Address for the metrics endpoint. Use `:8443` for HTTPS via cert-manager, `:8080` for HTTP, or `0` to disable. |
+| `--metrics-bind-address` | string | `"0"` | Address for the metrics endpoint. Use `:8443` for HTTPS via cert-manager, `:8080` for HTTP, or `0` to disable. The Helm chart and the `config/default` kustomization both pass `:8443` explicitly, so this default only applies when the binary is run without those manifests. |
 | `--health-probe-bind-address` | string | `:8081` | Address for the health probe endpoint. |
 | `--leader-elect` | bool | `false` | Enable leader election for high availability. Uses lease ID `3be10d2f.eai.amd.com`. |
 | `--metrics-secure` | bool | `true` | Serve metrics over HTTPS. Set to `false` for HTTP. |

@@ -201,6 +201,17 @@ func (r *AIMTemplateCacheReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
+	// Set up field index for the artifact names published in AIMTemplateCache.Status.Artifacts.
+	// This turns an artifact event into an exact reverse lookup of its adopters.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&aimv1alpha1.AIMTemplateCache{},
+		aimv1alpha1.TemplateCacheArtifactNameIndexKey,
+		indexTemplateCacheArtifactNames,
+	); err != nil {
+		return err
+	}
+
 	r.reconciler = &aimtemplatecache.TemplateCacheReconciler{
 		Clientset: r.Clientset,
 		Scheme:    r.Scheme,
@@ -253,11 +264,13 @@ func (r *AIMTemplateCacheReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&aimv1alpha1.AIMTemplateCache{}).
-		// Watch artifacts and enqueue template caches that created them (via label)
-		// artifacts are shared resources without owner references
+		// Watch artifacts and enqueue every template cache that may be using them.
+		// Artifacts are shared resources without owner references, so this is the only
+		// signal a cache gets that the artifact it waits on became Ready.
 		Watches(
 			&aimv1alpha1.AIMArtifact{},
 			handler.EnqueueRequestsFromMapFunc(r.findTemplateCachesForArtifact),
+			builder.WithPredicates(sharedcontroller.ArtifactWakeupPredicate()),
 		).
 		Watches(
 			&aimv1alpha1.AIMServiceTemplate{},
@@ -337,27 +350,82 @@ func (r *AIMTemplateCacheReconciler) findTemplateCachesForClusterServiceTemplate
 	return requests
 }
 
-// findTemplateCachesForArtifact finds all template caches that created a artifact (via label).
-// artifacts are shared resources without owner references, so we use a label-based lookup.
-func (r *AIMTemplateCacheReconciler) findTemplateCachesForArtifact(ctx context.Context, obj client.Object) []ctrl.Request {
-	artifact := obj.(*aimv1alpha1.AIMArtifact)
+// indexTemplateCacheArtifactNames extracts the artifact names a template cache published
+// in status.artifacts, which is the set of artifacts it currently tracks.
+func indexTemplateCacheArtifactNames(obj client.Object) []string {
+	templateCache, ok := obj.(*aimv1alpha1.AIMTemplateCache)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(templateCache.Status.Artifacts))
+	for _, artifact := range templateCache.Status.Artifacts {
+		if artifact.Name != "" {
+			names = append(names, artifact.Name)
+		}
+	}
+	return names
+}
 
-	// Get the template cache name from the label
-	templateCacheName := artifact.Labels[constants.LabelTemplateCacheName]
-	if templateCacheName == "" {
-		// artifact was not created by a template cache (or is a legacy cache)
+// findTemplateCachesForArtifact finds all template caches that may be using an artifact.
+//
+// One artifact serves many template caches: generateArtifactName is not scoped to the
+// cache in Shared mode, so every cache whose template resolves the same source URI
+// adopts the same artifact. The template-cache.name label names only the cache that
+// happened to create it, so a label lookup wakes one adopter and leaves the others
+// waiting on a Ready transition they never observe.
+//
+// Indexed resolvers must be woken even if the artifact is no longer adoptable. Unioning
+// them with eligible namespace candidates also wakes adopters that have not published
+// status.artifacts yet. ArtifactWakeupPredicate limits the scan to meaningful changes.
+func (r *AIMTemplateCacheReconciler) findTemplateCachesForArtifact(ctx context.Context, obj client.Object) []ctrl.Request {
+	logger := log.FromContext(ctx)
+
+	artifact, ok := obj.(*aimv1alpha1.AIMArtifact)
+	if !ok {
+		logger.V(1).Info("Ignoring non-AIMArtifact object in artifact watch",
+			"objectType", fmt.Sprintf("%T", obj))
 		return nil
 	}
 
-	// Return a reconcile request for the template cache
-	return []ctrl.Request{
-		{
-			NamespacedName: client.ObjectKey{
-				Name:      templateCacheName,
-				Namespace: artifact.Namespace,
-			},
-		},
+	var resolvers aimv1alpha1.AIMTemplateCacheList
+	if err := r.List(ctx, &resolvers,
+		client.InNamespace(artifact.Namespace),
+		client.MatchingFields{aimv1alpha1.TemplateCacheArtifactNameIndexKey: artifact.Name},
+	); err != nil {
+		logger.Error(err, "Failed to look up template caches that resolved artifact",
+			"artifact", artifact.Name, "namespace", artifact.Namespace)
+		return nil
 	}
+	cacheKeys := make(map[client.ObjectKey]struct{}, len(resolvers.Items))
+	for i := range resolvers.Items {
+		cacheKeys[client.ObjectKeyFromObject(&resolvers.Items[i])] = struct{}{}
+	}
+
+	var candidates aimv1alpha1.AIMTemplateCacheList
+	if err := r.List(ctx, &candidates, client.InNamespace(artifact.Namespace)); err != nil {
+		logger.Error(err, "Failed to list template caches for artifact",
+			"artifact", artifact.Name, "namespace", artifact.Namespace)
+		return templateCacheRequests(cacheKeys)
+	}
+
+	for i := range candidates.Items {
+		if aimtemplatecache.ArtifactAdoptableBy(&candidates.Items[i], artifact) {
+			cacheKeys[client.ObjectKeyFromObject(&candidates.Items[i])] = struct{}{}
+		}
+	}
+
+	return templateCacheRequests(cacheKeys)
+}
+
+// templateCacheRequests renders one reconcile request per template cache.
+func templateCacheRequests(cacheKeys map[client.ObjectKey]struct{}) []ctrl.Request {
+	requests := make([]ctrl.Request, 0, len(cacheKeys))
+	for key := range cacheKeys {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: key,
+		})
+	}
+	return requests
 }
 
 // getTemplateStatus extracts the status from a template object (works for both namespace and cluster scoped)

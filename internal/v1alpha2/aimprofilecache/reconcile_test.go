@@ -24,7 +24,9 @@ package aimprofilecache
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -72,6 +74,18 @@ func makeArtifact(name, sourceURI, modelID string, status constants.AIMStatus, s
 		a.OwnerReferences = append(a.OwnerReferences, metav1.OwnerReference{UID: uid})
 	}
 	return a
+}
+
+// markTerminating stages an artifact caught mid-deletion: a deletionTimestamp, a
+// finalizer still holding the object, and the PVC the cache would otherwise publish.
+// A deletionTimestamp is only ever observable while some finalizer holds the object, so
+// the fixture carries one.
+func markTerminating(artifact aimv1alpha1.AIMArtifact) aimv1alpha1.AIMArtifact {
+	deletedAt := metav1.NewTime(time.Date(2026, 7, 30, 12, 58, 18, 0, time.UTC))
+	artifact.DeletionTimestamp = &deletedAt
+	artifact.Finalizers = []string{"example.com/hold"}
+	artifact.Status.PersistentVolumeClaim = artifact.Name + "-cache-e1a0d5dc"
+	return artifact
 }
 
 func makeProfile(name string, modelSources []aimv1alpha1.AIMModelSource) *aimv1alpha2.AIMProfile {
@@ -532,5 +546,207 @@ func TestPlanResources_DedicatedModeUsesApply(t *testing.T) {
 
 	if len(result.GetToApply()) != 1 {
 		t.Fatalf("expected 1 Apply resource for dedicated mode, got %d", len(result.GetToApply()))
+	}
+}
+
+// Eligibility must stay true while the artifact is terminating: the artifact watch
+// filters events through this predicate, so rejecting it here would drop both the
+// deletion update and the final Delete event, and every cache that published the
+// artifact would keep advertising it until the next resync. ComposeState is what
+// refuses to adopt it.
+func TestArtifactAdoptableBy_terminatingArtifactStaysEligible(t *testing.T) {
+	pc := makeProfileCache("pc1", "my-profile", aimv1alpha1.AIMResolutionScopeNamespace, aimv1alpha2.ProfileCacheModeShared, "")
+	terminating := markTerminating(makeArtifact("artifact-dying", "hf://org/model-a", "org/model-a", constants.AIMStatusReady, ""))
+
+	if !ArtifactAdoptableBy(pc, &terminating) {
+		t.Fatal("ArtifactAdoptableBy() = false for a terminating artifact, want true so the watch still wakes adopters")
+	}
+}
+
+// An artifact that is being deleted must not be adopted: its PVC is about to be
+// garbage collected, so publishing it would point every consumer of this cache at
+// storage that is going away. It must be reported as terminating whether or not it
+// ever published a status, so the cache waits instead of applying over it.
+func TestComposeState_doesNotAdoptTerminatingArtifact(t *testing.T) {
+	tests := []struct {
+		name           string
+		mode           aimv1alpha2.AIMProfileCacheMode
+		artifactStatus constants.AIMStatus
+	}{
+		{
+			name:           "shared cache, artifact was ready",
+			mode:           aimv1alpha2.ProfileCacheModeShared,
+			artifactStatus: constants.AIMStatusReady,
+		},
+		{
+			name:           "dedicated cache, artifact was ready",
+			mode:           aimv1alpha2.ProfileCacheModeDedicated,
+			artifactStatus: constants.AIMStatusReady,
+		},
+		{
+			// The deletion check must run before the empty-status guard. An artifact
+			// deleted before its controller published a first status still has to be
+			// waited out, because the replacement hashes to the same name in Shared
+			// mode and the API server accepts an apply over a terminating object
+			// silently. Reordering these two guards puts the model source back in
+			// MissingCaches and writes to the dying object.
+			name:           "shared cache, artifact never got a status",
+			mode:           aimv1alpha2.ProfileCacheModeShared,
+			artifactStatus: "",
+		},
+		{
+			name:           "dedicated cache, artifact never got a status",
+			mode:           aimv1alpha2.ProfileCacheModeDedicated,
+			artifactStatus: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pc := makeProfileCache("pc1", "my-profile", aimv1alpha1.AIMResolutionScopeNamespace, tt.mode, "")
+			profile := makeProfile("my-profile", []aimv1alpha1.AIMModelSource{
+				{ModelID: "org/model-a", SourceURI: "hf://org/model-a"},
+			})
+
+			terminating := markTerminating(makeArtifact("artifact-dying", "hf://org/model-a", "org/model-a", tt.artifactStatus, ""))
+			if tt.mode == aimv1alpha2.ProfileCacheModeDedicated {
+				terminating.OwnerReferences = []metav1.OwnerReference{{UID: pc.UID}}
+			}
+
+			fetch := ProfileCacheFetchResult{
+				profileCache: pc,
+				profile:      controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+				artifacts: controllerutils.FetchResult[*aimv1alpha1.AIMArtifactList]{
+					Value: &aimv1alpha1.AIMArtifactList{Items: []aimv1alpha1.AIMArtifact{terminating}},
+				},
+			}
+
+			reconciler := &ProfileCacheReconciler{}
+			reconcileCtx := controllerutils.ReconcileContext[*aimv1alpha2.AIMProfileCache]{Object: pc}
+			obs := reconciler.ComposeState(context.Background(), reconcileCtx, fetch)
+
+			if len(obs.BestArtifacts) != 0 {
+				t.Fatalf("BestArtifacts = %v, want none", obs.BestArtifacts)
+			}
+			if got := obs.TerminatingArtifactNames; len(got) != 1 || got[0] != terminating.Name {
+				t.Fatalf("TerminatingArtifactNames = %v, want [%s]", got, terminating.Name)
+			}
+			// Not MissingCaches: a replacement would hash to the same name in Shared
+			// mode, so the apply would patch the object that is being deleted.
+			if len(obs.MissingCaches) != 0 {
+				t.Fatalf("MissingCaches = %v, want none while the artifact is terminating", obs.MissingCaches)
+			}
+
+			plan := reconciler.PlanResources(context.Background(), reconcileCtx, obs)
+			if applied := len(plan.GetToApply()) + len(plan.GetToApplyWithoutOwnerRef()); applied != 0 {
+				t.Fatalf("planned %d applies while the artifact was terminating, want 0", applied)
+			}
+		})
+	}
+}
+
+// A terminating artifact must not shadow a live one serving the same model source.
+func TestComposeState_adoptsLiveArtifactAlongsideTerminatingOne(t *testing.T) {
+	pc := makeProfileCache("pc1", "my-profile", aimv1alpha1.AIMResolutionScopeNamespace, aimv1alpha2.ProfileCacheModeShared, "")
+	profile := makeProfile("my-profile", []aimv1alpha1.AIMModelSource{
+		{ModelID: "org/model-a", SourceURI: "hf://org/model-a"},
+	})
+
+	terminating := markTerminating(makeArtifact("artifact-dying", "hf://org/model-a", "org/model-a", constants.AIMStatusReady, ""))
+	live := makeArtifact("artifact-live", "hf://org/model-a", "org/model-a", constants.AIMStatusReady, "")
+
+	obs := (&ProfileCacheReconciler{}).ComposeState(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMProfileCache]{Object: pc},
+		ProfileCacheFetchResult{
+			profileCache: pc,
+			profile:      controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+			artifacts: controllerutils.FetchResult[*aimv1alpha1.AIMArtifactList]{
+				Value: &aimv1alpha1.AIMArtifactList{Items: []aimv1alpha1.AIMArtifact{terminating, live}},
+			},
+		},
+	)
+
+	if got := obs.BestArtifacts["org/model-a"].Name; got != live.Name {
+		t.Fatalf("BestArtifacts[org/model-a] = %q, want %q", got, live.Name)
+	}
+	if len(obs.TerminatingArtifactNames) != 0 {
+		t.Fatalf("TerminatingArtifactNames = %v, want none once a live artifact resolves the source", obs.TerminatingArtifactNames)
+	}
+}
+
+// Once the delete completes the artifact leaves the List, so the source becomes missing
+// and the next plan recreates it. This is the other half of "no permanent wedge": the
+// cache holds off while the artifact terminates, then creates a replacement cleanly.
+// The wakeup that ends the wait is the artifact's own Delete event.
+func TestPlanResources_recreatesArtifactAfterDeletionCompletes(t *testing.T) {
+	pc := makeProfileCache("pc1", "my-profile", aimv1alpha1.AIMResolutionScopeNamespace, aimv1alpha2.ProfileCacheModeShared, "")
+	profile := makeProfile("my-profile", []aimv1alpha1.AIMModelSource{
+		{ModelID: "org/model-a", SourceURI: "hf://org/model-a"},
+	})
+	reconcileCtx := controllerutils.ReconcileContext[*aimv1alpha2.AIMProfileCache]{Object: pc}
+	reconciler := &ProfileCacheReconciler{}
+
+	fetchWith := func(artifacts ...aimv1alpha1.AIMArtifact) ProfileCacheFetchResult {
+		return ProfileCacheFetchResult{
+			profileCache: pc,
+			profile:      controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+			artifacts: controllerutils.FetchResult[*aimv1alpha1.AIMArtifactList]{
+				Value: &aimv1alpha1.AIMArtifactList{Items: artifacts},
+			},
+		}
+	}
+
+	terminatingObs := reconciler.ComposeState(context.Background(), reconcileCtx,
+		fetchWith(markTerminating(makeArtifact("artifact-dying", "hf://org/model-a", "org/model-a", constants.AIMStatusReady, ""))))
+	terminatingPlan := reconciler.PlanResources(context.Background(), reconcileCtx, terminatingObs)
+
+	if applied := len(terminatingPlan.GetToApply()) + len(terminatingPlan.GetToApplyWithoutOwnerRef()); applied != 0 {
+		t.Fatalf("planned %d applies while the artifact was terminating, want 0", applied)
+	}
+
+	goneObs := reconciler.ComposeState(context.Background(), reconcileCtx, fetchWith())
+	gonePlan := reconciler.PlanResources(context.Background(), reconcileCtx, goneObs)
+
+	if got := len(gonePlan.GetToApplyWithoutOwnerRef()); got != 1 {
+		t.Fatalf("planned %d shared artifacts after the delete completed, want 1", got)
+	}
+}
+
+// The cache must drop out of Ready while its only candidate is terminating, and it must
+// stop advertising the doomed artifact and its PVC.
+func TestDecorateStatus_terminatingArtifactIsNotReady(t *testing.T) {
+	terminating := markTerminating(makeArtifact("artifact-dying", "hf://org/model-a", "org/model-a", constants.AIMStatusReady, ""))
+	status := &aimv1alpha2.AIMProfileCacheStatus{
+		Artifacts: map[string]aimv1alpha1.AIMResolvedArtifact{
+			terminating.Name: {
+				Name:                  terminating.Name,
+				Model:                 "org/model-a",
+				Status:                constants.AIMStatusReady,
+				PersistentVolumeClaim: terminating.Status.PersistentVolumeClaim,
+			},
+		},
+	}
+	cm := controllerutils.NewConditionManager(nil)
+
+	(&ProfileCacheReconciler{}).DecorateStatus(status, cm, ProfileCacheObservation{
+		TerminatingArtifactNames: []string{terminating.Name},
+	})
+
+	condition := cm.Get(artifactsReadyConditionType)
+	if condition == nil {
+		t.Fatalf("no %s condition was set", artifactsReadyConditionType)
+	}
+	if condition.Status != metav1.ConditionFalse {
+		t.Fatalf("%s = %v, want False", artifactsReadyConditionType, condition.Status)
+	}
+	if condition.Reason != aimv1alpha2.AIMProfileCacheReasonArtifactTerminating {
+		t.Fatalf("reason = %q, want %q", condition.Reason, aimv1alpha2.AIMProfileCacheReasonArtifactTerminating)
+	}
+	if !strings.Contains(condition.Message, terminating.Name) {
+		t.Fatalf("message %q does not name the terminating artifact %q", condition.Message, terminating.Name)
+	}
+	if status.Artifacts != nil {
+		t.Fatalf("status.Artifacts = %v, want the doomed artifact and its PVC withdrawn", status.Artifacts)
 	}
 }

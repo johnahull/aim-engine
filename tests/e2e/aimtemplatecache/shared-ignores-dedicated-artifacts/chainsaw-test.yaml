@@ -25,7 +25,7 @@ spec:
                   templateCacheRef:
                     (name != ''): true
 
-    - name: Verify artifacts created for shared cache are unowned
+    - name: Verify artifacts used by shared cache are unowned
       try:
         - script:
             timeout: 5m
@@ -35,17 +35,26 @@ spec:
             content: |
               set -eu
               CACHE_NAME="$(kubectl -n "$NAMESPACE" get aimservice shared-artifact-owner-service -o jsonpath='{.status.cache.templateCacheRef.name}')"
+              # Shared artifact names are not scoped to a cache, so several caches can
+              # resolve one artifact and the template-cache.name label records only
+              # whichever of them created it. Read the set to check off the cache itself.
               for i in $(seq 1 30); do
-                json="$(kubectl -n "$NAMESPACE" get aimartifacts.aim.eai.amd.com -l aim.eai.amd.com/template-cache.name="$CACHE_NAME" -o json)"
-                count="$(echo "$json" | jq '.items | length')"
-                if [ "$count" -ge 1 ]; then
-                  bad="$(echo "$json" | jq '[.items[] | select((.metadata.ownerReferences // []) | length > 0)] | length')"
-                  if [ "$bad" -eq 0 ]; then
+                NAMES="$(kubectl -n "$NAMESPACE" get aimtemplatecache "$CACHE_NAME" -o jsonpath='{.status.artifacts.*.name}' 2>/dev/null || true)"
+                if [ -n "$NAMES" ]; then
+                  BAD=0
+                  for name in $NAMES; do
+                    OWNERS="$(kubectl -n "$NAMESPACE" get aimartifact "$name" -o jsonpath='{.metadata.ownerReferences}' 2>/dev/null || echo absent)"
+                    if [ -n "$OWNERS" ]; then
+                      BAD=1
+                    fi
+                  done
+                  if [ "$BAD" -eq 0 ]; then
                     exit 0
                   fi
                 fi
                 sleep 2
               done
-              echo "expected shared-cache artifacts with no ownerReferences"
+              echo "expected artifacts resolved by shared cache $CACHE_NAME to have no ownerReferences"
+              kubectl -n "$NAMESPACE" get aimtemplatecaches.aim.eai.amd.com -o yaml
               kubectl -n "$NAMESPACE" get aimartifacts.aim.eai.amd.com -o yaml
               exit 1

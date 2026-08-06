@@ -34,6 +34,10 @@ const (
 	TemplateCacheTemplateNameIndexKey = ".spec.templateName"
 	// TemplateCacheTemplateScopeIndexKey is the field index key for AIMTemplateCache.Spec.TemplateScope
 	TemplateCacheTemplateScopeIndexKey = ".spec.templateScope"
+	// TemplateCacheArtifactNameIndexKey is the field index key for the artifact names a
+	// template cache published in AIMTemplateCache.Status.Artifacts. It maps an artifact
+	// event to the caches that resolved it without scanning the namespace.
+	TemplateCacheArtifactNameIndexKey = ".status.artifacts.name"
 )
 
 // AIMTemplateCacheMode controls the ownership behavior of artifacts created by a template cache.

@@ -49,7 +49,7 @@ func newTestReconciler(t *testing.T, objs ...*aimv1alpha1.AIMClusterModelSource)
 	return &AIMClusterModelSourceReconciler{Client: builder.Build(), Scheme: scheme}
 }
 
-func sourceNames(reqs []reconcile.Request) []string {
+func requestNames(reqs []reconcile.Request) []string {
 	names := make([]string, 0, len(reqs))
 	for _, r := range reqs {
 		names = append(names, r.Name)
@@ -89,7 +89,7 @@ func TestEnqueueAllSources(t *testing.T) {
 		&aimv1alpha1.AIMClusterModelSource{ObjectMeta: metav1.ObjectMeta{Name: "source-b"}},
 	)
 
-	got := sourceNames(r.enqueueAllSources(context.Background(),
+	got := requestNames(r.enqueueAllSources(context.Background(),
 		&aimv1alpha1.AIMClusterModel{ObjectMeta: metav1.ObjectMeta{Name: "some-model"}}))
 
 	if len(got) != 2 {
@@ -103,7 +103,7 @@ func TestEnqueueOtherSources_ExcludesTrigger(t *testing.T) {
 		&aimv1alpha1.AIMClusterModelSource{ObjectMeta: metav1.ObjectMeta{Name: "source-b"}},
 	)
 
-	got := sourceNames(r.enqueueOtherSources(context.Background(),
+	got := requestNames(r.enqueueOtherSources(context.Background(),
 		&aimv1alpha1.AIMClusterModelSource{ObjectMeta: metav1.ObjectMeta{Name: "source-a"}}))
 
 	if len(got) != 1 || got[0] != "source-b" {

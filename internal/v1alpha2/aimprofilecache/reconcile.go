@@ -159,6 +159,13 @@ type ProfileCacheObservation struct {
 	AllCachesAvailable bool
 	MissingCaches      []aimv1alpha1.AIMModelSource
 	BestArtifacts      map[string]aimv1alpha1.AIMArtifact
+
+	// TerminatingArtifactNames lists artifacts this cache would have adopted but that
+	// are being deleted. Held apart from both BestArtifacts and MissingCaches: their PVC
+	// is about to be collected so they cannot back a Ready cache, and in Shared mode a
+	// replacement hashes to the same name, so recreating one before the delete completes
+	// would patch the dying object instead.
+	TerminatingArtifactNames []string
 }
 
 // GetComponentHealth overrides the embedded FetchResult's method to include artifact match health.
@@ -177,7 +184,8 @@ func (obs ProfileCacheObservation) GetComponentHealth() []controllerutils.Compon
 			State:          worstStatus,
 			DependencyType: controllerutils.DependencyTypeDownstream,
 		})
-	} else if len(obs.MissingCaches) > 0 {
+	} else if len(obs.MissingCaches) > 0 || len(obs.TerminatingArtifactNames) > 0 {
+		// Artifacts are being created, or are waiting for a delete to finish first
 		health = append(health, controllerutils.ComponentHealth{
 			Component:      artifactsComponentName,
 			State:          constants.AIMStatusProgressing,
@@ -221,49 +229,77 @@ func (r *ProfileCacheReconciler) ComposeState(
 		"fetchedArtifacts", len(fetch.artifacts.Value.Items))
 
 	for _, model := range modelSources {
-		found := false
-		bestArtifact := aimv1alpha1.AIMArtifact{}
-		for _, cached := range fetch.artifacts.Value.Items {
-			if cached.Status.Status == "" {
-				continue
-			}
-
-			// Mode isolation: same logic as template cache
-			if pc.Spec.Mode == aimv1alpha2.ProfileCacheModeShared && len(cached.GetOwnerReferences()) > 0 {
-				continue
-			}
-			if pc.Spec.Mode == aimv1alpha2.ProfileCacheModeDedicated && !hasOwnerReferenceUID(cached.GetOwnerReferences(), pc.UID) {
-				continue
-			}
-
-			// LoRA-serving caches must only adopt a disk-bearing artifact; a
-			// diskless match would wedge the service. Falling through to
-			// MissingCaches makes PlanResources create one with a disk.
-			if pc.Spec.RequiresAdapterDisk && cached.Spec.AdapterDisk == nil {
-				continue
-			}
-
-			if cached.Spec.SourceURI == model.SourceURI &&
-				(pc.Spec.StorageClassName == "" || pc.Spec.StorageClassName == cached.Spec.StorageClassName) {
-				if !found || constants.CompareAIMStatus(bestArtifact.Status.Status, cached.Status.Status) < 0 {
-					found = true
-					bestArtifact = cached
-				}
-			}
-		}
-		if found {
+		match := matchArtifactForSource(pc, fetch.artifacts.Value.Items, model)
+		switch {
+		case match.found:
 			logger.V(1).Info("ComposeState: model source matched",
 				"modelID", model.ModelID,
-				"bestArtifact", bestArtifact.Name,
-				"bestStatus", bestArtifact.Status.Status)
-			obs.BestArtifacts[model.ModelID] = bestArtifact
-		} else {
+				"bestArtifact", match.best.Name,
+				"bestStatus", match.best.Status.Status)
+			obs.BestArtifacts[model.ModelID] = match.best
+		case len(match.terminatingNames) > 0:
+			logger.V(1).Info("ComposeState: model source served only by terminating artifacts",
+				"modelID", model.ModelID,
+				"terminatingArtifacts", match.terminatingNames)
+			obs.TerminatingArtifactNames = append(obs.TerminatingArtifactNames, match.terminatingNames...)
+		default:
 			logger.V(1).Info("ComposeState: model source missing artifact", "modelID", model.ModelID)
 			obs.MissingCaches = append(obs.MissingCaches, model)
 		}
 	}
 
 	return obs
+}
+
+// artifactMatch is the outcome of resolving one model source against the artifacts in
+// the namespace.
+type artifactMatch struct {
+	best  aimv1alpha1.AIMArtifact
+	found bool
+
+	// terminatingNames holds artifacts that serve the model source and would be
+	// adoptable were they not being deleted.
+	terminatingNames []string
+}
+
+// matchArtifactForSource picks the artifact this cache should resolve modelSource to:
+// the adoptable candidate with the best status. A terminating candidate is reported
+// separately rather than adopted or treated as missing - see TerminatingArtifactNames.
+func matchArtifactForSource(
+	profileCache *aimv1alpha2.AIMProfileCache,
+	artifacts []aimv1alpha1.AIMArtifact,
+	modelSource aimv1alpha1.AIMModelSource,
+) artifactMatch {
+	var match artifactMatch
+
+	for _, cached := range artifacts {
+		if !ArtifactAdoptableBy(profileCache, &cached) {
+			continue
+		}
+
+		if cached.Spec.SourceURI != modelSource.SourceURI {
+			continue
+		}
+
+		// Must precede the empty-status guard: an artifact deleted before its first
+		// status still has to be waited out, and an apply over a deletionTimestamp is
+		// accepted silently, so classifying it as missing writes to the dying object.
+		if cached.DeletionTimestamp != nil {
+			match.terminatingNames = append(match.terminatingNames, cached.Name)
+			continue
+		}
+
+		if cached.Status.Status == "" {
+			continue
+		}
+
+		if !match.found || constants.CompareAIMStatus(match.best.Status.Status, cached.Status.Status) < 0 {
+			match.found = true
+			match.best = cached
+		}
+	}
+
+	return match
 }
 
 func (r *ProfileCacheReconciler) PlanResources(
@@ -325,6 +361,18 @@ func (r *ProfileCacheReconciler) DecorateStatus(
 	cm *controllerutils.ConditionManager,
 	obs ProfileCacheObservation,
 ) {
+	// Must run ahead of the early returns below: an artifact this cache advertised
+	// until now has to stop being advertised, PVC included, the moment it starts
+	// being deleted.
+	status.Artifacts = buildResolvedArtifacts(obs.BestArtifacts)
+
+	// Reported ahead of the missing artifacts it will turn into: "waiting for a delete"
+	// is the part an operator can act on.
+	if len(obs.TerminatingArtifactNames) > 0 {
+		cm.MarkFalse(artifactsReadyConditionType, aimv1alpha2.AIMProfileCacheReasonArtifactTerminating,
+			"Waiting for AIM artifacts to finish deleting before recreating them: "+strings.Join(obs.TerminatingArtifactNames, ", "))
+		return
+	}
 	if len(obs.MissingCaches) > 0 {
 		cm.MarkFalse(artifactsReadyConditionType, aimv1alpha2.AIMProfileCacheReasonCreatingCaches, "Waiting for AIM artifacts to be created")
 		return
@@ -364,22 +412,27 @@ func (r *ProfileCacheReconciler) DecorateStatus(
 	} else {
 		cm.MarkFalse(artifactsReadyConditionType, aimv1alpha2.AIMProfileCacheReasonNoCaches, "No artifacts to track", controllerutils.AsError())
 	}
+}
 
-	// Populate status.artifacts
-	if len(obs.BestArtifacts) > 0 {
-		status.Artifacts = make(map[string]aimv1alpha1.AIMResolvedArtifact, len(obs.BestArtifacts))
-		for modelName, a := range obs.BestArtifacts {
-			status.Artifacts[a.Name] = aimv1alpha1.AIMResolvedArtifact{
-				UID:                   string(a.UID),
-				Name:                  a.Name,
-				Model:                 modelName,
-				Status:                a.Status.Status,
-				PersistentVolumeClaim: a.Status.PersistentVolumeClaim,
-			}
-		}
-	} else {
-		status.Artifacts = nil
+// buildResolvedArtifacts renders the resolved artifacts for status.artifacts, keyed by
+// artifact name. Returns nil when nothing is resolved, so the field is cleared rather
+// than left holding a previous reconcile's artifacts.
+func buildResolvedArtifacts(bestArtifacts map[string]aimv1alpha1.AIMArtifact) map[string]aimv1alpha1.AIMResolvedArtifact {
+	if len(bestArtifacts) == 0 {
+		return nil
 	}
+
+	resolved := make(map[string]aimv1alpha1.AIMResolvedArtifact, len(bestArtifacts))
+	for modelName, artifact := range bestArtifacts {
+		resolved[artifact.Name] = aimv1alpha1.AIMResolvedArtifact{
+			UID:                   string(artifact.UID),
+			Name:                  artifact.Name,
+			Model:                 modelName,
+			Status:                artifact.Status.Status,
+			PersistentVolumeClaim: artifact.Status.PersistentVolumeClaim,
+		}
+	}
+	return resolved
 }
 
 // generateArtifactName returns a deterministic artifact name.
@@ -402,6 +455,41 @@ func generateArtifactName(pc *aimv1alpha2.AIMProfileCache, modelSource aimv1alph
 		utils.WithHashSource(hashInputs...),
 		utils.WithHashLength(10),
 	)
+}
+
+// ArtifactAdoptableBy reports whether profileCache is allowed to use artifact, judged
+// only on the cache's mode, adapter-disk requirement and storage class. Callers that
+// resolve a specific model source must also compare SourceURI; the artifact watch
+// cannot, because the model sources live on the (separately fetched) profile.
+//
+// Deliberately ignores deletionTimestamp. The artifact watch filters events through
+// this predicate, so rejecting a terminating artifact here would drop the very wakeups
+// that tell a cache to stop advertising it. That rejection is matchArtifactForSource's
+// job instead.
+func ArtifactAdoptableBy(profileCache *aimv1alpha2.AIMProfileCache, artifact *aimv1alpha1.AIMArtifact) bool {
+	// Enforce mode isolation:
+	// - Shared profile caches can use only shared artifacts (no owner refs)
+	// - Dedicated profile caches can use only artifacts owned by this profile cache
+	switch profileCache.Spec.Mode {
+	case aimv1alpha2.ProfileCacheModeShared:
+		if len(artifact.GetOwnerReferences()) > 0 {
+			return false
+		}
+	case aimv1alpha2.ProfileCacheModeDedicated:
+		if !hasOwnerReferenceUID(artifact.GetOwnerReferences(), profileCache.UID) {
+			return false
+		}
+	}
+
+	// LoRA-serving caches must only adopt a disk-bearing artifact; a diskless match
+	// would wedge the service. Falling through to MissingCaches makes PlanResources
+	// create one with a disk.
+	if profileCache.Spec.RequiresAdapterDisk && artifact.Spec.AdapterDisk == nil {
+		return false
+	}
+
+	return profileCache.Spec.StorageClassName == "" ||
+		profileCache.Spec.StorageClassName == artifact.Spec.StorageClassName
 }
 
 func hasOwnerReferenceUID(ownerRefs []metav1.OwnerReference, ownerUID types.UID) bool {

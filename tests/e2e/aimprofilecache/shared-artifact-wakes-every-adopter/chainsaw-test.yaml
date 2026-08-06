@@ -1,0 +1,268 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# AIMProfileCache E2E Test: every adopter of a shared artifact reaches Ready
+#
+# Shared artifacts carry no owner references by design - that absence is exactly what
+# makes them adoptable by any Shared cache in the namespace. The consequence is that an
+# adopting cache holds no owner link to the artifact it waits on, so the artifact watch
+# is its only signal that the weights landed.
+#
+# The watch used to map an artifact to the single cache named by its profile-cache.name
+# label, which records only whichever cache happened to create it. Every other adopter
+# therefore never observed the Ready transition and sat in Pending until the 10h resync.
+#
+# The artifact's Ready transition is injected rather than downloaded: the download is
+# irrelevant to the wiring under test, and driving it for real would make this test
+# depend on a pullable downloader image, storage and network. Pausing the artifact and
+# patching its status produces exactly the event the adopter used to miss.
+#
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: profile-cache-shared-artifact-wakes-every-adopter
+spec:
+  description: |
+    Two caching profiles for one model dedupe onto a single ownerless AIMArtifact.
+    Pins that the artifact is created once, that its profile-cache.name label names
+    only one of the two caches (so the other is a pure adopter), that neither cache is
+    Ready while the artifact is not, and that BOTH reach Ready once it flips. Before
+    the watch fanned out to every adoptable cache, the adopter stayed Pending here.
+  timeouts:
+    assert: 3m
+  steps:
+    - name: Create the runtime config and two caching profiles that share weights
+      try:
+        - apply:
+            file: runtime.yaml
+        - apply:
+            file: profiles.yaml
+
+    - name: Assert both profiles are Ready
+      description: >
+        Settling the profiles first removes them as a confound: once they are Ready
+        their status stops changing, so the profile watch cannot be what wakes a cache
+        later in the test.
+      try:
+        - assert:
+            timeout: 2m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: shared-adopter-latency
+              status:
+                status: Ready
+        - assert:
+            timeout: 2m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: shared-adopter-throughput
+              status:
+                status: Ready
+
+    - name: Assert the profile reconciler materialised one Shared cache per profile
+      try:
+        - assert:
+            timeout: 1m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                name: shared-adopter-latency
+              spec:
+                profileName: shared-adopter-latency
+                mode: Shared
+        - assert:
+            timeout: 1m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                name: shared-adopter-throughput
+              spec:
+                profileName: shared-adopter-throughput
+                mode: Shared
+
+    - name: Drive the shared artifact to Ready and check exactly one cache created it
+      description: >
+        The dedupe and the single named creator are what make the assertion below
+        meaningful: if each cache had provisioned its own artifact, both would be
+        creators and no wakeup could be lost. Freezing the artifact before flipping it
+        keeps its controller from reverting the status.
+      try:
+        - script:
+            # The two retry loops below sleep up to 240s between them, plus their
+            # kubectl calls. A cap under that would replace the loops' own
+            # diagnostics with an opaque step timeout.
+            timeout: 6m
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+
+              CACHES="shared-adopter-latency shared-adopter-throughput"
+
+              # One artifact for two caches: the Shared name hashes weights, not caches.
+              COUNT=0
+              for _ in $(seq 1 60); do
+                COUNT="$(kubectl -n "$NAMESPACE" get aimartifacts -o name 2>/dev/null | wc -l)"
+                if [ "$COUNT" -eq 1 ]; then
+                  break
+                fi
+                sleep 2
+              done
+              if [ "$COUNT" -ne 1 ]; then
+                echo "expected exactly 1 shared AIMArtifact for two caches with identical weights, got $COUNT"
+                kubectl -n "$NAMESPACE" get aimartifacts.aim.eai.amd.com -o yaml
+                exit 1
+              fi
+
+              ARTIFACT="$(kubectl -n "$NAMESPACE" get aimartifacts -o jsonpath='{.items[0].metadata.name}')"
+
+              OWNERS="$(kubectl -n "$NAMESPACE" get aimartifact "$ARTIFACT" -o jsonpath='{.metadata.ownerReferences}')"
+              if [ -n "$OWNERS" ]; then
+                echo "expected shared artifact $ARTIFACT to have no ownerReferences, got: $OWNERS"
+                exit 1
+              fi
+
+              CREATOR="$(kubectl -n "$NAMESPACE" get aimartifact "$ARTIFACT" \
+                -o jsonpath="{.metadata.labels['aim\.eai\.amd\.com/profile-cache\.name']}")"
+
+              # The label must name one of the caches, which is what leaves the other a
+              # pure adopter. Asserted directly: deriving the adopter first cannot
+              # detect an absent or unrelated label, since any name differing from
+              # $CREATOR satisfies it.
+              case " $CACHES " in
+                *" $CREATOR "*) ;;
+                *)
+                  echo "expected the profile-cache.name label on $ARTIFACT to name one of [$CACHES], got '$CREATOR'"
+                  kubectl -n "$NAMESPACE" get aimartifact "$ARTIFACT" -o yaml
+                  exit 1
+                  ;;
+              esac
+
+              ADOPTER=""
+              for cache in $CACHES; do
+                if [ "$cache" != "$CREATOR" ]; then
+                  ADOPTER="$cache"
+                fi
+              done
+              echo "shared artifact $ARTIFACT: creator=$CREATOR adopter=$ADOPTER"
+
+              # Wait for a status to exist: caches skip status-less artifacts, so both
+              # have to have adopted this one before its transition can be missed. The
+              # PVC name is read in the same loop because the artifact records it only
+              # once the PVC object exists, which trails the first status write.
+              for _ in $(seq 1 60); do
+                SNAPSHOT="$(kubectl -n "$NAMESPACE" get aimartifact "$ARTIFACT" \
+                  -o jsonpath='{.status.status}|{.status.persistentVolumeClaim}')"
+                STATUS="${SNAPSHOT%%|*}"
+                PVC="${SNAPSHOT#*|}"
+                if [ -n "$STATUS" ] && [ -n "$PVC" ]; then
+                  break
+                fi
+                sleep 2
+              done
+              if [ -z "${STATUS:-}" ]; then
+                echo "artifact $ARTIFACT never reported a status, so the caches never adopted it"
+                kubectl -n "$NAMESPACE" get aimartifact "$ARTIFACT" -o yaml
+                exit 1
+              fi
+              if [ -z "${PVC:-}" ]; then
+                echo "artifact $ARTIFACT is $STATUS but never recorded a persistentVolumeClaim to preserve"
+                kubectl -n "$NAMESPACE" get aimartifact "$ARTIFACT" -o yaml
+                exit 1
+              fi
+              echo "artifact $ARTIFACT is $STATUS before the flip, pvc=$PVC"
+
+              # Neither cache may be Ready yet, or the flip below proves nothing.
+              for cache in $CACHES; do
+                CACHE_STATUS="$(kubectl -n "$NAMESPACE" get aimprofilecache "$cache" -o jsonpath='{.status.status}')"
+                if [ "$CACHE_STATUS" = "Ready" ]; then
+                  echo "cache $cache was already Ready while artifact $ARTIFACT is $STATUS"
+                  exit 1
+                fi
+              done
+
+              # Freeze the artifact so its controller cannot revert the status, then
+              # flip it. This is the update whose watch event used to reach only
+              # $CREATOR, leaving $ADOPTER waiting on a transition it never saw. The
+              # PVC name is preserved rather than spelled out: the operator hashes the
+              # artifact UID and truncates the base, so it cannot be predicted here.
+              kubectl -n "$NAMESPACE" annotate aimartifact "$ARTIFACT" \
+                aim.eai.amd.com/reconciliation-paused=true --overwrite
+              kubectl -n "$NAMESPACE" patch aimartifact "$ARTIFACT" \
+                --type=merge --subresource=status \
+                -p "{\"status\":{\"status\":\"Ready\",\"persistentVolumeClaim\":\"$PVC\"}}"
+
+    - name: Assert every adopter reaches Ready, not just the artifact's creator
+      description: >
+        The adopting cache never created the artifact and holds no owner reference to
+        it, so reaching Ready here proves it observed the transition.
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                name: shared-adopter-latency
+              status:
+                status: Ready
+                (conditions[?type == 'ArtifactsReady']):
+                  - status: "True"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                name: shared-adopter-throughput
+              status:
+                status: Ready
+                (conditions[?type == 'ArtifactsReady']):
+                  - status: "True"
+      catch:
+        - script:
+            # Two `get -o yaml` dumps grow with the namespace, and the 5s exec default
+            # under the kind config would truncate the diagnostics this catch exists
+            # to produce.
+            timeout: 1m
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              echo "=== profile caches ==="
+              kubectl -n "$NAMESPACE" get aimprofilecaches.aim.eai.amd.com -o yaml
+              echo "=== artifacts ==="
+              kubectl -n "$NAMESPACE" get aimartifacts.aim.eai.amd.com -o yaml
+
+    - name: Assert both caches resolved the same artifact and PVC
+      description: >
+        A cache that quietly provisioned its own copy would also report Ready, so
+        compare the resolved artifact identity across the two.
+      try:
+        - script:
+            # Two kubectl calls, which the 5s exec default under the kind config
+            # cannot be relied on to cover.
+            timeout: 1m
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+
+              A="$(kubectl -n "$NAMESPACE" get aimprofilecache shared-adopter-latency \
+                -o jsonpath='{.status.artifacts.*.name} {.status.artifacts.*.persistentVolumeClaim}')"
+              B="$(kubectl -n "$NAMESPACE" get aimprofilecache shared-adopter-throughput \
+                -o jsonpath='{.status.artifacts.*.name} {.status.artifacts.*.persistentVolumeClaim}')"
+
+              if [ "$A" != "$B" ]; then
+                echo "expected both caches to resolve the same artifact and PVC"
+                echo "  shared-adopter-latency:    $A"
+                echo "  shared-adopter-throughput: $B"
+                exit 1
+              fi
+
+              echo "both caches resolved: $A"

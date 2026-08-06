@@ -35,6 +35,10 @@ const (
 	ProfileCacheProfileNameIndexKey = ".spec.profileName"
 	// ProfileCacheProfileScopeIndexKey is the field index key for AIMProfileCache.Spec.ProfileScope.
 	ProfileCacheProfileScopeIndexKey = ".spec.profileScope"
+	// ProfileCacheArtifactNameIndexKey is the field index key for the artifact names a
+	// profile cache published in AIMProfileCache.Status.Artifacts. It maps an artifact
+	// event to the caches that resolved it without scanning the namespace.
+	ProfileCacheArtifactNameIndexKey = ".status.artifacts.name"
 )
 
 // AIMProfileCacheMode controls the ownership behavior of artifacts created by a profile cache.
@@ -146,6 +150,9 @@ const (
 	AIMProfileCacheReasonAllCachesReady  = "AllCachesReady"
 	AIMProfileCacheReasonCachesNotReady  = "CachesNotReady"
 	AIMProfileCacheReasonNoCaches        = "NoCaches"
+	// AIMProfileCacheReasonArtifactTerminating is distinct from CreatingCaches so an
+	// operator can tell "not created yet" from "waiting for a delete to finish".
+	AIMProfileCacheReasonArtifactTerminating = "ArtifactTerminating"
 )
 
 // +kubebuilder:object:root=true

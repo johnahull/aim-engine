@@ -167,6 +167,11 @@ func (r *AIMProfileCacheReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}); err != nil {
 		return err
 	}
+	// Indexes the artifact names published in status.artifacts, turning an artifact
+	// event into an exact reverse lookup of its adopters.
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &aimv1alpha2.AIMProfileCache{}, aimv1alpha2.ProfileCacheArtifactNameIndexKey, indexProfileCacheArtifactNames); err != nil {
+		return err
+	}
 
 	r.reconciler = &aimprofilecache.ProfileCacheReconciler{
 		Scheme: r.Scheme,
@@ -203,9 +208,13 @@ func (r *AIMProfileCacheReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&aimv1alpha2.AIMProfileCache{}).
+		// Watch artifacts and enqueue every profile cache that may be using them.
+		// Artifacts are shared resources without owner references, so this is the only
+		// signal a cache gets that the artifact it waits on became Ready.
 		Watches(
 			&aimv1alpha1.AIMArtifact{},
 			handler.EnqueueRequestsFromMapFunc(r.findProfileCachesForArtifact),
+			builder.WithPredicates(sharedcontroller.ArtifactWakeupPredicate()),
 		).
 		Watches(
 			&aimv1alpha2.AIMProfile{},
@@ -266,17 +275,82 @@ func (r *AIMProfileCacheReconciler) findProfileCachesForClusterProfile(ctx conte
 	return requests
 }
 
-func (r *AIMProfileCacheReconciler) findProfileCachesForArtifact(ctx context.Context, obj client.Object) []ctrl.Request {
-	artifact := obj.(*aimv1alpha1.AIMArtifact)
+// indexProfileCacheArtifactNames extracts the artifact names a profile cache published in
+// status.artifacts, which is the set of artifacts it currently tracks.
+func indexProfileCacheArtifactNames(obj client.Object) []string {
+	profileCache, ok := obj.(*aimv1alpha2.AIMProfileCache)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(profileCache.Status.Artifacts))
+	for _, artifact := range profileCache.Status.Artifacts {
+		if artifact.Name != "" {
+			names = append(names, artifact.Name)
+		}
+	}
+	return names
+}
 
-	profileCacheName := artifact.Labels[constants.LabelProfileCacheName]
-	if profileCacheName == "" {
+// findProfileCachesForArtifact finds all profile caches that may be using an artifact.
+//
+// One artifact serves many profile caches: generateArtifactName is not scoped to the
+// cache in Shared mode, so every cache whose profile resolves the same source URI adopts
+// the same artifact. The profile-cache.name label names only the cache that happened to
+// create it, so a label lookup wakes one adopter and leaves the others waiting on a
+// Ready transition they never observe.
+//
+// Indexed resolvers must be woken even if the artifact is no longer adoptable. Unioning
+// them with eligible namespace candidates also wakes adopters that have not published
+// status.artifacts yet. ArtifactWakeupPredicate limits the scan to meaningful changes.
+func (r *AIMProfileCacheReconciler) findProfileCachesForArtifact(ctx context.Context, obj client.Object) []ctrl.Request {
+	logger := log.FromContext(ctx)
+
+	artifact, ok := obj.(*aimv1alpha1.AIMArtifact)
+	if !ok {
+		logger.V(1).Info("Ignoring non-AIMArtifact object in artifact watch",
+			"objectType", fmt.Sprintf("%T", obj))
 		return nil
 	}
 
-	return []ctrl.Request{
-		{NamespacedName: client.ObjectKey{Name: profileCacheName, Namespace: artifact.Namespace}},
+	var resolvers aimv1alpha2.AIMProfileCacheList
+	if err := r.List(ctx, &resolvers,
+		client.InNamespace(artifact.Namespace),
+		client.MatchingFields{aimv1alpha2.ProfileCacheArtifactNameIndexKey: artifact.Name},
+	); err != nil {
+		logger.Error(err, "Failed to look up profile caches that resolved artifact",
+			"artifact", artifact.Name, "namespace", artifact.Namespace)
+		return nil
 	}
+	cacheKeys := make(map[client.ObjectKey]struct{}, len(resolvers.Items))
+	for i := range resolvers.Items {
+		cacheKeys[client.ObjectKeyFromObject(&resolvers.Items[i])] = struct{}{}
+	}
+
+	var candidates aimv1alpha2.AIMProfileCacheList
+	if err := r.List(ctx, &candidates, client.InNamespace(artifact.Namespace)); err != nil {
+		logger.Error(err, "Failed to list profile caches for artifact",
+			"artifact", artifact.Name, "namespace", artifact.Namespace)
+		return profileCacheRequests(cacheKeys)
+	}
+
+	for i := range candidates.Items {
+		if aimprofilecache.ArtifactAdoptableBy(&candidates.Items[i], artifact) {
+			cacheKeys[client.ObjectKeyFromObject(&candidates.Items[i])] = struct{}{}
+		}
+	}
+
+	return profileCacheRequests(cacheKeys)
+}
+
+// profileCacheRequests renders one reconcile request per profile cache.
+func profileCacheRequests(cacheKeys map[client.ObjectKey]struct{}) []ctrl.Request {
+	requests := make([]ctrl.Request, 0, len(cacheKeys))
+	for key := range cacheKeys {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: key,
+		})
+	}
+	return requests
 }
 
 func getProfileStatus(obj client.Object) constants.AIMStatus {

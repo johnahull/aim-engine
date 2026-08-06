@@ -1,0 +1,51 @@
+# Two profiles of the same model, both opting into caching. This is the ordinary shape
+# of a cached model: one aimId with several serving profiles, all pulling identical
+# weights. Each profile materialises its own 1:1 Shared AIMProfileCache, and because a
+# Shared artifact's name hashes sourceUri + env + storage class - not the cache - both
+# caches resolve the SAME AIMArtifact.
+#
+# The two caching blocks must stay identical: env feeds the artifact name hash, so any
+# divergence would split them into two artifacts and the test would no longer cover a
+# shared one. Sizes stay small because the artifact is frozen before it downloads.
+#
+# No accelerator requirements, so both profiles reach Ready anywhere (hardwareSummary
+# CPU) and their caches are left waiting only on the artifact.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: shared-adopter-latency
+spec:
+  aimId: test/shared-adopter
+  modelId: test/shared-adopter-fp8
+  engine: vllm
+  metric: latency
+  precision: fp8
+  type: general
+  primary: true
+  image: registry.example.com/test-image:1.0.0
+  modelSources:
+    - modelId: test/shared-adopter-fp8
+      sourceUri: hf://test-org/shared-adopter-weights
+      size: 10Mi
+  caching:
+    enabled: true
+---
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: shared-adopter-throughput
+spec:
+  aimId: test/shared-adopter
+  modelId: test/shared-adopter-fp8
+  engine: vllm
+  metric: throughput
+  precision: fp8
+  type: general
+  primary: false
+  image: registry.example.com/test-image:1.0.0
+  modelSources:
+    - modelId: test/shared-adopter-fp8
+      sourceUri: hf://test-org/shared-adopter-weights
+      size: 10Mi
+  caching:
+    enabled: true
