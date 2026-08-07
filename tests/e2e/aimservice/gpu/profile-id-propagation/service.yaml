@@ -11,14 +11,14 @@ spec:
     image: amdenterpriseai/aim-meta-llama-llama-3-2-1b-instruct:0.8.5
   overrides:
     metric: latency
-  env:
-    - name: HF_TOKEN
-      valueFrom:
-        secretKeyRef:
-          name: huggingface-creds
-          key: token
   caching:
     mode: Never
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   replicas: 1
   template:
     allowUnoptimized: true

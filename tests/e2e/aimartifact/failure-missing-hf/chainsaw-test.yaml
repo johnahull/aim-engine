@@ -3,8 +3,14 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: failure-missing-hf
+  labels:
+    requires: external-network
+    hf-access: live
 spec:
   steps:
+    - use:
+        template: ../../_shared/hf-token-step.yaml
+
     - name: Create artifact
       try:
         - apply:

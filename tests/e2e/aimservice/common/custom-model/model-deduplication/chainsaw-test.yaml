@@ -15,12 +15,17 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: custom-model-deduplication
+  labels:
+    hf-access: live
 spec:
   description: Test that identical custom model specs reuse a single AIMModel
   timeouts:
     apply: 30s
     assert: 180s
   steps:
+    - use:
+        template: ../../../../_shared/hf-token-step.yaml
+
     - name: Create first service with custom model
       try:
         - apply:

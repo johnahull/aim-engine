@@ -16,6 +16,11 @@ spec:
               value: /tmp/hf-home
             - name: HF_HUB_CACHE
               value: /tmp/hf-home/hub
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: huggingface-creds
+                  key: token
           args:
             - "hf://Qwen/Qwen2-0.5B"
             - "/mnt/models"

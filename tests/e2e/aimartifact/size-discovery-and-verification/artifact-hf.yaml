@@ -4,3 +4,9 @@ metadata:
   name: test-hf
 spec:
   sourceUri: hf://sshleifer/tiny-gpt2
+  env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: huggingface-creds
+          key: token

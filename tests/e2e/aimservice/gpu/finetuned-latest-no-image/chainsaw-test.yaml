@@ -26,10 +26,9 @@
 #
 # Requires:
 # - GPU infrastructure (real AIM image, real dry-run, real inference).
-# - `huggingface-creds` secret (key `token`) provisioned into the test namespace
-#   by the shared ensure-hf-secret.sh helper from ~/.config/aim-engine/ (meta-llama
-#   is a gated HF repo). The resolved base image (amdenterpriseai/aim-base:*) lives
-#   on public Docker Hub, so no registry pull secret is required.
+# - HF_TOKEN exported for the shared per-test Secret setup (meta-llama is gated).
+#   The resolved base image (amdenterpriseai/aim-base:*) lives on public Docker
+#   Hub, so no registry pull secret is required.
 #
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
@@ -37,11 +36,10 @@ metadata:
   name: aimservice-gpu-finetuned-latest-no-image
   labels:
     requires: gpu
-    # Provisions the huggingface-creds secret via ensure-hf-secret.sh so the
-    # downloader can fetch gated meta-llama weights. Excluded from
-    # default selectors; opt-in by overriding the selector or pointing
-    # CHAINSAW_TEST_DIR at this directory.
+    # The gated meta-llama weights make HF_TOKEN a hard prerequisite, so this
+    # remains in the dedicated authenticated lane.
     needs-secret: hf_token
+    hf-access: live
 spec:
   description: >-
     Validate that a fine-tuned AIMModel with empty spec.image and
@@ -52,18 +50,8 @@ spec:
   timeouts:
     assert: 600s
   steps:
-    # Provision the HF token (for the gated meta-llama weights) into the
-    # ephemeral test namespace via the shared helper, which resolves
-    # ~/.config/aim-engine/huggingface-creds.yaml. Same pattern as
-    # profile-id-propagation. No registry pull secret is needed: the resolved
-    # base image is on public Docker Hub.
-    - name: Ensure HF token secret in the test namespace
-      try:
-        - script:
-            env:
-              - name: NAMESPACE
-                value: ($namespace)
-            content: bash ../../../_shared/ensure-hf-secret.sh
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
 
     - name: Apply the base AIMModel (real AIM image)
       try:

@@ -125,8 +125,9 @@ func statusAdapter(name string) aimv1alpha1.AIMServiceAdapterStatus {
 // artifacts so Compose can run end to end.
 func depsWith(parent *aimv1alpha1.AIMArtifact, artifacts map[string]*aimv1alpha1.AIMArtifact) Dependencies {
 	deps := Dependencies{
-		AdapterArtifacts: map[string]controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]{},
-		StagingJobs:      map[string]controllerutils.FetchResult[*batchv1.Job]{},
+		AdapterArtifacts:      map[string]controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]{},
+		AdapterRuntimeConfigs: map[string]controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon]{},
+		StagingJobs:           map[string]controllerutils.FetchResult[*batchv1.Job]{},
 	}
 	if parent != nil {
 		pf := controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]{Value: parent}
@@ -581,6 +582,137 @@ func TestBuildStagingJobContract(t *testing.T) {
 	}
 	if job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName != testAdapterPVC {
 		t.Error("staging job must mount the adapter disk PVC")
+	}
+}
+
+func TestBuildStagingJobUsesTypedAdapterS3Connection(t *testing.T) {
+	svc := serviceWithAdapters("lora-a")
+	artifact := adapterArtifact("lora-a", "base")
+	artifact.Spec.SourceURI = "s3://adapter-bucket/lora-a"
+	artifact.Spec.ModelDownloadImage = "example.invalid/custom-downloader:latest"
+	artifact.Spec.Env = []corev1.EnvVar{
+		{Name: "AWS_ENDPOINT_URL", Value: "https://artifact.example"},
+		{Name: "AWS_ACCESS_KEY_ID", Value: "artifact-access"},
+		{Name: "HTTPS_PROXY", Value: "http://artifact-proxy:8080"},
+		{Name: "AWS_PROFILE", Value: "artifact-profile"},
+		{Name: "PYTHONPATH", Value: "/artifact/code"},
+		{Name: "AIM_S3_LOG_LEVEL", Value: "DEBUG"},
+	}
+	ad := Observation{
+		Name:        "lora-a",
+		AdapterPath: "lora-a",
+		ModelID:     "org/base",
+		SourceURI:   artifact.Spec.SourceURI,
+	}
+	config := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			Env: []corev1.EnvVar{
+				{Name: "HTTPS_PROXY", Value: "http://admin-proxy:8080"},
+				{Name: "AWS_PROFILE", Value: "admin-profile"},
+			},
+		},
+		Artifact: &aimv1alpha1.AIMArtifactConfig{
+			S3: &aimv1alpha1.S3ConnectionConfig{
+				Endpoint: "https://s3.internal.example",
+				Auth: &aimv1alpha1.S3AuthConfig{
+					Mode: aimv1alpha1.S3AuthModeStatic,
+					CredentialsSecretRef: &aimv1alpha1.S3CredentialsSecretReference{
+						Name: "adapter-s3-credentials",
+					},
+				},
+				TLS: &aimv1alpha1.S3TLSConfig{
+					CABundleRef: &aimv1alpha1.S3CABundleReference{
+						Kind: "Secret",
+						Name: "adapter-s3-ca",
+						Key:  "ca.crt",
+					},
+				},
+			},
+		},
+	}
+
+	job := BuildStagingJob(svc, artifact, testAdapterPVC, ad, config)
+	container := job.Spec.Template.Spec.Containers[0]
+	env := envMap(container.Env)
+
+	if container.Image != aimv1alpha1.DefaultDownloadImage {
+		t.Errorf(
+			"image = %q, want release-coupled downloader %q",
+			container.Image,
+			aimv1alpha1.DefaultDownloadImage,
+		)
+	}
+	if env["AWS_ENDPOINT_URL"] != "https://s3.internal.example" {
+		t.Errorf("AWS_ENDPOINT_URL = %q, want typed endpoint", env["AWS_ENDPOINT_URL"])
+	}
+	if env["AWS_ACCESS_KEY_ID"] != "" ||
+		env["AWS_ACCESS_KEY_ID_FILE"] == "" {
+		t.Error("typed credentials must replace artifact credential values with mounted files")
+	}
+	if env["AWS_CA_BUNDLE"] != "/etc/aim/s3/ca.crt" {
+		t.Errorf("AWS_CA_BUNDLE = %q, want mounted CA path", env["AWS_CA_BUNDLE"])
+	}
+	if env["HTTPS_PROXY"] != "http://admin-proxy:8080" {
+		t.Errorf("HTTPS_PROXY = %q, want administrator RuntimeConfig proxy", env["HTTPS_PROXY"])
+	}
+	if env["AWS_PROFILE"] != "admin-profile" {
+		t.Errorf("AWS_PROFILE = %q, want administrator RuntimeConfig profile", env["AWS_PROFILE"])
+	}
+	if env["AIM_S3_LOG_LEVEL"] != "DEBUG" {
+		t.Errorf("AIM_S3_LOG_LEVEL = %q, want safe artifact tuning", env["AIM_S3_LOG_LEVEL"])
+	}
+	if _, ok := env["PYTHONPATH"]; ok {
+		t.Error("artifact PYTHONPATH survived typed S3 filtering")
+	}
+	if len(job.Spec.Template.Spec.Volumes) != 3 {
+		t.Fatalf("volumes = %d, want adapter disk, credentials, and CA", len(job.Spec.Template.Spec.Volumes))
+	}
+}
+
+func TestRuntimeConfigForAdapterStagingUsesAdapterS3TrustBoundary(t *testing.T) {
+	serviceConfig := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			Env: []corev1.EnvVar{{Name: "SERVICE_ENV", Value: "preserved"}},
+		},
+		Artifact: &aimv1alpha1.AIMArtifactConfig{
+			ModelDownloadImage: "service-image",
+			S3: &aimv1alpha1.S3ConnectionConfig{
+				Endpoint: "https://service-s3.example",
+			},
+		},
+	}
+	adapterConfig := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			Env: []corev1.EnvVar{
+				{Name: "SERVICE_ENV", Value: "adapter-wins"},
+				{Name: "HTTPS_PROXY", Value: "http://adapter-proxy:8080"},
+			},
+		},
+		Artifact: &aimv1alpha1.AIMArtifactConfig{
+			S3: &aimv1alpha1.S3ConnectionConfig{
+				Endpoint: "https://adapter-s3.example",
+			},
+		},
+	}
+
+	got := runtimeConfigForAdapterStaging(serviceConfig, adapterConfig)
+	if got.Artifact == nil || got.Artifact.S3 == nil {
+		t.Fatal("expected adapter S3 connection")
+	}
+	if got.Artifact.S3.Endpoint != "https://adapter-s3.example" {
+		t.Errorf("endpoint = %q, want adapter endpoint", got.Artifact.S3.Endpoint)
+	}
+	if got.Artifact.ModelDownloadImage != "service-image" {
+		t.Errorf("modelDownloadImage = %q, want service setting", got.Artifact.ModelDownloadImage)
+	}
+	if envMap(got.Env)["SERVICE_ENV"] != "adapter-wins" {
+		t.Error("adapter RuntimeConfig env did not take precedence")
+	}
+	if envMap(got.Env)["HTTPS_PROXY"] != "http://adapter-proxy:8080" {
+		t.Error("adapter RuntimeConfig proxy was not preserved")
+	}
+	if serviceConfig.Artifact.S3.Endpoint != "https://service-s3.example" {
+		t.Error("service runtime config was mutated")
 	}
 }
 

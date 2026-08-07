@@ -27,6 +27,8 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: profile-overrides-dedicated-cache
+  labels:
+    hf-access: live
 spec:
   description: |
     Pins service-driven cache + overlay materialisation:
@@ -37,6 +39,9 @@ spec:
   timeouts:
     assert: 60s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create frozen seed cluster profile (Ready)
       try:
         - apply:

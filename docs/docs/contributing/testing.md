@@ -58,20 +58,17 @@ Tests are filtered by environment. When `ENV=kind` (default), tests tagged with 
 
 ### Credentials for opt-in tests
 
-Some GPU / live tests need credentials that aren't universally provisioned (a private-registry pull secret, a HuggingFace token). These tests are tagged with a `needs-secret` label and **excluded from the default selectors**. Provide the secret(s) locally, then opt in (see below).
-
-Two shared helpers — `tests/e2e/_shared/ensure-pull-secret.sh` and `tests/e2e/_shared/ensure-hf-secret.sh` — resolve each secret at runtime in this order:
+Some GPU tests need a private-registry pull secret that is not universally provisioned. These tests are tagged with `needs-secret: dockerhub_pull_secret` and excluded from the default selectors. The shared `tests/e2e/_shared/ensure-pull-secret.sh` helper resolves the secret at runtime in this order:
 
 1. A local Secret manifest under `~/.config/aim-engine/` (path overridable via env).
 2. An identically-named secret in the `default` namespace, copied into the test namespace (provision once per shared cluster).
-3. Otherwise: the pull-secret step **warns and continues**; the HF-token step **fails** (the token is required for gated / rate-limited downloads).
+3. Otherwise it warns and continues, unless `PULL_SECRET_REQUIRED=1` is set.
 
 | Secret | Default local path | Path override | Secret name / key |
 |--------|--------------------|---------------|-------------------|
 | Docker Hub pull secret | `~/.config/aim-engine/dockerhub-regcred.yaml` | `DOCKERHUB_PULL_SECRET_FILE` | `dockerhub-regcred` (`kubernetes.io/dockerconfigjson`) |
-| HuggingFace token | `~/.config/aim-engine/huggingface-creds.yaml` | `HF_TOKEN_SECRET_FILE` | `huggingface-creds`, key `token` |
 
-Create them once:
+Create it once:
 
 ```bash
 mkdir -p ~/.config/aim-engine
@@ -82,16 +79,27 @@ kubectl create secret docker-registry dockerhub-regcred \
   --docker-server=docker.io \
   --docker-username=<user> --docker-password=<token-or-password> \
   --dry-run=client -o yaml > ~/.config/aim-engine/dockerhub-regcred.yaml
-
-# HuggingFace token (gated / rate-limited model downloads)
-kubectl create secret generic huggingface-creds \
-  --from-literal=token=hf_xxx \
-  --dry-run=client -o yaml > ~/.config/aim-engine/huggingface-creds.yaml
 ```
 
-Or, instead of local files, create the same-named secrets in the `default` namespace and the helpers will copy them in.
+Or create the same-named pull secret in the `default` namespace and the helper will copy it in.
 
-Useful overrides: `PULL_SECRET_SOURCE_NS` / `HF_TOKEN_SOURCE_NS` (change the copy-from namespace), `PULL_SECRET_REQUIRED=1` (make a missing pull secret fail instead of warn), `HF_TOKEN_OPTIONAL=1` (make a missing HF token warn instead of fail).
+Useful overrides: `PULL_SECRET_SOURCE_NS` changes the copy-from namespace, and `PULL_SECRET_REQUIRED=1` makes a missing pull secret fail instead of warn.
+
+#### Authenticated Hugging Face tests
+
+Tests that can contact Hugging Face carry `hf-access: live`. A shared Chainsaw step template creates `huggingface-creds` inside each test's ephemeral namespace before any downloader resource is applied, preserving per-test log and metrics isolation. When `HF_TOKEN` is set, those requests are authenticated; without it, public-model tests continue to exercise anonymous access. Tests labeled `needs-secret: hf_token` remain excluded from the normal environment suites because they cannot reasonably run without credentials. The deliberate authentication-failure test is labeled `hf-access: anonymous` and never provisions the shared secret.
+
+```bash
+read -rsp "HF token: " HF_TOKEN
+echo
+export HF_TOKEN
+make test-chainsaw ENV=kind
+# On a matching environment, run only tests where a token is a hard prerequisite:
+make test-chainsaw-hf ENV=gpu
+unset HF_TOKEN
+```
+
+`needs-secret: hf_token` is reserved for tests that cannot reasonably run without credentials, such as gated or unusually large models. `test-chainsaw-hf` selects that lane by labels across the full test tree. Trusted CI passes `HF_TOKEN` to the normal suite as well, so ordinary services whose official AIM metadata contains implicit `hf://` sources are authenticated without moving them into the opt-in lane. Trusted runs fail if the repository secret is missing; GitHub does not expose it to fork PRs.
 
 #### Running a `needs-secret` test
 
@@ -102,9 +110,6 @@ make test-chainsaw \
   CHAINSAW_TEST_DIR=tests/e2e/aimservice/gpu/v1alpha2-profile-via-model-cpu-live \
   CHAINSAW_ENV_SELECTOR=
 ```
-
-!!! note
-    A few tests (`profile-id-propagation`, `finetuned-latest-no-image`) use a different HF secret — `hf-token` with key `hf-token`, copied from the `aim-system` namespace — rather than the `huggingface-creds` convention above.
 
 ### Runtime projection mode tests (`Reduced`)
 

@@ -13,6 +13,13 @@ metadata:
 spec:
   profile:
     name: overlay-img-seed
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   profileOverrides:
     acceleratorPartitioningMode: CPX-NPS4
     acceleratorCount: 1

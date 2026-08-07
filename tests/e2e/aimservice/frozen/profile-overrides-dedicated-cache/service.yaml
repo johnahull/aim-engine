@@ -23,4 +23,10 @@ spec:
         size: 4Gi
   caching:
     mode: Dedicated
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   replicas: 1

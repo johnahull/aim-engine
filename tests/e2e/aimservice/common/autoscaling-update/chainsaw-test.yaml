@@ -18,11 +18,16 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: aimservice-autoscaling-update
+  labels:
+    hf-access: live
 spec:
   description: Test that updating AIMService minReplicas/maxReplicas propagates to InferenceService
   timeouts:
     assert: 300s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create model
       try:
         - apply:

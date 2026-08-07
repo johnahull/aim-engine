@@ -21,6 +21,8 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: v1alpha2-aimservice-overlay-image-resolution
+  labels:
+    hf-access: live
 spec:
   description: |
     Overlay spec.image keeps the optimized seed image for a weights-untouched
@@ -29,6 +31,9 @@ spec:
   timeouts:
     assert: 60s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create the frozen deployable seed AIMClusterProfile (Ready, with baseImage)
       try:
         - apply:

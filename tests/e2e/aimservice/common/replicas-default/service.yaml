@@ -7,5 +7,12 @@ metadata:
 spec:
   model:
     name: test-replicas-default-model
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   # Note: No replicas, minReplicas, or maxReplicas specified
   # Should default to 1 replica

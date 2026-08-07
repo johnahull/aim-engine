@@ -12,3 +12,10 @@ metadata:
 spec:
   model:
     name: resolve-by-model-model
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token

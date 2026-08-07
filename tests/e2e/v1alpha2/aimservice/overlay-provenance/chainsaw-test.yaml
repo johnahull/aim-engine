@@ -8,10 +8,15 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: v1alpha2-aimservice-overlay-provenance
+  labels:
+    hf-access: live
 spec:
   timeouts:
     assert: 120s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Apply the seed AIMProfile and a service that derives an overlay from it
       try:
         - apply:

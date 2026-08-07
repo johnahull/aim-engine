@@ -25,6 +25,7 @@ package aimartifact
 import (
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -284,6 +285,92 @@ func TestBothJobsGetSameFilterEnvVars(t *testing.T) {
 	for _, key := range []string{"AIM_HF_INCLUDE", "AIM_HF_EXCLUDE"} {
 		if checkEnv[key] != downloadEnv[key] {
 			t.Errorf("env %s differs: check-size=%q download=%q", key, checkEnv[key], downloadEnv[key])
+		}
+	}
+}
+
+func TestBothS3JobsUseTypedConnectionAndTrustedImage(t *testing.T) {
+	mc := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			SourceURI:          "s3://bucket/model",
+			ModelDownloadImage: "example.invalid/custom-downloader:latest",
+			Env: []corev1.EnvVar{
+				{Name: "AWS_ENDPOINT_URL", Value: "https://artifact.example"},
+				{Name: "AIM_S3_INSECURE_SKIP_VERIFY", Value: "true"},
+			},
+		},
+	}
+	config := &aimv1alpha1.AIMRuntimeConfigCommon{
+		Artifact: &aimv1alpha1.AIMArtifactConfig{
+			S3: &aimv1alpha1.S3ConnectionConfig{
+				Endpoint: "https://s3.internal.example",
+				Auth: &aimv1alpha1.S3AuthConfig{
+					Mode: aimv1alpha1.S3AuthModeStatic,
+					CredentialsSecretRef: &aimv1alpha1.S3CredentialsSecretReference{
+						Name: "s3-credentials",
+					},
+				},
+				TLS: &aimv1alpha1.S3TLSConfig{
+					CABundleRef: &aimv1alpha1.S3CABundleReference{
+						Kind: "ConfigMap",
+						Name: "s3-ca",
+						Key:  "ca.pem",
+					},
+				},
+			},
+		},
+	}
+
+	jobs := []*batchv1.Job{
+		buildCheckSizeJob(mc, config),
+		buildDownloadJob(mc, config, 1000),
+	}
+	for _, job := range jobs {
+		container := job.Spec.Template.Spec.Containers[0]
+		env := envToMap(container.Env)
+		if container.Image != aimv1alpha1.DefaultDownloadImage {
+			t.Errorf(
+				"%s image = %q, want %q",
+				job.Name,
+				container.Image,
+				aimv1alpha1.DefaultDownloadImage,
+			)
+		}
+		if env["AWS_ENDPOINT_URL"] != "https://s3.internal.example" {
+			t.Errorf("%s endpoint = %q, want typed endpoint", job.Name, env["AWS_ENDPOINT_URL"])
+		}
+		if env["AIM_S3_INSECURE_SKIP_VERIFY"] != "false" {
+			t.Errorf(
+				"%s insecure flag = %q, want typed secure value",
+				job.Name,
+				env["AIM_S3_INSECURE_SKIP_VERIFY"],
+			)
+		}
+		if env["AWS_ACCESS_KEY_ID_FILE"] == "" ||
+			env["AWS_SECRET_ACCESS_KEY_FILE"] == "" {
+			t.Errorf("%s does not use mounted static credentials", job.Name)
+		}
+		if env["AWS_CA_BUNDLE"] != "/etc/aim/s3/ca.crt" {
+			t.Errorf("%s CA path = %q", job.Name, env["AWS_CA_BUNDLE"])
+		}
+
+		var sawCredentials, sawCA bool
+		for _, volume := range job.Spec.Template.Spec.Volumes {
+			if volume.Secret != nil && volume.Secret.SecretName == "s3-credentials" {
+				sawCredentials = true
+			}
+			if volume.ConfigMap != nil && volume.ConfigMap.Name == "s3-ca" {
+				sawCA = true
+			}
+		}
+		if !sawCredentials || !sawCA {
+			t.Errorf(
+				"%s volumes credentials=%v CA=%v, want both",
+				job.Name,
+				sawCredentials,
+				sawCA,
+			)
 		}
 	}
 }

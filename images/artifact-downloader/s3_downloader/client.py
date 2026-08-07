@@ -24,10 +24,10 @@
 
 Defaults fall back to boto3 behaviour (Signature V4, auto path-vs-virtual
 addressing, and the standard credential chain). Validated end-to-end against
-MinIO (SeaweedFS is exercised as the built-in artifact cache backend); AWS S3,
-Cloudflare R2, Backblaze B2, GCS and Ceph RGW use the same boto3 path and are
-expected to work. Optional AIM_S3_* knobs override region, addressing style,
-signature version and multipart tuning when a backend needs it.
+MinIO; AWS S3, Cloudflare R2, Backblaze B2, GCS and Ceph RGW use the same boto3
+path and are expected to work. Optional AIM_S3_* knobs override region,
+addressing style, signature version and multipart tuning when a backend needs
+it.
 
 Credentials resolve in one of three modes; see _credential_mode. The important
 rule is that absent credentials are handed to boto3 rather than treated as a
@@ -116,6 +116,21 @@ def _credential_mode(access_key_id: Optional[str], secret_access_key: Optional[s
     and AWS_SECRET_ACCESS_KEY unset on purpose. Reading that as "public bucket"
     and sending unsigned requests turns every one of them into an opaque 403.
     """
+    explicit_mode = os.environ.get("AIM_S3_AUTH_MODE", "").strip().lower()
+    if explicit_mode:
+        if explicit_mode not in {_MODE_CHAIN, _MODE_STATIC, _MODE_ANONYMOUS}:
+            raise ValueError(
+                "AIM_S3_AUTH_MODE must be one of: chain, static, anonymous"
+            )
+        if explicit_mode == _MODE_STATIC and not (
+            access_key_id and secret_access_key
+        ):
+            raise ValueError(
+                "AIM_S3_AUTH_MODE=static requires both AWS_ACCESS_KEY_ID and "
+                "AWS_SECRET_ACCESS_KEY"
+            )
+        return explicit_mode
+
     if _is_truthy(os.environ.get("AIM_S3_ANONYMOUS")):
         return _MODE_ANONYMOUS
 
@@ -191,6 +206,31 @@ def _transfer_config() -> Optional[TransferConfig]:
     return TransferConfig(**kwargs)
 
 
+def _verify_setting():
+    """Return boto3's TLS verification setting.
+
+    ``None`` preserves legacy botocore defaults, ``True`` explicitly selects
+    botocore's default CA bundle, a path selects a custom CA bundle, and
+    ``False`` is the explicitly requested insecure diagnostic mode.
+    """
+    insecure = os.environ.get("AIM_S3_INSECURE_SKIP_VERIFY", "").strip().lower()
+    if insecure in _TRUE_VALUES:
+        logger.warning(
+            "TLS certificate and hostname verification is DISABLED for S3 "
+            "requests; use only as a temporary diagnostic measure"
+        )
+        return False
+    ca_bundle = _getenv("AWS_CA_BUNDLE", "AIM_S3_CA_BUNDLE")
+    if ca_bundle:
+        return ca_bundle
+    if insecure in {"0", "false", "no", "off"}:
+        # Typed connections always set an explicit false. Passing True prevents
+        # an artifact-controlled AWS_CONFIG_FILE from replacing botocore's
+        # default CA bundle through its ca_bundle setting.
+        return True
+    return None
+
+
 def build_client() -> S3Client:
     """Construct an S3Client from the standard AWS_* (and AIM_S3_*) env vars.
 
@@ -201,9 +241,12 @@ def build_client() -> S3Client:
       - AWS_SECRET_ACCESS_KEY       secret key
       - AWS_SESSION_TOKEN           session token (temporary credentials)
       - AIM_S3_ANONYMOUS            true to read a public bucket unauthenticated
+      - AIM_S3_AUTH_MODE            chain | static | anonymous
       - AWS_REGION / AWS_DEFAULT_REGION   signing region
       - AIM_S3_ADDRESSING_STYLE     path | virtual | auto
       - AIM_S3_SIGNATURE_VERSION    e.g. s3v4 | s3
+      - AWS_CA_BUNDLE               PEM CA bundle used for TLS verification
+      - AIM_S3_INSECURE_SKIP_VERIFY true disables TLS verification (unsafe)
       - AIM_S3_MAX_CONCURRENCY      per-object multipart threads
       - AIM_S3_MULTIPART_CHUNKSIZE_MB  multipart chunk size in MiB
 
@@ -285,8 +328,12 @@ def build_client() -> S3Client:
     # sess.resource(...) without a config when given a boto3_session. Binding
     # our config via functools.partial is the supported way to inject botocore
     # settings (see drivendataorg/cloudpathlib#435).
-    session.client = functools.partial(session.client, config=config)
-    session.resource = functools.partial(session.resource, config=config)
+    client_kwargs = {"config": config}
+    verify = _verify_setting()
+    if verify is not None:
+        client_kwargs["verify"] = verify
+    session.client = functools.partial(session.client, **client_kwargs)
+    session.resource = functools.partial(session.resource, **client_kwargs)
 
     return S3Client(
         boto3_session=session,

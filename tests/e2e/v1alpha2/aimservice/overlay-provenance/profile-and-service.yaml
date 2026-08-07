@@ -26,6 +26,13 @@ metadata:
 spec:
   profile:
     name: overlay-seed-profile
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   profileOverrides:
     modelSources:
       - modelId: overlay-test/fine-tune

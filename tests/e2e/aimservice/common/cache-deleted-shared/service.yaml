@@ -9,4 +9,10 @@ spec:
     image: docker.io/amdenterpriseai/aim-dummy:0.2.0
   caching:
     mode: Shared
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   replicas: 1

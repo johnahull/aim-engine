@@ -11,11 +11,16 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: aimservice-replicas-default
+  labels:
+    hf-access: live
 spec:
   description: Test AIMService defaults to 1 replica when not specified
   timeouts:
     assert: 300s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create model
       try:
         - apply:

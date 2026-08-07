@@ -1,0 +1,132 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+stringData:
+  accessKeyId: minioadmin
+  secretAccessKey: minioadmin
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-minio-tls
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: seed
+        image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        args:
+        - |
+          set -eu
+          until mc --insecure alias set minio https://minio-admin:9000 minioadmin minioadmin; do
+            sleep 2
+          done
+          mc --insecure mb --ignore-existing minio/models
+          mkdir -p /tmp/seed/nested
+          printf '{"tls":true}\n' > /tmp/seed/config.json
+          printf 'private-ca model weights\n' > /tmp/seed/nested/weights.bin
+          mc --insecure cp --recursive /tmp/seed/ minio/models/tls-model/
+---
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: tls-configmap
+spec:
+  artifact:
+    s3:
+      endpoint: https://minio-admin:9000
+      region: us-east-1
+      addressingStyle: path
+      signatureVersion: s3v4
+      auth:
+        mode: static
+        credentialsSecretRef:
+          name: minio-credentials
+      tls:
+        caBundleRef:
+          kind: ConfigMap
+          name: s3-root-ca
+          key: ca.crt
+---
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: tls-secret
+spec:
+  artifact:
+    s3:
+      endpoint: https://minio-admin:9000
+      region: us-east-1
+      addressingStyle: path
+      signatureVersion: s3v4
+      auth:
+        mode: static
+        credentialsSecretRef:
+          name: minio-credentials
+      tls:
+        caBundleRef:
+          kind: Secret
+          name: s3-root-ca
+          key: tls.crt
+---
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: tls-insecure
+spec:
+  artifact:
+    s3:
+      endpoint: https://minio-mismatch:9000
+      region: us-east-1
+      addressingStyle: path
+      signatureVersion: s3v4
+      auth:
+        mode: static
+        credentialsSecretRef:
+          name: minio-credentials
+      tls:
+        insecureSkipVerify: true
+---
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: tls-untrusted
+spec:
+  artifact:
+    s3:
+      endpoint: https://minio-admin:9000
+      region: us-east-1
+      addressingStyle: path
+      signatureVersion: s3v4
+      auth:
+        mode: static
+        credentialsSecretRef:
+          name: minio-credentials
+---
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: tls-hostname-mismatch
+spec:
+  artifact:
+    s3:
+      endpoint: https://minio-mismatch:9000
+      region: us-east-1
+      addressingStyle: path
+      signatureVersion: s3v4
+      auth:
+        mode: static
+        credentialsSecretRef:
+          name: minio-credentials
+      tls:
+        caBundleRef:
+          kind: Secret
+          name: s3-root-ca
+          key: tls.crt

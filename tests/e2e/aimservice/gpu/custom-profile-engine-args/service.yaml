@@ -9,4 +9,12 @@ spec:
   template:
     name: test-cp-engine-args-template
     allowUnoptimized: true
+  # This template intentionally has no modelSources, so the serving runtime
+  # downloads the weights itself rather than using an AIMArtifact download Job.
+  env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: huggingface-creds
+          key: token
   replicas: 1

@@ -19,11 +19,15 @@ metadata:
   name: aimservice-cache-deleted-shared
   labels:
     requires: external-network
+    hf-access: live
 spec:
   description: Test that deleting a shared template cache is recreated and service recovers
   timeouts:
     assert: 300s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create service with shared caching
       try:
         - apply:

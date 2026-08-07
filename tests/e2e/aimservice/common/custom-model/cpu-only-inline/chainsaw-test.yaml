@@ -16,12 +16,17 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: custom-model-cpu-only-inline
+  labels:
+    hf-access: live
 spec:
   description: Test AIMService with inline CPU-only custom model
   timeouts:
     apply: 30s
     assert: 120s
   steps:
+    - use:
+        template: ../../../../_shared/hf-token-step.yaml
+
     - name: Create service with CPU-only custom model
       try:
         - apply:

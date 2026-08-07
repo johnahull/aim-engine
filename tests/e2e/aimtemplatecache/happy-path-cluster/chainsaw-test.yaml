@@ -2,10 +2,15 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: template-cache-happy-path-cluster
+  labels:
+    hf-access: live
 spec:
   timeouts:
     assert: 180s
   steps:
+    - use:
+        template: ../../_shared/hf-token-step.yaml
+
     - name: Create frozen service template with Ready status
       try:
         - apply:
@@ -40,7 +45,10 @@ spec:
                 size: 2Gi
                 env:
                   - name: HF_TOKEN
-                    value: my-token
+                    valueFrom:
+                      secretKeyRef:
+                        name: huggingface-creds
+                        key: token
         - assert:
             timeout: 180s
             resource:

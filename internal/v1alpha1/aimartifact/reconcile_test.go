@@ -23,11 +23,16 @@
 package aimartifact
 
 import (
+	"context"
 	"testing"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestFoldStalledFilesystemHealth(t *testing.T) {
@@ -103,5 +108,113 @@ func TestFoldStalledFilesystemHealth(t *testing.T) {
 				t.Errorf("message = %q, want %q", got.GetMessage(), tt.wantMessage)
 			}
 		})
+	}
+}
+
+func TestTypedS3DisallowedArtifactEnvironmentBlocksTransfer(t *testing.T) {
+	artifact := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "model", Namespace: "models"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			SourceURI: "s3://bucket/model",
+			Size:      resource.MustParse("1Gi"),
+			Env: []corev1.EnvVar{
+				{Name: "HTTP_PROXY", Value: "http://artifact-proxy:8080"},
+				{Name: "AWS_PROFILE", Value: "artifact-profile"},
+			},
+		},
+	}
+	config := &aimv1alpha1.AIMRuntimeConfigCommon{
+		Artifact: &aimv1alpha1.AIMArtifactConfig{
+			S3: &aimv1alpha1.S3ConnectionConfig{
+				Endpoint: "https://s3.internal.example",
+			},
+		},
+	}
+	fetch := ArtifactFetchResult{
+		artifact: artifact,
+		mergedRuntimeConfig: controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon]{
+			Value: config,
+		},
+	}
+
+	obs := (&ArtifactReconciler{}).ComposeState(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha1.AIMArtifact]{Object: artifact},
+		fetch,
+	)
+	if obs.transferConfigErr == nil {
+		t.Fatal("disallowed typed S3 artifact env was not rejected")
+	}
+
+	plan := (&ArtifactReconciler{}).PlanResources(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha1.AIMArtifact]{Object: artifact},
+		obs,
+	)
+	if len(plan.GetToApply()) != 0 ||
+		len(plan.GetToApplyWithoutOwnerRef()) != 0 ||
+		len(plan.GetToDelete()) != 0 {
+		t.Fatalf(
+			"invalid transfer config planned mutations: apply=%#v applyWithoutOwner=%#v delete=%#v",
+			plan.GetToApply(),
+			plan.GetToApplyWithoutOwnerRef(),
+			plan.GetToDelete(),
+		)
+	}
+
+	found := false
+	for _, component := range obs.GetComponentHealth(context.Background(), nil) {
+		if component.Component == "TransferConfiguration" &&
+			component.GetReason() == "DisallowedS3ArtifactEnvironment" &&
+			len(component.Errors) == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("disallowed typed S3 artifact env was not surfaced as InvalidSpec health")
+	}
+}
+
+func TestTypedS3DisallowedAdapterEnvironmentIsInvalid(t *testing.T) {
+	artifact := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "adapter", Namespace: "models"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			Type:           aimv1alpha1.ArtifactTypeAdapter,
+			SourceURI:      "s3://bucket/adapter",
+			ParentArtifact: "parent",
+			Env: []corev1.EnvVar{
+				{Name: "AWS_WEB_IDENTITY_TOKEN_FILE", Value: "/artifact/token"},
+			},
+		},
+	}
+	fetch := ArtifactFetchResult{
+		artifact: artifact,
+		mergedRuntimeConfig: controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon]{
+			Value: &aimv1alpha1.AIMRuntimeConfigCommon{
+				Artifact: &aimv1alpha1.AIMArtifactConfig{
+					S3: &aimv1alpha1.S3ConnectionConfig{},
+				},
+			},
+		},
+	}
+
+	obs := (&ArtifactReconciler{}).ComposeState(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha1.AIMArtifact]{Object: artifact},
+		fetch,
+	)
+	if obs.transferConfigErr == nil {
+		t.Fatal("disallowed typed S3 adapter env was not rejected")
+	}
+
+	found := false
+	for _, component := range obs.GetComponentHealth(context.Background(), nil) {
+		if component.Component == "TransferConfiguration" &&
+			component.GetReason() == "DisallowedS3ArtifactEnvironment" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("adapter transfer configuration error was not surfaced")
 	}
 }

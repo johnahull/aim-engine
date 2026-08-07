@@ -18,10 +18,14 @@ metadata:
   name: profile-cpu-basic
   labels:
     requires: nfd
+    hf-access: live
 spec:
   timeouts:
     assert: 60s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create CPU cluster profile
       try:
         - apply:

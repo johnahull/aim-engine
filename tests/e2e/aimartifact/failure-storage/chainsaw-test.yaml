@@ -7,10 +7,14 @@ metadata:
     # This test requires Longhorn storage with quota support to trigger StorageFull errors.
     # Use --selector 'requires!=longhorn' to exclude in environments without Longhorn.
     requires: longhorn
+    hf-access: live
 spec:
   # Skip: Log parsing patterns need updating for new artifact-downloader output format
   skip: true
   steps:
+    - use:
+        template: ../../_shared/hf-token-step.yaml
+
     - name: Create artifact
       try:
         - apply:

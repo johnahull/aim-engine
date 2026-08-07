@@ -250,6 +250,58 @@ func TestMergeRuntimeConfigs(t *testing.T) {
 	}
 }
 
+func TestMergeRuntimeConfigsReplacesS3ConnectionAtomically(t *testing.T) {
+	base := &aimv1alpha1.AIMRuntimeConfigCommon{
+		Artifact: &aimv1alpha1.AIMArtifactConfig{
+			S3: &aimv1alpha1.S3ConnectionConfig{
+				Endpoint: "https://cluster-s3.example",
+				Region:   "us-east-1",
+				Auth: &aimv1alpha1.S3AuthConfig{
+					Mode: aimv1alpha1.S3AuthModeStatic,
+					CredentialsSecretRef: &aimv1alpha1.S3CredentialsSecretReference{
+						Name: "cluster-credentials",
+					},
+				},
+				TLS: &aimv1alpha1.S3TLSConfig{
+					CABundleRef: &aimv1alpha1.S3CABundleReference{
+						Kind: "ConfigMap",
+						Name: "cluster-ca",
+						Key:  "ca.crt",
+					},
+				},
+			},
+		},
+	}
+	priority := &aimv1alpha1.AIMRuntimeConfigCommon{
+		Artifact: &aimv1alpha1.AIMArtifactConfig{
+			S3: &aimv1alpha1.S3ConnectionConfig{
+				Endpoint: "https://namespace-s3.example",
+				Auth: &aimv1alpha1.S3AuthConfig{
+					Mode: aimv1alpha1.S3AuthModeAnonymous,
+				},
+			},
+		},
+	}
+
+	merged := mergeRuntimeConfigs(priority, base)
+	if merged.Artifact == nil || merged.Artifact.S3 == nil {
+		t.Fatal("expected merged S3 connection")
+	}
+	if got := merged.Artifact.S3.Endpoint; got != priority.Artifact.S3.Endpoint {
+		t.Fatalf("endpoint = %q, want %q", got, priority.Artifact.S3.Endpoint)
+	}
+	if merged.Artifact.S3.Region != "" {
+		t.Errorf("cluster region leaked into namespace connection: %q", merged.Artifact.S3.Region)
+	}
+	if merged.Artifact.S3.TLS != nil {
+		t.Errorf("cluster TLS settings leaked into namespace connection: %#v", merged.Artifact.S3.TLS)
+	}
+	if merged.Artifact.S3.Auth == nil ||
+		merged.Artifact.S3.Auth.Mode != aimv1alpha1.S3AuthModeAnonymous {
+		t.Errorf("auth = %#v, want namespace anonymous auth", merged.Artifact.S3.Auth)
+	}
+}
+
 func TestMigrateDeprecatedStorageFields(t *testing.T) {
 	tests := []struct {
 		name     string

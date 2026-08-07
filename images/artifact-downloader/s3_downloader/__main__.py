@@ -41,15 +41,51 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Iterator, List, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 from cloudpathlib import CloudPath, S3Path
+from botocore.exceptions import SSLError
 
 from s3_downloader.client import build_client
 from s3_downloader.filters import DownloadFilter
 from s3_downloader.transfer import CloudDownloadTask, parallel_downloads
 
 logger = logging.getLogger("s3_downloader")
+
+_THIRD_PARTY_LOGGERS = ("botocore", "boto3", "s3transfer", "urllib3")
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def _configure_logging() -> None:
+    """Enable downloader diagnostics without enabling SDK wire logging."""
+    requested = os.environ.get("AIM_S3_LOG_LEVEL", "INFO").strip().upper()
+    level = _LOG_LEVELS.get(requested, logging.INFO)
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+    logging.getLogger().setLevel(logging.WARNING)
+    logger.setLevel(level)
+    for name in _THIRD_PARTY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def _max_workers(value: Optional[int] = None) -> int:
+    raw = str(value) if value is not None else os.environ.get("AIM_S3_MAX_WORKERS", "8")
+    try:
+        workers = int(raw)
+    except ValueError as exc:
+        raise ValueError("AIM_S3_MAX_WORKERS must be an integer from 1 through 64") from exc
+    if workers < 1 or workers > 64:
+        raise ValueError("AIM_S3_MAX_WORKERS must be an integer from 1 through 64")
+    return workers
 
 
 def _normalize_uri(uri: str) -> str:
@@ -76,16 +112,30 @@ def iter_objects(root: S3Path, flt: DownloadFilter) -> Iterator[Tuple[S3Path, Pa
             yield obj, rel
 
 
+def _object_size(obj: S3Path) -> int:
+    metadata = obj.client.client.head_object(
+        Bucket=obj.bucket,
+        Key=obj.key,
+        **obj.client.boto3_dl_extra_args,
+    )
+    return int(metadata["ContentLength"])
+
+
 def cmd_download(uri: str, target_dir: str, max_workers: int) -> int:
     client = build_client()
     root = CloudPath(_normalize_uri(uri), client=client)
     target = Path(target_dir)
     flt = DownloadFilter.from_env()
 
-    tasks: List[CloudDownloadTask] = [
-        CloudDownloadTask(cloud_path=obj, target_path=target / rel)
-        for obj, rel in iter_objects(root, flt)
-    ]
+    tasks: List[CloudDownloadTask] = []
+    for obj, rel in iter_objects(root, flt):
+        tasks.append(
+            CloudDownloadTask(
+                cloud_path=obj,
+                target_path=target / rel,
+                expected_size=_object_size(obj),
+            )
+        )
 
     if not tasks:
         logger.error(f"No objects found at {uri} (after applying download filter)")
@@ -108,7 +158,7 @@ def cmd_download(uri: str, target_dir: str, max_workers: int) -> int:
         )
         return 1
 
-    logger.info(f"Sync complete: {len(tasks)} file(s) in {target_dir}")
+    logger.info(f"Sync complete: {len(tasks)} verified file(s) in {target_dir}")
     return 0
 
 
@@ -137,11 +187,7 @@ def cmd_size(uri: str) -> int:
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("AIM_S3_LOG_LEVEL", "INFO").upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    _configure_logging()
 
     parser = argparse.ArgumentParser(prog="s3_downloader", description="S3-compatible downloader")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -152,8 +198,8 @@ def main() -> int:
     p_download.add_argument(
         "--max-workers",
         type=int,
-        default=int(os.environ.get("AIM_S3_MAX_WORKERS", "8")),
-        help="Number of concurrent object downloads (default: 8)",
+        default=None,
+        help="Number of concurrent object downloads (default: AIM_S3_MAX_WORKERS or 8)",
     )
 
     p_size = sub.add_parser("size", help="Print total byte size of objects under a prefix")
@@ -163,9 +209,12 @@ def main() -> int:
 
     try:
         if args.command == "download":
-            return cmd_download(args.uri, args.target_dir, args.max_workers)
+            return cmd_download(args.uri, args.target_dir, _max_workers(args.max_workers))
         if args.command == "size":
             return cmd_size(args.uri)
+    except SSLError as e:
+        logger.error(f"S3 TLS certificate verification failed: {e}")
+        return 1
     except Exception as e:  # noqa: BLE001 - surface a clean non-zero exit for the Job
         logger.error(f"S3 operation failed: {e}")
         return 1

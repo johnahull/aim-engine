@@ -642,16 +642,22 @@ func TestPlanTemplateCache_EnvVars(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		serviceEnv  []corev1.EnvVar
-		templateEnv []corev1.EnvVar
-		wantEnv     map[string]string
+		name              string
+		serviceEnv        []corev1.EnvVar
+		serviceCachingEnv []corev1.EnvVar
+		templateEnv       []corev1.EnvVar
+		wantEnv           map[string]string
 	}{
 		{
 			name:        "service env vars copied to cache",
 			serviceEnv:  []corev1.EnvVar{{Name: "HF_TOKEN", Value: "secret-token"}},
 			templateEnv: nil,
 			wantEnv:     map[string]string{"HF_TOKEN": "secret-token"},
+		},
+		{
+			name:              "service caching env vars copied to cache",
+			serviceCachingEnv: []corev1.EnvVar{{Name: "HF_TOKEN", Value: "download-only-token"}},
+			wantEnv:           map[string]string{"HF_TOKEN": "download-only-token"},
 		},
 		{
 			name:       "template caching env vars copied to cache",
@@ -674,6 +680,24 @@ func TestPlanTemplateCache_EnvVars(t *testing.T) {
 			},
 		},
 		{
+			name:              "service caching env overrides template caching env",
+			serviceCachingEnv: []corev1.EnvVar{{Name: "HF_TOKEN", Value: "service-caching-token"}},
+			templateEnv: []corev1.EnvVar{
+				{Name: "HF_TOKEN", Value: "template-token"},
+				{Name: "HTTP_PROXY", Value: "http://proxy:8080"},
+			},
+			wantEnv: map[string]string{
+				"HF_TOKEN":   "service-caching-token",
+				"HTTP_PROXY": "http://proxy:8080",
+			},
+		},
+		{
+			name:              "service env overrides service caching env",
+			serviceEnv:        []corev1.EnvVar{{Name: "HF_TOKEN", Value: "legacy-service-token"}},
+			serviceCachingEnv: []corev1.EnvVar{{Name: "HF_TOKEN", Value: "download-only-token"}},
+			wantEnv:           map[string]string{"HF_TOKEN": "legacy-service-token"},
+		},
+		{
 			name:        "no env vars",
 			serviceEnv:  nil,
 			templateEnv: nil,
@@ -685,6 +709,7 @@ func TestPlanTemplateCache_EnvVars(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			service := NewService("my-svc").WithCachingMode(aimv1alpha1.CachingModeShared).Build()
 			service.Spec.Env = tt.serviceEnv
+			service.Spec.Caching.Env = tt.serviceCachingEnv
 
 			// Build observation with template that has caching env
 			obs := ServiceObservation{}

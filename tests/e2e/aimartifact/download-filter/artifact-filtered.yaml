@@ -4,5 +4,11 @@ metadata:
   name: filter-no-subdirs
 spec:
   sourceUri: hf://hf-internal-testing/tiny-random-CLIPModel
+  env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: huggingface-creds
+          key: token
   # No downloadFilter set — uses the default which excludes subdirectory files (*/*).
   # This is equivalent to: downloadFilter: { exclude: ["*/*"] }

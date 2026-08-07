@@ -1,0 +1,200 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: s3-tls
+spec:
+  description: >
+    Verifies private CA bundles from ConfigMaps and Secrets, rejection of an
+    untrusted CA and hostname mismatch, and the explicit insecure diagnostic
+    escape hatch against a real HTTPS MinIO endpoint.
+  steps:
+  - name: Issue private CA and MinIO serving certificate
+    try:
+    - apply:
+        file: pki.yaml
+    - assert:
+        timeout: 2m
+        resource:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: s3-root-ca
+          status:
+            (conditions[?type == 'Ready']):
+            - status: "True"
+    - assert:
+        timeout: 2m
+        resource:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: minio-tls
+          status:
+            (conditions[?type == 'Ready']):
+            - status: "True"
+
+  - name: Materialize ConfigMap CA source and deploy HTTPS MinIO
+    try:
+    - script:
+        timeout: 30s
+        env:
+        - name: NAMESPACE
+          value: ($namespace)
+        content: |
+          set -eu
+          ca="$(kubectl get secret s3-root-ca -n "$NAMESPACE" -o jsonpath='{.data.tls\.crt}' | base64 -d)"
+          kubectl create configmap s3-root-ca -n "$NAMESPACE" \
+            --from-literal=ca.crt="$ca" \
+            --dry-run=client -o yaml |
+            kubectl apply -f -
+    - apply:
+        file: minio.yaml
+    - assert:
+        timeout: 2m
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: minio-tls
+          status:
+            availableReplicas: 1
+
+  - name: Seed deterministic HTTPS objects and create runtime configs
+    try:
+    - apply:
+        file: fixture.yaml
+    - assert:
+        timeout: 2m
+        resource:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: seed-minio-tls
+          status:
+            succeeded: 1
+
+  - name: Verify trusted CAs and explicit insecure mode
+    try:
+    - apply:
+        file: artifacts.yaml
+    - assert:
+        timeout: 5m
+        resource:
+          apiVersion: aim.eai.amd.com/v1alpha1
+          kind: AIMArtifact
+          metadata:
+            name: tls-configmap
+          status:
+            status: Ready
+            progress:
+              percentage: 100
+    - assert:
+        timeout: 5m
+        resource:
+          apiVersion: aim.eai.amd.com/v1alpha1
+          kind: AIMArtifact
+          metadata:
+            name: tls-secret
+          status:
+            status: Ready
+            progress:
+              percentage: 100
+    - assert:
+        timeout: 5m
+        resource:
+          apiVersion: aim.eai.amd.com/v1alpha1
+          kind: AIMArtifact
+          metadata:
+            name: tls-insecure
+          status:
+            status: Ready
+            progress:
+              percentage: 100
+
+  - name: Assert insecure TLS emits an explicit warning
+    try:
+    - script:
+        timeout: 2m
+        env:
+        - name: NAMESPACE
+          value: ($namespace)
+        content: |
+          set -eu
+          for _ in $(seq 1 60); do
+            if kubectl get events -n "$NAMESPACE" \
+              --field-selector involvedObject.kind=AIMArtifact,involvedObject.name=tls-insecure \
+              -o jsonpath='{range .items[*]}{.type}{"/"}{.reason}{"\n"}{end}' |
+              grep -qx Warning/S3TLSVerificationDisabled; then
+              exit 0
+            fi
+            sleep 2
+          done
+          kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp
+          echo "S3TLSVerificationDisabled warning event was not emitted" >&2
+          exit 1
+
+  - name: Reject an untrusted private CA
+    try:
+    - apply:
+        resource:
+          apiVersion: aim.eai.amd.com/v1alpha1
+          kind: AIMArtifact
+          metadata:
+            name: tls-untrusted
+          spec:
+            sourceUri: s3://models/tls-model
+            runtimeConfigName: tls-untrusted
+            size: 1Mi
+    - assert:
+        timeout: 5m
+        resource:
+          apiVersion: aim.eai.amd.com/v1alpha1
+          kind: AIMArtifact
+          metadata:
+            name: tls-untrusted
+          status:
+            status: Failed
+    - script:
+        timeout: 1m
+        env:
+        - name: NAMESPACE
+          value: ($namespace)
+        content: |
+          set -eu
+          kubectl logs -n "$NAMESPACE" \
+            -l aim.eai.amd.com/cache.name=tls-untrusted \
+            -c model-download --prefix |
+            grep -Ei 'certificate verify failed|TLS certificate verification failed'
+
+  - name: Reject a hostname mismatch with the correct CA
+    try:
+    - apply:
+        resource:
+          apiVersion: aim.eai.amd.com/v1alpha1
+          kind: AIMArtifact
+          metadata:
+            name: tls-hostname-mismatch
+          spec:
+            sourceUri: s3://models/tls-model
+            runtimeConfigName: tls-hostname-mismatch
+            size: 1Mi
+    - assert:
+        timeout: 5m
+        resource:
+          apiVersion: aim.eai.amd.com/v1alpha1
+          kind: AIMArtifact
+          metadata:
+            name: tls-hostname-mismatch
+          status:
+            status: Failed
+    - script:
+        timeout: 1m
+        env:
+        - name: NAMESPACE
+          value: ($namespace)
+        content: |
+          set -eu
+          kubectl logs -n "$NAMESPACE" \
+            -l aim.eai.amd.com/cache.name=tls-hostname-mismatch \
+            -c model-download --prefix |
+            grep -Ei 'hostname|certificate verify failed|TLS certificate verification failed'

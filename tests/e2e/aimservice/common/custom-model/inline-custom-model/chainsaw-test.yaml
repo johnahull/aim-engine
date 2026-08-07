@@ -17,12 +17,17 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: custom-model-inline
+  labels:
+    hf-access: live
 spec:
   description: Test AIMService with inline custom model (spec.model.custom) auto-creates resources
   timeouts:
     apply: 30s
     assert: 180s
   steps:
+    - use:
+        template: ../../../../_shared/hf-token-step.yaml
+
     - name: Create service with inline custom model
       try:
         - apply:

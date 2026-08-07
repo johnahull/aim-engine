@@ -11,4 +11,10 @@ spec:
     image: amdenterpriseai/aim-qwen-qwen3-32b:0.8.5
   caching:
     mode: Dedicated
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   replicas: 1

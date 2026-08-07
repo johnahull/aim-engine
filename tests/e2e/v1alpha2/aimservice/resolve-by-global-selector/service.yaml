@@ -7,3 +7,10 @@ spec:
     selector:
       aimId: selector-test/model
       precision: fp8
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token

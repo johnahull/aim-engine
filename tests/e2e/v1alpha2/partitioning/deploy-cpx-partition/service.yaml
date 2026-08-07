@@ -10,3 +10,10 @@ metadata:
 spec:
   model:
     name: part-derived
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token

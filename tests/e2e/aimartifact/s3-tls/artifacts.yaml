@@ -1,0 +1,26 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: tls-configmap
+spec:
+  sourceUri: s3://models/tls-model
+  runtimeConfigName: tls-configmap
+  size: 1Mi
+---
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: tls-secret
+spec:
+  sourceUri: s3://models/tls-model
+  runtimeConfigName: tls-secret
+  size: 1Mi
+---
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: tls-insecure
+spec:
+  sourceUri: s3://models/tls-model
+  runtimeConfigName: tls-insecure
+  size: 1Mi

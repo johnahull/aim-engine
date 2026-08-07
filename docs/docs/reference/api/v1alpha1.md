@@ -144,7 +144,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `defaultRetentionPriority` _integer_ | DefaultRetentionPriority sets the default retention priority for AIMArtifacts<br />that do not specify one in their spec. When set, artifacts without an explicit<br />retentionPriority become eligible for automatic eviction at this priority level.<br />Lower values are evicted first. If not set, artifacts without an explicit<br />retentionPriority are never automatically evicted. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `modelDownloadImage` _string_ | ModelDownloadImage specifies the default container image for artifact<br />download and size-check jobs. Applies when an AIMArtifact does not set<br />spec.modelDownloadImage. When neither is set, the operator falls back<br />to its build-time default (matching the release version). |  | Optional: \{\} <br /> |
+| `modelDownloadImage` _string_ | ModelDownloadImage specifies the default container image for artifact<br />download and size-check jobs. Applies when an AIMArtifact does not set<br />spec.modelDownloadImage. When neither is set, the operator falls back<br />to its build-time default (matching the release version). Direct S3<br />artifacts using typed S3 configuration always use the build-time image so<br />administrator-managed credentials are not exposed to arbitrary images. |  | Optional: \{\} <br /> |
+| `s3` _[S3ConnectionConfig](#s3connectionconfig)_ | S3 configures typed connection settings for AIMArtifacts whose sourceUri<br />uses the s3:// scheme. RuntimeConfig env remains available for<br />administrator-owned infrastructure settings, while artifact-level env is<br />restricted to bounded downloader tuning. Typed fields take final<br />precedence. |  | Optional: \{\} <br /> |
 
 
 #### AIMArtifactList
@@ -204,8 +205,8 @@ _Appears in:_
 | `modelId` _string_ | ModelID is the canonical identifier in \{org\}/\{name\} format.<br />Determines the cache download path: /workspace/cache/\{modelId\}<br />For HuggingFace sources, this is typically derived from the URI (e.g., "meta-llama/Llama-3-8B").<br />For S3 sources, this must be explicitly provided (e.g., "my-team/fine-tuned-llama").<br />When not specified, derived from SourceURI for HuggingFace sources. |  | Pattern: `^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$` <br />Optional: \{\} <br /> |
 | `storageClassName` _string_ | StorageClassName specifies the storage class for the cache volume.<br />When not specified, uses the cluster default storage class. |  | Optional: \{\} <br /> |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | Size specifies the size of the cache volume |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env lists the environment variables to use for authentication when downloading models.<br />These variables are used for authentication with model registries (e.g., HuggingFace tokens). |  | Optional: \{\} <br /> |
-| `modelDownloadImage` _string_ | ModelDownloadImage specifies the container image used to download and initialize the artifact.<br />This image runs as a job to download model artifacts from the source URI to the cache volume.<br />When not specified, the controller uses its built-in default (matching the release version). |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env lists environment variables used when downloading the artifact.<br />For a typed S3 connection, artifact-level env is restricted to bounded<br />downloader tuning; configure proxy, transport, trust, and credential<br />providers through the administrator-owned RuntimeConfig. |  | Optional: \{\} <br /> |
+| `modelDownloadImage` _string_ | ModelDownloadImage specifies the container image used to download and<br />initialize the artifact. Direct S3 artifacts using typed S3 configuration<br />always use the controller's built-in image so administrator-managed<br />credentials and trust settings are not exposed to an arbitrary image.<br />When not specified, the controller uses its built-in default. |  | Optional: \{\} <br /> |
 | `downloadFilter` _[AIMDownloadFilter](#aimdownloadfilter)_ | DownloadFilter controls which files are included or excluded when downloading from HuggingFace.<br />Overrides any filter set in the runtime config's storage.downloadFilter.<br />When neither is set, subdirectory files are excluded by default (equivalent to exclude: ["*/*"]).<br />To download all files including subdirectories, set this to an empty object: downloadFilter: \{\}.<br />This field is immutable — to change the filter, recreate the artifact. |  | Optional: \{\} <br /> |
 | `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets references secrets for pulling AIM container images. |  | Optional: \{\} <br /> |
 | `retentionPriority` _integer_ | RetentionPriority marks this artifact as eligible for automatic eviction<br />when storage quota is exceeded. Lower values are evicted first.<br />Artifacts without this field are only evictable if a defaultRetentionPriority<br />is configured in the runtime config. Use the aim.eai.amd.com/eviction-protected<br />annotation to exempt an artifact from eviction entirely. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -237,7 +238,7 @@ _Appears in:_
 | `discoveredSizeBytes` _integer_ | DiscoveredSizeBytes is the model size discovered via check-size job.<br />Populated when spec.size is not provided. |  | Optional: \{\} <br /> |
 | `allocatedSize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | AllocatedSize is the actual PVC size requested (including headroom). |  | Optional: \{\} <br /> |
 | `headroomPercent` _integer_ | HeadroomPercent is the headroom percentage that was applied to the PVC size. |  | Optional: \{\} <br /> |
-| `resolvedSourceUri` _string_ | ResolvedSourceURI is the effective download source after cache resolution.<br />When the S3 artifact cache has a hit, this contains the rewritten s3:// URI.<br />When empty, spec.sourceUri is used directly. |  | Optional: \{\} <br /> |
+| `resolvedSourceUri` _string_ | DEPRECATED: ResolvedSourceURI was populated when the removed embedded<br />Hugging Face-to-S3 cache rewrote a source URI. It is retained temporarily<br />for API compatibility and is no longer populated. |  | Optional: \{\} <br /> |
 | `adapterPersistentVolumeClaim` _string_ | AdapterPersistentVolumeClaim is the name of the shared adapter disk PVC<br />provisioned for a type=model artifact that declares an adapterDisk. Empty<br />otherwise. |  | Optional: \{\} <br /> |
 | `adapterPath` _string_ | AdapterPath is the resolved on-disk directory name for a type=adapter artifact,<br />frozen at first resolution (defaults to metadata.name). This is the canonical<br />copy, mirrored into consuming services' status. |  | Optional: \{\} <br /> |
 | `resolvedParent` _[AIMResolvedReference](#aimresolvedreference)_ | ResolvedParent captures the resolved parent model artifact for a type=adapter<br />artifact, including its UID. |  | Optional: \{\} <br /> |
@@ -497,7 +498,7 @@ _Appears in:_
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `model` _[AIMModelConfig](#aimmodelconfig)_ | Model controls model creation and discovery defaults.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifact` _[AIMArtifactConfig](#aimartifactconfig)_ | Artifact controls artifact-level defaults such as eviction policy.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
-| `artifactCache` _[ArtifactCacheConfig](#artifactcacheconfig)_ | ArtifactCache configures the S3-backed artifact cache for HuggingFace models.<br />When enabled, the controller checks internal S3 before downloading from HuggingFace. |  | Optional: \{\} <br /> |
+| `artifactCache` _[ArtifactCacheConfig](#artifactcacheconfig)_ | DEPRECATED: The embedded Hugging Face-to-S3 artifact cache has been<br />removed. This field is retained temporarily for API compatibility and is<br />no longer honored by the controller. Use direct s3:// model sources with<br />Artifact.S3 connection settings instead. |  | Optional: \{\} <br /> |
 | `labelPropagation` _[AIMRuntimeConfigLabelPropagationSpec](#aimruntimeconfiglabelpropagationspec)_ | LabelPropagation controls how labels from parent AIM resources are propagated to child resources.<br />When enabled, labels matching the specified patterns are automatically copied from parent resources<br />(e.g., AIMService, AIMTemplateCache) to their child resources (e.g., Deployments, Services, PVCs).<br />This is useful for propagating organizational metadata like cost centers, team identifiers,<br />or compliance labels through the resource hierarchy. |  | Optional: \{\} <br /> |
 | `defaultStorageClassName` _string_ | DEPRECATED: Use Storage.DefaultStorageClassName instead. This field will be removed in a future version.<br />For backward compatibility, if this field is set and Storage.DefaultStorageClassName is not set,<br />the value will be automatically migrated. |  | Optional: \{\} <br /> |
 | `pvcHeadroomPercent` _integer_ | DEPRECATED: Use Storage.PVCHeadroomPercent instead. This field will be removed in a future version.<br />For backward compatibility, if this field is set and Storage.PVCHeadroomPercent is not set,<br />the value will be automatically migrated. |  | Optional: \{\} <br /> |
@@ -1363,7 +1364,7 @@ _Appears in:_
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `model` _[AIMModelConfig](#aimmodelconfig)_ | Model controls model creation and discovery defaults.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifact` _[AIMArtifactConfig](#aimartifactconfig)_ | Artifact controls artifact-level defaults such as eviction policy.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
-| `artifactCache` _[ArtifactCacheConfig](#artifactcacheconfig)_ | ArtifactCache configures the S3-backed artifact cache for HuggingFace models.<br />When enabled, the controller checks internal S3 before downloading from HuggingFace. |  | Optional: \{\} <br /> |
+| `artifactCache` _[ArtifactCacheConfig](#artifactcacheconfig)_ | DEPRECATED: The embedded Hugging Face-to-S3 artifact cache has been<br />removed. This field is retained temporarily for API compatibility and is<br />no longer honored by the controller. Use direct s3:// model sources with<br />Artifact.S3 connection settings instead. |  | Optional: \{\} <br /> |
 | `labelPropagation` _[AIMRuntimeConfigLabelPropagationSpec](#aimruntimeconfiglabelpropagationspec)_ | LabelPropagation controls how labels from parent AIM resources are propagated to child resources.<br />When enabled, labels matching the specified patterns are automatically copied from parent resources<br />(e.g., AIMService, AIMTemplateCache) to their child resources (e.g., Deployments, Services, PVCs).<br />This is useful for propagating organizational metadata like cost centers, team identifiers,<br />or compliance labels through the resource hierarchy. |  | Optional: \{\} <br /> |
 | `defaultStorageClassName` _string_ | DEPRECATED: Use Storage.DefaultStorageClassName instead. This field will be removed in a future version.<br />For backward compatibility, if this field is set and Storage.DefaultStorageClassName is not set,<br />the value will be automatically migrated. |  | Optional: \{\} <br /> |
 | `pvcHeadroomPercent` _integer_ | DEPRECATED: Use Storage.PVCHeadroomPercent instead. This field will be removed in a future version.<br />For backward compatibility, if this field is set and Storage.PVCHeadroomPercent is not set,<br />the value will be automatically migrated. |  | Optional: \{\} <br /> |
@@ -1424,7 +1425,7 @@ _Appears in:_
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `model` _[AIMModelConfig](#aimmodelconfig)_ | Model controls model creation and discovery defaults.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifact` _[AIMArtifactConfig](#aimartifactconfig)_ | Artifact controls artifact-level defaults such as eviction policy.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
-| `artifactCache` _[ArtifactCacheConfig](#artifactcacheconfig)_ | ArtifactCache configures the S3-backed artifact cache for HuggingFace models.<br />When enabled, the controller checks internal S3 before downloading from HuggingFace. |  | Optional: \{\} <br /> |
+| `artifactCache` _[ArtifactCacheConfig](#artifactcacheconfig)_ | DEPRECATED: The embedded Hugging Face-to-S3 artifact cache has been<br />removed. This field is retained temporarily for API compatibility and is<br />no longer honored by the controller. Use direct s3:// model sources with<br />Artifact.S3 connection settings instead. |  | Optional: \{\} <br /> |
 | `labelPropagation` _[AIMRuntimeConfigLabelPropagationSpec](#aimruntimeconfiglabelpropagationspec)_ | LabelPropagation controls how labels from parent AIM resources are propagated to child resources.<br />When enabled, labels matching the specified patterns are automatically copied from parent resources<br />(e.g., AIMService, AIMTemplateCache) to their child resources (e.g., Deployments, Services, PVCs).<br />This is useful for propagating organizational metadata like cost centers, team identifiers,<br />or compliance labels through the resource hierarchy. |  | Optional: \{\} <br /> |
 | `defaultStorageClassName` _string_ | DEPRECATED: Use Storage.DefaultStorageClassName instead. This field will be removed in a future version.<br />For backward compatibility, if this field is set and Storage.DefaultStorageClassName is not set,<br />the value will be automatically migrated. |  | Optional: \{\} <br /> |
 | `pvcHeadroomPercent` _integer_ | DEPRECATED: Use Storage.PVCHeadroomPercent instead. This field will be removed in a future version.<br />For backward compatibility, if this field is set and Storage.PVCHeadroomPercent is not set,<br />the value will be automatically migrated. |  | Optional: \{\} <br /> |
@@ -2374,10 +2375,11 @@ _Appears in:_
 
 
 
-ArtifactCacheConfig configures the S3-backed artifact cache.
-When enabled, the controller checks internal S3 for cached models before
-downloading from HuggingFace. On cache hit, the download source is rewritten
-to s3:// so the download job pulls from the local cache instead.
+ArtifactCacheConfig is the deprecated configuration for the removed embedded
+Hugging Face-to-S3 artifact cache. It is retained only so existing manifests
+remain valid while migrating to direct s3:// sources.
+
+Deprecated: this configuration is ignored by the controller.
 
 
 
@@ -2388,9 +2390,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled controls whether the S3 artifact cache is active. |  | Optional: \{\} <br /> |
-| `s3Uri` _string_ | S3URI is the base S3 path for cached artifacts (e.g. s3://aim-cache/artifacts). |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env provides S3 endpoint configuration for the cache bucket.<br />Injected into download jobs when the source is rewritten to s3://.<br />Typical var: AWS_ENDPOINT_URL (http:// vs https:// selects TLS automatically).<br />For an unauthenticated cache bucket, request anonymous access explicitly with<br />AIM_S3_ANONYMOUS=true (or AWS_ACCESS_KEY_ID=anonymous). Omitting the<br />credentials instead means "resolve them the normal boto3 way" (IRSA,<br />instance role, shared profile), which will fail if none is available. |  | Optional: \{\} <br /> |
+| `enabled` _boolean_ | Enabled formerly controlled whether the embedded S3 artifact cache was<br />active. It is retained for API compatibility and has no effect. |  | Optional: \{\} <br /> |
+| `s3Uri` _string_ | S3URI formerly selected the base S3 path for cached artifacts. It is<br />retained for API compatibility and has no effect. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env formerly provided S3 endpoint and credential configuration for the<br />embedded cache. It is retained for API compatibility and has no effect. |  | Optional: \{\} <br /> |
 
 
 #### DiscoveredProfileCounts
@@ -2930,5 +2932,145 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `runtimeConfigName` _string_ | Name is the name of the runtime config to use for this resource. If a runtime config with this name exists both<br />as a namespace and a cluster runtime config, the values are merged together, the namespace config taking priority<br />over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster<br />runtime config with the name `default` is used, if it exists. |  | Optional: \{\} <br /> |
+
+
+#### S3AddressingStyle
+
+_Underlying type:_ _string_
+
+S3AddressingStyle controls how the bucket is encoded in S3 HTTP requests.
+
+_Validation:_
+- Enum: [auto path virtual]
+
+_Appears in:_
+- [S3ConnectionConfig](#s3connectionconfig)
+
+| Field | Description |
+| --- | --- |
+| `auto` |  |
+| `path` |  |
+| `virtual` |  |
+
+
+#### S3AuthConfig
+
+
+
+S3AuthConfig configures S3 authentication.
+
+
+
+_Appears in:_
+- [S3ConnectionConfig](#s3connectionconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `mode` _[S3AuthMode](#s3authmode)_ | Mode selects the authentication strategy. Omitted mode defaults to chain. | chain | Enum: [chain static anonymous] <br />Optional: \{\} <br /> |
+| `credentialsSecretRef` _[S3CredentialsSecretReference](#s3credentialssecretreference)_ | CredentialsSecretRef is required for static authentication. |  | Optional: \{\} <br /> |
+
+
+#### S3AuthMode
+
+_Underlying type:_ _string_
+
+S3AuthMode selects how the S3 client obtains credentials.
+
+_Validation:_
+- Enum: [chain static anonymous]
+
+_Appears in:_
+- [S3AuthConfig](#s3authconfig)
+
+| Field | Description |
+| --- | --- |
+| `chain` | S3AuthModeChain uses the standard boto3 credential provider chain.<br /> |
+| `static` | S3AuthModeStatic loads credentials from a namespace-local Secret.<br /> |
+| `anonymous` | S3AuthModeAnonymous sends unsigned requests to a public bucket.<br /> |
+
+
+#### S3CABundleReference
+
+_Underlying type:_ _[struct{Kind string "json:\"kind\""; Name string "json:\"name\""; Key string "json:\"key\""}](#struct{kind-string-"json:\"kind\"";-name-string-"json:\"name\"";-key-string-"json:\"key\""})_
+
+S3CABundleReference identifies a PEM CA bundle in a namespace-local
+ConfigMap or Secret.
+
+
+
+_Appears in:_
+- [S3TLSConfig](#s3tlsconfig)
+
+
+
+#### S3ConnectionConfig
+
+
+
+S3ConnectionConfig provides typed S3 endpoint, authentication, addressing,
+signing, and TLS settings.
+
+
+
+_Appears in:_
+- [AIMArtifactConfig](#aimartifactconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `endpoint` _string_ | Endpoint is an optional S3-compatible API endpoint. Leave empty for AWS<br />S3. Custom endpoints must include an explicit http:// or https:// scheme. |  | Pattern: `^https?://[^ \t\r\n]+$` <br />Optional: \{\} <br /> |
+| `region` _string_ | Region is the signing region. Custom endpoints default to us-east-1 when<br />omitted; AWS S3 uses normal SDK region resolution. |  | Optional: \{\} <br /> |
+| `addressingStyle` _[S3AddressingStyle](#s3addressingstyle)_ | AddressingStyle controls path-style versus virtual-hosted bucket routing.<br />Custom endpoints default to path when omitted. |  | Enum: [auto path virtual] <br />Optional: \{\} <br /> |
+| `signatureVersion` _[S3SignatureVersion](#s3signatureversion)_ | SignatureVersion controls authenticated request signing. |  | Enum: [auto s3v4] <br />Optional: \{\} <br /> |
+| `auth` _[S3AuthConfig](#s3authconfig)_ | Auth configures credential-chain, static, or anonymous access. Omitted<br />auth defaults to the standard SDK credential provider chain. |  | Optional: \{\} <br /> |
+| `tls` _[S3TLSConfig](#s3tlsconfig)_ | TLS configures custom CA trust or the unsafe verification bypass. |  | Optional: \{\} <br /> |
+
+
+#### S3CredentialsSecretReference
+
+_Underlying type:_ _[struct{Name string "json:\"name\""; AccessKeyIDKey string "json:\"accessKeyIdKey,omitempty\""; SecretAccessKeyKey string "json:\"secretAccessKeyKey,omitempty\""; SessionTokenKey string "json:\"sessionTokenKey,omitempty\""}](#struct{name-string-"json:\"name\"";-accesskeyidkey-string-"json:\"accesskeyidkey,omitempty\"";-secretaccesskeykey-string-"json:\"secretaccesskeykey,omitempty\"";-sessiontokenkey-string-"json:\"sessiontokenkey,omitempty\""})_
+
+S3CredentialsSecretReference identifies credential keys in a
+namespace-local Secret.
+
+
+
+_Appears in:_
+- [S3AuthConfig](#s3authconfig)
+
+
+
+#### S3SignatureVersion
+
+_Underlying type:_ _string_
+
+S3SignatureVersion controls request signing for authenticated S3 requests.
+
+_Validation:_
+- Enum: [auto s3v4]
+
+_Appears in:_
+- [S3ConnectionConfig](#s3connectionconfig)
+
+| Field | Description |
+| --- | --- |
+| `auto` |  |
+| `s3v4` |  |
+
+
+#### S3TLSConfig
+
+
+
+S3TLSConfig controls TLS certificate and hostname verification.
+
+
+
+_Appears in:_
+- [S3ConnectionConfig](#s3connectionconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `caBundleRef` _[S3CABundleReference](#s3cabundlereference)_ | CABundleRef selects a namespace-local PEM CA bundle for S3 TLS<br />verification. |  | Optional: \{\} <br /> |
+| `insecureSkipVerify` _boolean_ | InsecureSkipVerify disables certificate-chain and hostname verification.<br />This is unsafe and intended only as a temporary diagnostic escape hatch. |  | Optional: \{\} <br /> |
 
 

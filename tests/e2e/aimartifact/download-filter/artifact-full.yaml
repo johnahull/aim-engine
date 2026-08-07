@@ -4,5 +4,11 @@ metadata:
   name: filter-full
 spec:
   sourceUri: hf://hf-internal-testing/tiny-random-CLIPModel
+  env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: huggingface-creds
+          key: token
   # Explicit empty filter overrides the default, downloading all files including subdirectories
   downloadFilter: {}

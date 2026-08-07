@@ -6,8 +6,12 @@ metadata:
   labels:
     # This test requires reliable network access to HuggingFace which may be slow in Kind
     requires: external-network
+    hf-access: live
 spec:
   steps:
+    - use:
+        template: ../../_shared/hf-token-step.yaml
+
     - name: Create artifact
       try:
         - apply:

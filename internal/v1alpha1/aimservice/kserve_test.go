@@ -1084,6 +1084,18 @@ func TestBuildMergedEnvVars(t *testing.T) {
 			obs:            ServiceObservation{},
 			expectContains: []string{"SERVICE_VAR", "SHARED_VAR"},
 		},
+		{
+			name: "service caching env stays out of inference",
+			service: &aimv1alpha1.AIMService{
+				Spec: aimv1alpha1.AIMServiceSpec{
+					Caching: &aimv1alpha1.AIMServiceCachingConfig{
+						Env: []corev1.EnvVar{{Name: "HF_TOKEN", Value: "download-only-token"}},
+					},
+				},
+			},
+			obs:              ServiceObservation{},
+			expectNotContain: []string{"HF_TOKEN"},
+		},
 	}
 
 	for _, tt := range tests {

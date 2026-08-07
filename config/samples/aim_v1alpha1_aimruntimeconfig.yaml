@@ -6,4 +6,19 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: aimruntimeconfig-sample
 spec:
-  # TODO(user): Add fields here
+  artifact:
+    s3:
+      endpoint: https://s3.example.com
+      region: us-east-1
+      addressingStyle: path
+      auth:
+        mode: static
+        credentialsSecretRef:
+          name: s3-credentials
+          accessKeyIdKey: accessKeyId
+          secretAccessKeyKey: secretAccessKey
+      tls:
+        caBundleRef:
+          kind: ConfigMap
+          name: s3-ca
+          key: ca.crt

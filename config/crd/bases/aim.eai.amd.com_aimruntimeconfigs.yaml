@@ -66,27 +66,156 @@ spec:
                       ModelDownloadImage specifies the default container image for artifact
                       download and size-check jobs. Applies when an AIMArtifact does not set
                       spec.modelDownloadImage. When neither is set, the operator falls back
-                      to its build-time default (matching the release version).
+                      to its build-time default (matching the release version). Direct S3
+                      artifacts using typed S3 configuration always use the build-time image so
+                      administrator-managed credentials are not exposed to arbitrary images.
                     type: string
+                  s3:
+                    description: |-
+                      S3 configures typed connection settings for AIMArtifacts whose sourceUri
+                      uses the s3:// scheme. RuntimeConfig env remains available for
+                      administrator-owned infrastructure settings, while artifact-level env is
+                      restricted to bounded downloader tuning. Typed fields take final
+                      precedence.
+                    properties:
+                      addressingStyle:
+                        description: |-
+                          AddressingStyle controls path-style versus virtual-hosted bucket routing.
+                          Custom endpoints default to path when omitted.
+                        enum:
+                        - auto
+                        - path
+                        - virtual
+                        type: string
+                      auth:
+                        description: |-
+                          Auth configures credential-chain, static, or anonymous access. Omitted
+                          auth defaults to the standard SDK credential provider chain.
+                        properties:
+                          credentialsSecretRef:
+                            description: CredentialsSecretRef is required for static
+                              authentication.
+                            properties:
+                              accessKeyIdKey:
+                                default: accessKeyId
+                                description: AccessKeyIDKey is the Secret data key
+                                  containing the access key ID.
+                                type: string
+                              name:
+                                description: Name is the Secret name in the AIMArtifact
+                                  namespace.
+                                minLength: 1
+                                type: string
+                              secretAccessKeyKey:
+                                default: secretAccessKey
+                                description: SecretAccessKeyKey is the Secret data
+                                  key containing the secret access key.
+                                type: string
+                              sessionTokenKey:
+                                description: |-
+                                  SessionTokenKey is an optional Secret data key containing a temporary
+                                  credential session token.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          mode:
+                            default: chain
+                            description: Mode selects the authentication strategy.
+                              Omitted mode defaults to chain.
+                            enum:
+                            - chain
+                            - static
+                            - anonymous
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: credentialsSecretRef is required when auth mode
+                            is static
+                          rule: '!has(self.mode) || self.mode != ''static'' || has(self.credentialsSecretRef)'
+                        - message: credentialsSecretRef may only be set when auth
+                            mode is static
+                          rule: '!has(self.credentialsSecretRef) || (has(self.mode)
+                            && self.mode == ''static'')'
+                      endpoint:
+                        description: |-
+                          Endpoint is an optional S3-compatible API endpoint. Leave empty for AWS
+                          S3. Custom endpoints must include an explicit http:// or https:// scheme.
+                        pattern: ^https?://[^ \t\r\n]+$
+                        type: string
+                      region:
+                        description: |-
+                          Region is the signing region. Custom endpoints default to us-east-1 when
+                          omitted; AWS S3 uses normal SDK region resolution.
+                        type: string
+                      signatureVersion:
+                        description: SignatureVersion controls authenticated request
+                          signing.
+                        enum:
+                        - auto
+                        - s3v4
+                        type: string
+                      tls:
+                        description: TLS configures custom CA trust or the unsafe
+                          verification bypass.
+                        properties:
+                          caBundleRef:
+                            description: |-
+                              CABundleRef selects a namespace-local PEM CA bundle for S3 TLS
+                              verification.
+                            properties:
+                              key:
+                                description: Key is the data key containing the PEM
+                                  CA bundle.
+                                minLength: 1
+                                type: string
+                              kind:
+                                description: Kind is the object kind containing the
+                                  CA bundle.
+                                enum:
+                                - ConfigMap
+                                - Secret
+                                type: string
+                              name:
+                                description: Name is the ConfigMap or Secret name
+                                  in the AIMArtifact namespace.
+                                minLength: 1
+                                type: string
+                            required:
+                            - key
+                            - kind
+                            - name
+                            type: object
+                          insecureSkipVerify:
+                            description: |-
+                              InsecureSkipVerify disables certificate-chain and hostname verification.
+                              This is unsafe and intended only as a temporary diagnostic escape hatch.
+                            type: boolean
+                        type: object
+                        x-kubernetes-validations:
+                        - message: caBundleRef and insecureSkipVerify cannot be set
+                            together
+                          rule: '!has(self.insecureSkipVerify) || !self.insecureSkipVerify
+                            || !has(self.caBundleRef)'
+                    type: object
+                    x-kubernetes-map-type: atomic
                 type: object
               artifactCache:
                 description: |-
-                  ArtifactCache configures the S3-backed artifact cache for HuggingFace models.
-                  When enabled, the controller checks internal S3 before downloading from HuggingFace.
+                  DEPRECATED: The embedded Hugging Face-to-S3 artifact cache has been
+                  removed. This field is retained temporarily for API compatibility and is
+                  no longer honored by the controller. Use direct s3:// model sources with
+                  Artifact.S3 connection settings instead.
                 properties:
                   enabled:
-                    description: Enabled controls whether the S3 artifact cache is
-                      active.
+                    description: |-
+                      Enabled formerly controlled whether the embedded S3 artifact cache was
+                      active. It is retained for API compatibility and has no effect.
                     type: boolean
                   env:
                     description: |-
-                      Env provides S3 endpoint configuration for the cache bucket.
-                      Injected into download jobs when the source is rewritten to s3://.
-                      Typical var: AWS_ENDPOINT_URL (http:// vs https:// selects TLS automatically).
-                      For an unauthenticated cache bucket, request anonymous access explicitly with
-                      AIM_S3_ANONYMOUS=true (or AWS_ACCESS_KEY_ID=anonymous). Omitting the
-                      credentials instead means "resolve them the normal boto3 way" (IRSA,
-                      instance role, shared profile), which will fail if none is available.
+                      Env formerly provided S3 endpoint and credential configuration for the
+                      embedded cache. It is retained for API compatibility and has no effect.
                     items:
                       description: EnvVar represents an environment variable present
                         in a Container.
@@ -247,8 +376,9 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                   s3Uri:
-                    description: S3URI is the base S3 path for cached artifacts (e.g.
-                      s3://aim-cache/artifacts).
+                    description: |-
+                      S3URI formerly selected the base S3 path for cached artifacts. It is
+                      retained for API compatibility and has no effect.
                     type: string
                 type: object
               defaultStorageClassName:

@@ -298,6 +298,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&v1alpha1controller.AIMRuntimeConfigReconciler{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorderFor("aimruntimeconfig"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AIMRuntimeConfig")
+		os.Exit(1)
+	}
+
+	if err := (&v1alpha1controller.AIMClusterRuntimeConfigReconciler{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorderFor("aimclusterruntimeconfig"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AIMClusterRuntimeConfig")
+		os.Exit(1)
+	}
+
 	// Setup AIMClusterModelSource controller
 	if err = (&v1alpha1controller.AIMClusterModelSourceReconciler{
 		Client:    mgr.GetClient(),

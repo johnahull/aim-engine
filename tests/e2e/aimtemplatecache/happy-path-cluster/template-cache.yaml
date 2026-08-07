@@ -7,4 +7,7 @@ spec:
   templateScope: Cluster
   env:
     - name: HF_TOKEN
-      value: my-token
+      valueFrom:
+        secretKeyRef:
+          name: huggingface-creds
+          key: token

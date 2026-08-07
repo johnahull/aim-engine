@@ -21,11 +21,15 @@ metadata:
   name: aimservice-gpu-custom-profile-engine-args
   labels:
     requires: gpu
+    hf-access: live
 spec:
   description: Verify custom profile engine args are applied to the running vLLM instance
   timeouts:
     assert: 600s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create runtime config with routing
       try:
         - apply:

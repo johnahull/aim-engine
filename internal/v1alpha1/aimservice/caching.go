@@ -130,8 +130,10 @@ func planTemplateCache(
 		templateScope = aimv1alpha1.AIMServiceTemplateScopeCluster
 	}
 
-	// Build env vars for caching: merge template env with caching-specific env and service env
-	// Priority (lowest to highest): template.Env < caching.Env < service.Env
+	// Build env vars for caching. Priority (lowest to highest):
+	// template.Env < template.caching.Env < service.caching.Env < service.Env.
+	// service.Env remains the highest-precedence legacy path, while
+	// service.caching.Env keeps download-only credentials out of inference.
 	var cacheEnv []corev1.EnvVar
 
 	// Start with template spec env (works for both namespace and cluster templates)
@@ -142,6 +144,11 @@ func planTemplateCache(
 	// Override with caching-specific env (only namespace-scoped templates support Caching config)
 	if obs.template.Value != nil && obs.template.Value.Spec.Caching != nil && len(obs.template.Value.Spec.Caching.Env) > 0 {
 		cacheEnv = utils.MergeEnvVars(cacheEnv, obs.template.Value.Spec.Caching.Env)
+	}
+
+	// Override with service download-specific env.
+	if service.Spec.Caching != nil && len(service.Spec.Caching.Env) > 0 {
+		cacheEnv = utils.MergeEnvVars(cacheEnv, service.Spec.Caching.Env)
 	}
 
 	// Override with service env (highest priority)

@@ -37,6 +37,7 @@ metadata:
     #   PATH="$PWD/hack:$PATH" chainsaw test --test-dir tests/e2e/aimservice/gpu/profile-cache-gpu-live --config tests/chainsaw/config/gpu.yaml
     requires: gpu
     needs-secret: hf_token
+    hf-access: live
 spec:
   description: Full profile cache pipeline with real MI300X inference and endpoint validation
   timeouts:
@@ -47,17 +48,8 @@ spec:
     # AcceleratorDetector DaemonSet running on each MI300X node. No manual
     # labeling step is required.
     #
-    # GLM-4.7-FP8 is a gated-ish HF repo and the XET/HF_TRANSFER backends
-    # anonymous-rate-limit hard on repos this large. Inject a real user token
-    # so the download job can authenticate. Referenced as HF_TOKEN via
-    # caching.env in profile.yaml.
-    - name: Ensure HF token secret in the test namespace
-      try:
-        - script:
-            env:
-              - name: NAMESPACE
-                value: ($namespace)
-            content: bash ../../../_shared/ensure-hf-secret.sh
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
 
     - name: Create runtime config with routing
       try:

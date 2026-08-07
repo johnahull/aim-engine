@@ -24,6 +24,7 @@ metadata:
   name: v1alpha2-custom-model-end-to-end
   labels:
     requires: gpu
+    hf-access: live
 spec:
   # Custom models that declare a base image (BYO custom-model flow) now
   # deploy on that base image directly: ResolveDerivedProfileImage skips
@@ -44,6 +45,9 @@ spec:
   timeouts:
     assert: 900s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Apply the base-image AIMModel
       try:
         - apply:

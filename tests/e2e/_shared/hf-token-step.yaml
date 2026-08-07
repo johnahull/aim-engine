@@ -1,0 +1,15 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: provision-hf-token
+spec:
+  try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: huggingface-creds
+          type: Opaque
+          stringData:
+            token: (env('HF_TOKEN'))

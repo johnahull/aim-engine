@@ -133,6 +133,48 @@ func TestComposeState_MatchesArtifactBySourceURI(t *testing.T) {
 	}
 }
 
+func TestS3ArtifactIdentityIncludesRuntimeConfig(t *testing.T) {
+	source := aimv1alpha1.AIMModelSource{
+		ModelID:   "org/model",
+		SourceURI: "s3://bucket/model",
+	}
+	first := &aimv1alpha2.AIMProfileCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "first"},
+		Spec: aimv1alpha2.AIMProfileCacheSpec{
+			RuntimeConfigRef: aimv1alpha1.RuntimeConfigRef{Name: "first-s3"},
+		},
+	}
+	second := first.DeepCopy()
+	second.Name = "second"
+	second.Spec.Name = "second-s3"
+
+	firstName, err := generateArtifactName(first, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondName, err := generateArtifactName(second, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstName == secondName {
+		t.Fatalf("different S3 runtime configs produced the same artifact name %q", firstName)
+	}
+	if s3RuntimeConfigMatches(
+		source.SourceURI,
+		first.Spec.RuntimeConfigRef,
+		second.Spec.RuntimeConfigRef,
+	) {
+		t.Fatal("S3 artifacts from different runtime configs must not be reused")
+	}
+	if !s3RuntimeConfigMatches(
+		"hf://org/model",
+		first.Spec.RuntimeConfigRef,
+		second.Spec.RuntimeConfigRef,
+	) {
+		t.Fatal("Hugging Face artifact reuse must retain existing behavior")
+	}
+}
+
 // TestComposeState_RequiresAdapterDiskSkipsDisklessArtifact verifies that a
 // cache which must serve adapters does not adopt an otherwise-matching artifact
 // that lacks an adapter disk — it falls through to MissingCaches so PlanResources

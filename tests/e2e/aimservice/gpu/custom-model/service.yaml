@@ -26,6 +26,12 @@ spec:
           # model: MI300X
   caching:
     mode: Shared
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   replicas: 1
   # Environment variables for the inference container
   # env:

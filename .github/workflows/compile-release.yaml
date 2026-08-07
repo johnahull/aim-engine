@@ -633,12 +633,6 @@ jobs:
             kubectl wait --for=condition=Established "crd/${crd}" --timeout=180s
           done
 
-      - name: Apply default cluster runtime config
-        run: kubectl apply -f hack/default-cluster-runtime-config.yaml
-
-      - name: Pre-warm S3 artifact cache
-        run: make cache-warm
-
       - name: Create DockerHub pull secret for operator image
         if: env.BUILD_IMAGES == 'true'
         # The silogen build pushes the operator image to docker.io/silogenai
@@ -751,7 +745,14 @@ jobs:
           echo "=== CRDs ==="
           kubectl get crds | grep aim || true
 
+      - name: Require Hugging Face token for live tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: test -n "${HF_TOKEN}" || { echo "HF_TOKEN repository secret is required"; exit 1; }
+
       - name: Run Chainsaw tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: make test-chainsaw-kind
 
       - name: Debug on failure

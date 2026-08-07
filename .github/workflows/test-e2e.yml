@@ -193,7 +193,7 @@ jobs:
       - name: Set per-run kubeconfig path
         run: echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slug }}" >> "${GITHUB_ENV}"
 
-      - name: Set per-run isolated Helm config
+      - name: Set per-run isolated Helm and Helmfile config
         # Per-run isolated Helm and Helmfile config. Helmfile keeps unpacked OCI
         # charts in its own cache (separate from HELM_CACHE_HOME); sharing that
         # cache between the concurrent matrix legs lets one job remove a chart
@@ -324,12 +324,6 @@ jobs:
       - name: Install CRDs
         run: kubectl apply -f dist/crds.yaml
 
-      - name: Apply default cluster runtime config
-        run: kubectl apply -f hack/default-cluster-runtime-config.yaml
-
-      - name: Pre-warm S3 artifact cache
-        run: make cache-warm
-
       - name: Install operator via Helm
         # manager.runtimeProjectionMode is set at install time (deterministic, no
         # post-install patch race) so each matrix leg's operator starts in its
@@ -411,6 +405,12 @@ jobs:
           echo "=== CRDs ==="
           kubectl get crds | grep aim || true
 
+      - name: Require Hugging Face token for trusted live tests
+        if: matrix.mode == 'Exhaustive' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: test -n "${HF_TOKEN}" || { echo "HF_TOKEN repository secret is required"; exit 1; }
+
       - name: Run Chainsaw tests
         # DEFAULT lane (Exhaustive). Builds aim-dummy, pushes it through a
         # TLS-valid localhost port-forward into the Kind-local Zot registry,
@@ -419,6 +419,8 @@ jobs:
         if: matrix.mode == 'Exhaustive'
         env:
           MISE_OVERRIDE_CONFIG_FILENAMES: "mise.toml"
+          # Empty on fork PRs; public-model tests then exercise anonymous access.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: mise exec -- make test-chainsaw-kind-zot
 
       - name: Run mode-gated Chainsaw projection tests

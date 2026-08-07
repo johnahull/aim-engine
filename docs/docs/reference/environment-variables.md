@@ -67,6 +67,13 @@ These are for testing only and should not be used in production.
 | `AIM_DEBUG_CAUSE_HANG` | Cause the downloader to hang (testing finalizer behavior). |
 | `AIM_DEBUG_CAUSE_FAILURE` | Cause immediate download failure. |
 
+For typed S3 connections, `AIMArtifact.spec.env` accepts only
+`AIM_S3_LOG_LEVEL`, `AIM_S3_MAX_WORKERS`, `AIM_S3_MAX_CONCURRENCY`, and
+`AIM_S3_MULTIPART_CHUNKSIZE_MB`, with bounded literal values. Proxy, transport,
+trust, process, and credential-provider variables must be configured in the
+administrator-owned RuntimeConfig. `AIM_S3_LOG_LEVEL` affects only downloader
+package logs; AWS SDK and HTTP wire loggers remain at `WARNING`.
+
 ## Inference Container Variables
 
 These are set on inference containers by the operator. The "Source" column lists where the value comes from in v1alpha2 (`AIMProfile`) and v1alpha1 (`AIMServiceTemplate`).

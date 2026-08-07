@@ -7,6 +7,13 @@ AIM Engine pre-downloads model artifacts to persistent volumes so inference serv
 
 This page documents the `AIMProfileCache` flow used by v1alpha2 services. For the v1alpha1 `AIMTemplateCache` shape, see [Service Templates (v1alpha1)](../legacy/service-templates.md). Both flows coexist in the same cluster.
 :::
+
+:::{admonition} Deprecated embedded S3 cache
+:class: warning
+
+`AIMRuntimeConfig.spec.artifactCache` is retained temporarily so existing manifests remain valid, but it no longer has any effect. The former behavior that rewrote `hf://` sources to an internal S3 cache has been removed. Use direct `s3://` model sources with `spec.artifact.s3` connection settings instead. The `AIMProfileCache` and `AIMTemplateCache` flows documented here are separate and remain supported.
+:::
+
 ## Resources
 
 The cache hierarchy uses three v1alpha2 resources plus the underlying Kubernetes objects:

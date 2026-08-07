@@ -16,11 +16,15 @@ metadata:
   name: aimservice-gpu-non-cached
   labels:
     requires: gpu
+    hf-access: live
 spec:
   description: Test AIMService with dedicated caching on GPU
   timeouts:
     assert: 600s
   steps:
+    - use:
+        template: ../../../../_shared/hf-token-step.yaml
+
     - name: Create runtime config with routing
       try:
         - apply:

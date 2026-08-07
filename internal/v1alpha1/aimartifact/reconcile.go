@@ -371,6 +371,15 @@ func (obs ArtifactObservation) GetComponentHealth(ctx context.Context, clientset
 	health := []controllerutils.ComponentHealth{
 		obs.mergedRuntimeConfig.ToUpstreamComponentHealth("RuntimeConfig", aimruntimeconfig.GetRuntimeConfigHealth),
 	}
+	if obs.transferConfigErr != nil {
+		health = append(health, controllerutils.ComponentHealth{
+			Component: "TransferConfiguration",
+			State:     constants.AIMStatusFailed,
+			Reason:    "DisallowedS3ArtifactEnvironment",
+			Message:   obs.transferConfigErr.Error(),
+			Errors:    []error{obs.transferConfigErr},
+		})
+	}
 
 	// Phase 1: Check-size job health (when discovering size)
 	if obs.checkSizeJob != nil {
@@ -473,14 +482,11 @@ func (result ArtifactFetchResult) DownloadJobSucceeded() bool {
 type ArtifactObservation struct {
 	ArtifactFetchResult
 
+	transferConfigErr error
+
 	// Discovered size bytes and parse error from check-size job
 	discoveredSizeBytes *int64
 	sizeParseError      error
-
-	// Cache check result: true = cache hit, false = miss or not checked
-	cacheHit bool
-	// The resolved S3 path for cache hits
-	resolvedCacheURI string
 
 	quotaDataFetched bool
 
@@ -500,27 +506,22 @@ func (r *ArtifactReconciler) ComposeState(
 ) ArtifactObservation {
 	logger := log.FromContext(ctx)
 	obs := ArtifactObservation{ArtifactFetchResult: fetch}
-
-	if isAdapter(fetch.artifact) {
-		return composeAdapterState(fetch)
+	runtimeConfig := fetch.mergedRuntimeConfig.Value
+	if strings.HasPrefix(fetch.artifact.Spec.SourceURI, "s3://") &&
+		DirectS3Connection(runtimeConfig) != nil {
+		if err := ValidateTypedS3ArtifactEnv(fetch.artifact.Spec.Env); err != nil {
+			obs.transferConfigErr = controllerutils.NewInvalidSpecError(
+				"DisallowedS3ArtifactEnvironment",
+				err.Error(),
+				err,
+			)
+		}
 	}
 
-	// Direct S3 cache check when source is hf:// and not yet resolved
-	mc := fetch.artifact
-	runtimeConfig := fetch.mergedRuntimeConfig.Value
-	if strings.HasPrefix(mc.Spec.SourceURI, "hf://") && mc.Status.ResolvedSourceURI == "" && runtimeConfig != nil {
-		filter := resolveDownloadFilter(mc, runtimeConfig)
-		resolvedURI, err := CheckCacheHit(ctx, runtimeConfig.ArtifactCache, mc.Spec.SourceURI, filter)
-		if err != nil {
-			logger.Error(err, "S3 cache check failed, proceeding without cache",
-				"namespace", mc.Namespace, "name", mc.Name)
-		} else if resolvedURI != "" {
-			obs.cacheHit = true
-			obs.resolvedCacheURI = resolvedURI
-			logger.Info("S3 cache hit for artifact",
-				"namespace", mc.Namespace, "name", mc.Name,
-				"resolvedUri", resolvedURI)
-		}
+	if isAdapter(fetch.artifact) {
+		adapterObs := composeAdapterState(fetch)
+		adapterObs.transferConfigErr = obs.transferConfigErr
+		return adapterObs
 	}
 
 	// Parse check-size output if job succeeded
@@ -544,7 +545,6 @@ func (r *ArtifactReconciler) ComposeState(
 	if fetch.namespaceArtifacts != nil && !fetch.namespaceArtifacts.HasError() &&
 		fetch.namespace != nil && !fetch.namespace.HasError() {
 
-		runtimeConfig := fetch.mergedRuntimeConfig.Value
 		headroomPercent := v1alpha1utils.GetPVCHeadroomPercent(runtimeConfig)
 
 		mc := fetch.artifact
@@ -599,17 +599,6 @@ func (r *ArtifactReconciler) ComposeState(
 	}
 
 	return obs
-}
-
-// resolveCacheEnv returns cache config env vars when the source was rewritten to S3.
-func resolveCacheEnv(mc *aimv1alpha1.AIMArtifact, runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon) []corev1.EnvVar {
-	if mc.Status.ResolvedSourceURI == "" || runtimeConfig == nil {
-		return nil
-	}
-	if cc := runtimeConfig.ArtifactCache; cc != nil {
-		return cc.Env
-	}
-	return nil
 }
 
 // planCachePvc handles the quota gate and cache PVC creation once size is known
@@ -714,6 +703,10 @@ func (r *ArtifactReconciler) PlanResources(
 		return result
 	}
 
+	if obs.transferConfigErr != nil {
+		return result
+	}
+
 	// Use runtime config if available, otherwise use nil (functions should handle defaults)
 	runtimeConfig := obs.mergedRuntimeConfig.Value
 
@@ -723,12 +716,11 @@ func (r *ArtifactReconciler) PlanResources(
 		result.ApplyWithoutOwnerRef(roleBinding)
 	}
 
-	cacheEnv := resolveCacheEnv(mc, runtimeConfig)
-
 	// Phase 1: Size discovery (when spec.size is empty)
 	if !obs.IsSizeKnown() {
 		if obs.checkSizeJob != nil && obs.checkSizeJob.IsNotFound() {
-			checkSizeJob := buildCheckSizeJob(mc, runtimeConfig, cacheEnv...)
+			checkSizeJob := buildCheckSizeJob(mc, runtimeConfig)
+			r.warnIfS3TLSVerificationDisabled(mc, runtimeConfig)
 			result.Apply(checkSizeJob)
 		}
 		// Don't proceed until size is known
@@ -744,7 +736,8 @@ func (r *ArtifactReconciler) PlanResources(
 	// Phase 3: Download job creation - size is known and PVC, rolebinding exists
 	if mc.Status.Status != constants.AIMStatusReady &&
 		obs.downloadJob != nil && obs.downloadJob.IsNotFound() && obs.roleBinding.OK() {
-		downloadJob := buildDownloadJob(mc, runtimeConfig, obs.GetEffectiveSize(), cacheEnv...)
+		downloadJob := buildDownloadJob(mc, runtimeConfig, obs.GetEffectiveSize())
+		r.warnIfS3TLSVerificationDisabled(mc, runtimeConfig)
 		result.Apply(downloadJob)
 	}
 
@@ -777,6 +770,25 @@ func (r *ArtifactReconciler) PlanResources(
 	return result
 }
 
+func (r *ArtifactReconciler) warnIfS3TLSVerificationDisabled(
+	artifact *aimv1alpha1.AIMArtifact,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+) {
+	if r.Recorder == nil || !strings.HasPrefix(artifact.Spec.SourceURI, "s3://") {
+		return
+	}
+	connection := DirectS3Connection(runtimeConfig)
+	if connection == nil || connection.TLS == nil || !connection.TLS.InsecureSkipVerify {
+		return
+	}
+	r.Recorder.Event(
+		artifact,
+		corev1.EventTypeWarning,
+		"S3TLSVerificationDisabled",
+		"S3 TLS certificate and hostname verification is disabled; use only as a temporary diagnostic measure",
+	)
+}
+
 // DecorateStatus implements StatusDecorator to update download status and add ArtifactMode to the status
 func (r *ArtifactReconciler) DecorateStatus(
 	status *aimv1alpha1.AIMArtifactStatus,
@@ -799,11 +811,6 @@ func (r *ArtifactReconciler) DecorateStatus(
 
 	mc := obs.artifact
 	runtimeConfig := obs.mergedRuntimeConfig.Value
-
-	// Persist cache resolution to status
-	if obs.cacheHit && obs.resolvedCacheURI != "" {
-		status.ResolvedSourceURI = obs.resolvedCacheURI
-	}
 
 	if obs.discoveredSizeBytes != nil {
 		status.DiscoveredSizeBytes = obs.discoveredSizeBytes

@@ -13,9 +13,13 @@ metadata:
   name: aimservice-gpu-pending-resources
   labels:
     requires: gpu
+    hf-access: live
 spec:
   description: Test AIMService surfaces pending pod state when resources are unschedulable
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create service with unschedulable GPU resources
       try:
         - apply:

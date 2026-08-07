@@ -40,6 +40,7 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimruntimeconfig"
 )
 
 const (
@@ -281,6 +282,14 @@ func matchArtifactForSource(
 			continue
 		}
 
+		if !s3RuntimeConfigMatches(
+			modelSource.SourceURI,
+			cached.Spec.RuntimeConfigRef,
+			profileCache.Spec.RuntimeConfigRef,
+		) {
+			continue
+		}
+
 		// Must precede the empty-status guard: an artifact deleted before its first
 		// status still has to be waited out, and an apply over a deletionTimestamp is
 		// accepted silently, so classifying it as missing writes to the dying object.
@@ -445,6 +454,9 @@ func generateArtifactName(pc *aimv1alpha2.AIMProfileCache, modelSource aimv1alph
 		utils.MergeEnvVars(pc.Spec.Env, modelSource.Env),
 		pc.Spec.StorageClassName,
 	}
+	if strings.HasPrefix(modelSource.SourceURI, "s3://") {
+		hashInputs = append(hashInputs, normalizedRuntimeConfigName(pc.Spec.RuntimeConfigRef))
+	}
 
 	if pc.Spec.Mode == aimv1alpha2.ProfileCacheModeDedicated {
 		hashInputs = append(hashInputs, "dedicated", pc.Name)
@@ -490,6 +502,22 @@ func ArtifactAdoptableBy(profileCache *aimv1alpha2.AIMProfileCache, artifact *ai
 
 	return profileCache.Spec.StorageClassName == "" ||
 		profileCache.Spec.StorageClassName == artifact.Spec.StorageClassName
+}
+
+func s3RuntimeConfigMatches(
+	sourceURI string,
+	left aimv1alpha1.RuntimeConfigRef,
+	right aimv1alpha1.RuntimeConfigRef,
+) bool {
+	return !strings.HasPrefix(sourceURI, "s3://") ||
+		normalizedRuntimeConfigName(left) == normalizedRuntimeConfigName(right)
+}
+
+func normalizedRuntimeConfigName(ref aimv1alpha1.RuntimeConfigRef) string {
+	if ref.Name == "" {
+		return aimruntimeconfig.DefaultRuntimeConfigName
+	}
+	return ref.Name
 }
 
 func hasOwnerReferenceUID(ownerRefs []metav1.OwnerReference, ownerUID types.UID) bool {

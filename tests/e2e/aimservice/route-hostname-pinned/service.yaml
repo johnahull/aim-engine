@@ -9,6 +9,13 @@ metadata:
 spec:
   profile:
     name: test-route-pin-profile
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   replicas: 1
   routing:
     enabled: true

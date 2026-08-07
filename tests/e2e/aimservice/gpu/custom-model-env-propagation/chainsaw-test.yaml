@@ -20,11 +20,15 @@ metadata:
   name: aimservice-gpu-custom-model-env
   labels:
     requires: gpu
+    hf-access: live
 spec:
   description: Test custom model env vars and profile settings propagate to Pod
   timeouts:
     assert: 600s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create runtime config with routing
       try:
         - apply:
@@ -130,4 +134,3 @@ spec:
                 name: test-env-propagation
               status:
                 status: Running
-

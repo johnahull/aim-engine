@@ -110,6 +110,16 @@ func (obs ArtifactObservation) getAdapterComponentHealth() []controllerutils.Com
 	health := []controllerutils.ComponentHealth{
 		obs.mergedRuntimeConfig.ToUpstreamComponentHealth("RuntimeConfig", aimruntimeconfig.GetRuntimeConfigHealth),
 	}
+	if obs.transferConfigErr != nil {
+		health = append(health, controllerutils.ComponentHealth{
+			Component:      "TransferConfiguration",
+			State:          constants.AIMStatusFailed,
+			Reason:         "DisallowedS3ArtifactEnvironment",
+			Message:        obs.transferConfigErr.Error(),
+			Errors:         []error{obs.transferConfigErr},
+			DependencyType: controllerutils.DependencyTypeUpstream,
+		})
+	}
 
 	switch {
 	case obs.parentArtifact == nil:

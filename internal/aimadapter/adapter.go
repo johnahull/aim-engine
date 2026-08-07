@@ -54,6 +54,7 @@ import (
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimartifact"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimruntimeconfig"
 )
 
 // Adapter validation / status reasons surfaced through the Adapters component.
@@ -85,10 +86,11 @@ type Observation struct {
 // per-service Job that creates/prunes the subtree and whose success signals the
 // read-only subPath mount can bind.
 type Dependencies struct {
-	AdapterArtifacts map[string]controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]
-	StagingJobs      map[string]controllerutils.FetchResult[*batchv1.Job]
-	ParentArtifact   *controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]
-	SubtreeSyncJob   controllerutils.FetchResult[*batchv1.Job]
+	AdapterArtifacts      map[string]controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]
+	AdapterRuntimeConfigs map[string]controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon]
+	StagingJobs           map[string]controllerutils.FetchResult[*batchv1.Job]
+	ParentArtifact        *controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]
+	SubtreeSyncJob        controllerutils.FetchResult[*batchv1.Job]
 
 	// ProfileSupportsAdapters reports whether the resolved profile advertises the
 	// LoRA feature. nil means unknown / not gated (e.g. the v1alpha1 pipeline has
@@ -203,15 +205,27 @@ func Fetch(
 	parentName string,
 ) Dependencies {
 	deps := Dependencies{
-		AdapterArtifacts: make(map[string]controllerutils.FetchResult[*aimv1alpha1.AIMArtifact], len(service.Spec.Adapters)),
-		StagingJobs:      make(map[string]controllerutils.FetchResult[*batchv1.Job], len(service.Spec.Adapters)),
+		AdapterArtifacts:      make(map[string]controllerutils.FetchResult[*aimv1alpha1.AIMArtifact], len(service.Spec.Adapters)),
+		AdapterRuntimeConfigs: make(map[string]controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon], len(service.Spec.Adapters)),
+		StagingJobs:           make(map[string]controllerutils.FetchResult[*batchv1.Job], len(service.Spec.Adapters)),
 	}
 
 	for i := range service.Spec.Adapters {
 		ref := service.Spec.Adapters[i]
-		deps.AdapterArtifacts[ref.Name] = controllerutils.Fetch(ctx, c,
+		artifactFetch := controllerutils.Fetch(ctx, c,
 			client.ObjectKey{Namespace: service.Namespace, Name: ref.Name},
 			&aimv1alpha1.AIMArtifact{})
+		deps.AdapterArtifacts[ref.Name] = artifactFetch
+		if artifactFetch.OK() && artifactFetch.Value != nil &&
+			strings.HasPrefix(artifactFetch.Value.Spec.SourceURI, "s3://") {
+			configName := artifactFetch.Value.GetRuntimeConfigRef().Name
+			deps.AdapterRuntimeConfigs[ref.Name] = aimruntimeconfig.FetchMergedRuntimeConfig(
+				ctx,
+				c,
+				configName,
+				service.Namespace,
+			)
+		}
 
 		jobName := StagingJobName(service, ref.Name)
 		jf := controllerutils.Fetch(ctx, c,
@@ -433,9 +447,6 @@ func specStagingProgress(adapters []Observation) (downloaded, active int) {
 }
 
 func effectiveAdapterSourceURI(artifact *aimv1alpha1.AIMArtifact) string {
-	if artifact.Status.ResolvedSourceURI != "" {
-		return artifact.Status.ResolvedSourceURI
-	}
 	return artifact.Spec.SourceURI
 }
 
@@ -552,8 +563,50 @@ func Plan(
 			continue
 		}
 
-		planResult.Apply(BuildStagingJob(service, af.Value, st.AdapterDiskPVC, ad, runtimeConfig))
+		stagingRuntimeConfig := runtimeConfig
+		if configFetch, ok := deps.AdapterRuntimeConfigs[ad.Name]; ok {
+			if configFetch.HasError() {
+				continue
+			}
+			stagingRuntimeConfig = runtimeConfigForAdapterStaging(
+				runtimeConfig,
+				configFetch.Value,
+			)
+		}
+
+		planResult.Apply(BuildStagingJob(
+			service,
+			af.Value,
+			st.AdapterDiskPVC,
+			ad,
+			stagingRuntimeConfig,
+		))
 	}
+}
+
+func runtimeConfigForAdapterStaging(
+	serviceConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+	adapterConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+) *aimv1alpha1.AIMRuntimeConfigCommon {
+	var result *aimv1alpha1.AIMRuntimeConfigCommon
+	if serviceConfig != nil {
+		result = serviceConfig.DeepCopy()
+	} else {
+		result = &aimv1alpha1.AIMRuntimeConfigCommon{}
+	}
+
+	var adapterS3 *aimv1alpha1.S3ConnectionConfig
+	if adapterConfig != nil {
+		result.Env = utils.MergeEnvVars(result.Env, adapterConfig.Env)
+		if adapterConfig.Artifact != nil {
+			adapterS3 = adapterConfig.Artifact.S3
+		}
+	}
+	if result.Artifact == nil {
+		result.Artifact = &aimv1alpha1.AIMArtifactConfig{}
+	}
+	result.Artifact.S3 = adapterS3
+	return result
 }
 
 func jobPresent(jf controllerutils.FetchResult[*batchv1.Job]) bool {
@@ -697,11 +750,31 @@ func BuildStagingJob(
 		{Name: "TMPDIR", Value: "/tmp/"},
 		{Name: "HF_HOME", Value: "/tmp/.hf"},
 	}
+	var runtimeEnv []corev1.EnvVar
 	if runtimeConfig != nil {
-		env = utils.MergeEnvVars(env, runtimeConfig.Env)
+		runtimeEnv = runtimeConfig.Env
 	}
-	// Adapter artifact env (auth tokens, AIM_DEBUG_* simulation switches) wins.
-	env = utils.MergeEnvVars(env, artifact.Spec.Env)
+	var s3Volumes []corev1.Volume
+	var s3VolumeMounts []corev1.VolumeMount
+	if strings.HasPrefix(ad.SourceURI, "s3://") {
+		connection := aimartifact.DirectS3Connection(runtimeConfig)
+		if connection != nil {
+			image = aimv1alpha1.DefaultDownloadImage
+		}
+		settings := aimartifact.ResolveS3PodSettings(
+			connection,
+			env,
+			runtimeEnv,
+			artifact.Spec.Env,
+		)
+		env = settings.Env
+		s3Volumes = settings.Volumes
+		s3VolumeMounts = settings.VolumeMounts
+	} else {
+		env = utils.MergeEnvVars(env, runtimeEnv)
+		// Adapter artifact env (auth tokens, AIM_DEBUG_* simulation switches) wins.
+		env = utils.MergeEnvVars(env, artifact.Spec.Env)
+	}
 
 	serviceLabelValue, _ := utils.SanitizeLabelValue(service.Name)
 	labels := map[string]string{
@@ -742,15 +815,15 @@ func BuildStagingJob(
 							Command:         []string{"/adapter-stage.sh"},
 							Args:            []string{ad.SourceURI},
 							Env:             env,
-							VolumeMounts: []corev1.VolumeMount{
+							VolumeMounts: append([]corev1.VolumeMount{
 								{
 									Name:      constants.VolumeAdapterDisk,
 									MountPath: constants.AIMAdapterPVCRoot,
 								},
-							},
+							}, s3VolumeMounts...),
 						},
 					},
-					Volumes: []corev1.Volume{
+					Volumes: append([]corev1.Volume{
 						{
 							Name: constants.VolumeAdapterDisk,
 							VolumeSource: corev1.VolumeSource{
@@ -759,7 +832,7 @@ func BuildStagingJob(
 								},
 							},
 						},
-					},
+					}, s3Volumes...),
 				},
 			},
 		},

@@ -27,7 +27,7 @@
 # Requires (excluded from default selectors; run explicitly — see README below):
 # - GPU cluster with an MI300X node (amd.com/gpu schedulable).
 # - longhorn (RWX) for the shared adapter disk.
-# - huggingface-creds secret (provisioned by ensure-hf-secret.sh from ~/.config/aim-engine/).
+# - HF_TOKEN exported for the shared per-test Secret setup.
 # - Docker Hub pull secret for docker.io/silogenai (DOCKER_PULL_SECRET_FILE).
 #
 # Run it:
@@ -42,6 +42,7 @@ metadata:
   labels:
     requires: gpu
     needs-secret: hf_token
+    hf-access: live
 spec:
   description: >-
     Real Llama-2-7b + LoRA through the full v1alpha2 pipeline on MI300X, proving
@@ -49,13 +50,8 @@ spec:
   timeouts:
     assert: 600s
   steps:
-    - name: Ensure HF token secret in the test namespace
-      try:
-        - script:
-            env:
-              - name: NAMESPACE
-                value: ($namespace)
-            content: bash ../../../_shared/ensure-hf-secret.sh
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
 
     - name: Create the Docker Hub pull secret for the silogenai image
       try:

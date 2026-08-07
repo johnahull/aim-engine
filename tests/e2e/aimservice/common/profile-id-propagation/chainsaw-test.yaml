@@ -15,11 +15,16 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: aimservice-profile-id-propagation
+  labels:
+    hf-access: live
 spec:
   description: Test that profileId from recommendedDeployments propagates to InferenceService
   timeouts:
     assert: 180s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create service targeting fp16 latency profile
       try:
         - apply:

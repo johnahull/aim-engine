@@ -5,6 +5,13 @@ metadata:
 spec:
   model:
     name: test-custom-profile-model
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   replicas: 1
   template:
     allowUnoptimized: true

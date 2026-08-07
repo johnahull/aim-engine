@@ -3,7 +3,7 @@
 # trigger (`envoy_cluster_external_upstream_rq_completed`) only has a series
 # to query once an HTTPRoute exists in front of the predictor. We keep this
 # config minimal (routing only -- no labelPropagation, storage or
-# artifactCache) so the test surface is exactly the routing+autoscaling
+# unrelated settings) so the test surface is exactly the routing+autoscaling
 # interaction.
 apiVersion: aim.eai.amd.com/v1alpha1
 kind: AIMRuntimeConfig

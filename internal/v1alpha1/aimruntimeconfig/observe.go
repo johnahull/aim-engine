@@ -143,6 +143,17 @@ func mergeRuntimeConfigs(priority, base *aimv1alpha1.AIMRuntimeConfigCommon) *ai
 	// We can ignore the error as we control the input and their types
 	_ = utils.MergeConfigs(&merged, *base, *priority)
 
+	// An S3 connection is a trust boundary, not a bag of independently
+	// inheritable defaults. If the namespace config supplies one, use that
+	// object in full instead of combining its endpoint, credentials, or CA with
+	// the cluster connection.
+	if priority.Artifact != nil && priority.Artifact.S3 != nil {
+		if merged.Artifact == nil {
+			merged.Artifact = &aimv1alpha1.AIMArtifactConfig{}
+		}
+		merged.Artifact.S3 = priority.Artifact.S3.DeepCopy()
+	}
+
 	return &merged
 }
 

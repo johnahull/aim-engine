@@ -29,4 +29,7 @@ spec:
     enabled: true
     env:
       - name: HF_TOKEN
-        value: profile-token-from-spec
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token

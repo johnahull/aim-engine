@@ -21,10 +21,14 @@ metadata:
   name: profile-cpu-via-model
   labels:
     requires: nfd
+    hf-access: live
 spec:
   timeouts:
     assert: 60s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Seed the copyable source AIMProfile
       try:
         - apply:
@@ -123,6 +127,13 @@ spec:
               spec:
                 profile:
                   name: $DERIVED
+                caching:
+                  env:
+                    - name: HF_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: huggingface-creds
+                          key: token
                 replicas: 1
               EOF
 

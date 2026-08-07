@@ -19,9 +19,13 @@ metadata:
   name: partitioning-deploy-cpx-partition
   labels:
     requires: gpu
+    hf-access: live
 spec:
   description: Deploy a small model onto a real CPX-NPS4 MI300X partition and reach Ready.
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Gate - at least one node advertises an MI300X CPX-NPS4 partition
       description: |
         Cheap precondition before the expensive deploy: a real partitioned node

@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`s3://` downloads against a custom `AWS_ENDPOINT_URL` now sign with Signature V4 by default**, where the previous `s3cmd`-based downloader forced Signature V2. Backends that only accept V2 need `AIM_S3_SIGNATURE_VERSION=s3`. (#158)
 
 ### Fixed
+- `AIM_S3_LOG_LEVEL=DEBUG` now increases only downloader-package verbosity; botocore, boto3, s3transfer, urllib3, and the process root remain at `WARNING`, preventing SDK wire logs from emitting signed headers or temporary credential responses.
+- S3 object transfers now verify every downloaded object's listed size before atomic publication, so truncated or partial transfers are never published.
+- Typed S3 connections now separate administrator RuntimeConfig environment from artifact-level environment. RuntimeConfig can still select infrastructure proxies and credential providers, while `AIMArtifact.spec.env` is limited to validated downloader tuning; proxy, process, trust, and credential-source overrides are rejected with `ConfigValid=False`.
 - S3 authentication failures are now classified as auth errors rather than an invalid spec. `AccessDenied` and botocore's "Unable to locate credentials" matched none of the existing patterns, so a credentials problem surfaced as `ConfigValid=False`/`InvalidSpec` and pointed at the artifact's `sourceUri`. Missing buckets and empty prefixes still classify as source problems. (#158)
 
 ## [0.2.5] - 2026-07-09

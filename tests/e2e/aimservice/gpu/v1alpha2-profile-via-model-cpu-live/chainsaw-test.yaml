@@ -20,11 +20,7 @@
 # - AcceleratorDetector labelling nodes with aim-accelerator.EPYC_ZEN5.
 # - Docker Hub pull secret (dockerhub-regcred) - provisioned by
 #   ../../../_shared/ensure-pull-secret.sh (local manifest / cluster / warn).
-# - HuggingFace token (huggingface-creds) - provisioned by
-#   ../../../_shared/ensure-hf-secret.sh (local manifest at
-#   ~/.config/aim-engine/huggingface-creds.yaml or HF_TOKEN_SECRET_FILE / a
-#   cluster secret). The image's embedded profile YAML references this secret
-#   via caching.env, so the discovered AIMProfile inherits the same env wiring.
+# - HF_TOKEN exported for the shared per-test Secret setup.
 #
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
@@ -36,6 +32,7 @@ metadata:
     # (dockerhub-regcred) plus an HF token secret. Excluded from the default
     # selectors; opt-in by pointing CHAINSAW_TEST_DIR here.
     needs-secret: dockerhub_pull_secret
+    hf-access: live
 spec:
   description: >-
     Full v1alpha2 chain: AIMModel discovery synthesizes an AIMProfile, an
@@ -51,13 +48,8 @@ spec:
                 value: ($namespace)
             content: bash ../../../_shared/ensure-pull-secret.sh
 
-    - name: Ensure HF token secret in the test namespace
-      try:
-        - script:
-            env:
-              - name: NAMESPACE
-                value: ($namespace)
-            content: bash ../../../_shared/ensure-hf-secret.sh
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
 
     - name: Create runtime config with routing
       try:
@@ -151,6 +143,13 @@ spec:
                 runtimeConfigName: v1alpha2-via-model-cpu-live
                 profile:
                   name: $DERIVED
+                caching:
+                  env:
+                    - name: HF_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: huggingface-creds
+                          key: token
                 replicas: 1
               EOF
 

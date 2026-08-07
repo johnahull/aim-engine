@@ -376,3 +376,55 @@ func TestDecorateStatus_terminatingArtifactIsNotReady(t *testing.T) {
 		t.Fatalf("status.Artifacts = %v, want the doomed artifact and its PVC withdrawn", status.Artifacts)
 	}
 }
+
+func TestS3ArtifactIdentityIncludesRuntimeConfig(t *testing.T) {
+	source := aimv1alpha1.AIMModelSource{
+		ModelID:   "org/model",
+		SourceURI: "s3://bucket/model",
+	}
+	first := &aimv1alpha1.AIMTemplateCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "first"},
+		Spec: aimv1alpha1.AIMTemplateCacheSpec{
+			RuntimeConfigRef: aimv1alpha1.RuntimeConfigRef{Name: "first-s3"},
+		},
+	}
+	second := first.DeepCopy()
+	second.Name = "second"
+	second.Spec.Name = "second-s3"
+
+	firstName, err := generateArtifactName(first, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondName, err := generateArtifactName(second, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstName == secondName {
+		t.Fatalf("different S3 runtime configs produced the same artifact name %q", firstName)
+	}
+	if s3RuntimeConfigMatches(
+		source.SourceURI,
+		first.Spec.RuntimeConfigRef,
+		second.Spec.RuntimeConfigRef,
+	) {
+		t.Fatal("S3 artifacts from different runtime configs must not be reused")
+	}
+	if !s3RuntimeConfigMatches(
+		"hf://org/model",
+		first.Spec.RuntimeConfigRef,
+		second.Spec.RuntimeConfigRef,
+	) {
+		t.Fatal("Hugging Face artifact reuse must retain existing behavior")
+	}
+}
+
+func TestS3ArtifactIdentityNormalizesDefaultRuntimeConfig(t *testing.T) {
+	if !s3RuntimeConfigMatches(
+		"s3://bucket/model",
+		aimv1alpha1.RuntimeConfigRef{},
+		aimv1alpha1.RuntimeConfigRef{Name: "default"},
+	) {
+		t.Fatal("empty and explicit default runtime config references must match")
+	}
+}

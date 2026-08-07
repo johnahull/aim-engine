@@ -20,10 +20,15 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: profile-cpu-ready
+  labels:
+    hf-access: live
 spec:
   timeouts:
     assert: 60s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create frozen CPU cluster profile with Ready status
       try:
         - apply:

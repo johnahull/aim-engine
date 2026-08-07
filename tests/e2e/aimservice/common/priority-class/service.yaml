@@ -5,4 +5,11 @@ metadata:
 spec:
   model:
     name: test-priority-class-model
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   priorityClassName: test-inference-priority

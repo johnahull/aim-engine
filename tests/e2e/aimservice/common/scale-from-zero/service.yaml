@@ -18,6 +18,13 @@ spec:
   runtimeConfigName: scale-from-zero
   model:
     name: test-scale-from-zero-model
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
 
   minReplicas: 0
   maxReplicas: 3

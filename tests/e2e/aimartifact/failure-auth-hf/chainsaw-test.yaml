@@ -4,8 +4,8 @@ kind: Test
 metadata:
   name: failure-auth-hf
   labels:
-    # This test requires reliable network access to HuggingFace which may be slow in Kind
-    requires: hf_token
+    requires: external-network
+    hf-access: anonymous
 spec:
   steps:
     - name: Create artifact

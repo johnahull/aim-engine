@@ -5,3 +5,9 @@ metadata:
 spec:
   sourceUri: hf://meta-llama-definitely-doesnt-exist/Llama-3.2-1B-Instruct
   size: 5Gi
+  env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: huggingface-creds
+          key: token

@@ -7,3 +7,6 @@ metadata:
 spec:
   sourceUri: hf://org/this-model-does-not-exist
   size: 1Gi
+  env:
+    - name: AIM_DEBUG_CAUSE_FAILURE
+      value: "true"

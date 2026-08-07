@@ -16,11 +16,15 @@ metadata:
   name: aimservice-cache-deleted-dedicated
   labels:
     requires: external-network
+    hf-access: live
 spec:
   description: Test that deleting a dedicated template cache triggers recreation and service recovery
   timeouts:
     assert: 300s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create service with dedicated caching
       try:
         - apply:

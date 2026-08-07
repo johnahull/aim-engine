@@ -17,5 +17,11 @@ spec:
           requests: 20
   caching:
     mode: Dedicated
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   template:
     allowUnoptimized: true

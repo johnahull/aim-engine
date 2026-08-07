@@ -11,11 +11,16 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: aimservice-caching-mode-dedicated
+  labels:
+    hf-access: live
 spec:
   description: Test AIMService with caching.mode Dedicated uses dedicated cache assets
   timeouts:
     assert: 300s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create model
       try:
         - apply:

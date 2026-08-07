@@ -75,13 +75,13 @@ kubectl create secret generic hf-credentials \
 ## S3-Compatible Storage
 
 Model artifacts with an `s3://` source URI are downloaded by a boto3-backed
-client (Signature V4). Validated end-to-end against MinIO; SeaweedFS is also
-exercised as the built-in artifact cache backend. Other S3-v4 backends (AWS S3,
-Cloudflare R2, Backblaze B2, GCS, Ceph RGW) use the same boto3 path and are
-expected to work — point `AWS_ENDPOINT_URL` at your gateway and provide
-credentials.
+client (Signature V4). Validated end-to-end against MinIO. Other S3-v4 backends
+(AWS S3, Cloudflare R2, Backblaze B2, GCS, Ceph RGW) use the same boto3 path
+and are expected to work with the corresponding endpoint and credentials.
 
-Configure credentials via environment variables:
+Prefer the typed S3 configuration. It keeps credentials out of Pod environment
+variables, mounts custom trust roots consistently into size-check and download
+Jobs, and applies the connection only to `s3://` artifacts:
 
 ```yaml
 apiVersion: aim.eai.amd.com/v1alpha1
@@ -90,41 +90,58 @@ metadata:
   name: default
   namespace: ml-team
 spec:
-  env:
-    - name: AWS_ACCESS_KEY_ID
-      valueFrom:
-        secretKeyRef:
+  artifact:
+    s3:
+      endpoint: https://s3.example.com
+      region: us-east-1
+      addressingStyle: path
+      auth:
+        mode: static
+        credentialsSecretRef:
           name: s3-credentials
-          key: access-key
-    - name: AWS_SECRET_ACCESS_KEY
-      valueFrom:
-        secretKeyRef:
-          name: s3-credentials
-          key: secret-key
-    - name: AWS_ENDPOINT_URL
-      value: "https://s3.example.com"
+          accessKeyIdKey: accessKeyId
+          secretAccessKeyKey: secretAccessKey
+      tls:
+        caBundleRef:
+          kind: ConfigMap
+          name: s3-ca
+          key: ca.crt
 ```
 
-!!! warning "Where to put download credentials"
-    `AIMRuntimeConfig.spec.env` is applied to **both** the download Job and the
-    inference pod. For credentials that should only reach the downloader, prefer
-    a download-only channel: `AIMArtifact.spec.env`, an `AIMModel` model source's
-    `env`, or (v1alpha2) `AIMProfile.spec.caching.env`. An `AIMService.spec.env`
-    is applied to the inference pod only and does **not** reach the downloader.
+Both references are namespace-local. The Secret values are mounted as files and
+never copied into the Job specification:
+
+```bash
+kubectl create secret generic s3-credentials \
+  --from-literal=accessKeyId='ACCESS_KEY' \
+  --from-literal=secretAccessKey='SECRET_KEY' \
+  -n ml-team
+
+kubectl create configmap s3-ca \
+  --from-file=ca.crt=/path/to/internal-ca.pem \
+  -n ml-team
+```
+
+The namespace-level S3 object replaces the cluster-level object as one complete
+connection. Endpoint, credentials, and CA settings are never field-merged
+across those trust boundaries.
 
 ### How S3 credentials are resolved
 
-The downloader selects one of three modes:
+Typed `auth.mode` selects one of three modes:
 
-| Mode | Selected when | Behaviour |
-| --- | --- | --- |
-| Static keys | `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` both hold real values | Signs with those keys, plus `AWS_SESSION_TOKEN` if set. |
-| Anonymous | `AIM_S3_ANONYMOUS=true`, or either key is set to `anonymous` or to an empty string | Sends unsigned requests. Use for public buckets. |
-| Credential chain | Neither key is set | Hands resolution to boto3: web identity (IRSA), EKS Pod Identity, ECS task role, EC2 instance profile, shared profile, credential process. |
+| Mode | Behaviour |
+| --- | --- |
+| `static` | Mounts the referenced Secret and signs with those keys, plus the optional session token. |
+| `anonymous` | Sends unsigned requests. Use only for public buckets. |
+| `chain` | Uses boto3's standard provider chain: web identity (IRSA), EKS Pod Identity, ECS task role, EC2 instance profile, shared profile, or credential process. This is the default. |
 
-Setting only one of the two keys is rejected up front, as is combining a real
-value with an `anonymous` sentinel, so a partial configuration fails with a clear
-message instead of a signing error on the first request.
+Existing environment-based configuration remains supported. When no typed
+connection is present, setting both `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` selects static credentials,
+`AIM_S3_ANONYMOUS=true` selects anonymous access, and leaving both keys absent
+selects the credential chain. Typed fields take precedence over corresponding
+legacy variables.
 
 !!! warning "Absent credentials do not mean anonymous"
     Leaving both key variables unset means "resolve credentials the normal way",
@@ -132,8 +149,8 @@ message instead of a signing error on the first request.
     Pod Identity and instance profiles all deliberately leave
     `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` empty. Treating that as a
     public bucket would send unsigned requests and turn a private bucket into an
-    opaque `403 AccessDenied`. To read a public bucket, say so explicitly with
-    `AIM_S3_ANONYMOUS=true`.
+    opaque `403 AccessDenied`. To read a public bucket, explicitly set
+    `auth.mode: anonymous` (or `AIM_S3_ANONYMOUS=true` for legacy configuration).
 
 !!! note "Role-based credentials need a ServiceAccount you can annotate"
     Chain mode resolves whatever the download Pod's environment offers. Download
@@ -145,8 +162,16 @@ message instead of a signing error on the first request.
 
 ### S3 control knobs
 
-The downloader recognises these optional environment variables, set on the same
-(download-only) channel as the credentials, for backends that need tuning:
+Typed connection fields cover endpoint, region, authentication, addressing,
+signing, and TLS. The downloader also recognises these optional environment
+variables for legacy configuration and transfer tuning:
+
+When a typed S3 connection is active, transport, proxy, trust, and credential
+provider variables must come from the administrator-owned RuntimeConfig.
+Artifact-level `spec.env` accepts only the bounded `AIM_S3_LOG_LEVEL`,
+`AIM_S3_MAX_WORKERS`, `AIM_S3_MAX_CONCURRENCY`, and
+`AIM_S3_MULTIPART_CHUNKSIZE_MB` tuning variables. Other artifact variables are
+reported as an invalid configuration rather than copied into the transfer Job.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -154,22 +179,31 @@ The downloader recognises these optional environment variables, set on the same
 | `AWS_REGION` / `AWS_DEFAULT_REGION` | `us-east-1` when a custom endpoint is set, otherwise left to boto3 | Signing region (most non-AWS backends ignore it; R2 aliases `us-east-1` → `auto`). On real AWS it is left unset so the bucket's region is discovered rather than pinned wrong. |
 | `AIM_S3_ADDRESSING_STYLE` | `path` when a custom endpoint is set, else `auto` | Force `path`, `virtual`, or `auto` bucket addressing. |
 | `AIM_S3_SIGNATURE_VERSION` | boto3 default (V4) | Override the signing version (e.g. `s3v4`). Rarely needed. |
-| `AIM_S3_MAX_WORKERS` | `8` | Number of objects downloaded in parallel. |
-| `AIM_S3_MAX_CONCURRENCY` | boto3 default (`10`) | Multipart threads per object (throughput for large files). |
-| `AIM_S3_MULTIPART_CHUNKSIZE_MB` | boto3 default (`8`) | Multipart chunk size in MiB. |
+| `AWS_CA_BUNDLE` | botocore's default CA bundle | Path to a PEM CA bundle. Prefer `artifact.s3.tls.caBundleRef`, which mounts it automatically. |
+| `AIM_S3_INSECURE_SKIP_VERIFY` | `false` | Disable certificate and hostname verification. Prefer the typed field when this temporary diagnostic bypass is unavoidable. |
+| `AIM_S3_LOG_LEVEL` | `INFO` | Downloader-only verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`). Botocore, boto3, s3transfer, and urllib3 remain at `WARNING`. |
+| `AIM_S3_MAX_WORKERS` | `8` | Number of objects downloaded in parallel; artifact values must be integers from 1 through 64. |
+| `AIM_S3_MAX_CONCURRENCY` | boto3 default (`10`) | Multipart threads per object; artifact values must be integers from 1 through 64. |
+| `AIM_S3_MULTIPART_CHUNKSIZE_MB` | boto3 default (`8`) | Multipart chunk size in MiB; artifact values must be integers from 5 through 5120. |
 
 !!! note "Effective connection fan-out"
     Total in-flight connections is roughly `AIM_S3_MAX_WORKERS` × `AIM_S3_MAX_CONCURRENCY` (default 8 × 10 = 80). On small/constrained gateways (single-node MinIO, on-prem RGW) consider lowering one of these.
 
 !!! tip "Keep secrets out of the manifest"
-    Reference the secret with `valueFrom.secretKeyRef` (as in the example above)
-    rather than inlining the value, so it never appears in the resource. Any of
-    the credential variables also accept a `_FILE` suffix pointing at a mounted
-    file — e.g. `AWS_SECRET_ACCESS_KEY_FILE=/var/run/secrets/s3/secret-key` —
-    which the downloader reads and strips, keeping the secret out of the Pod
-    environment entirely. Note that the AIM CRDs offer no way to mount a volume
-    into a download Job today, so `_FILE` is only usable where something else in
-    your platform provides the mount.
+    Use `artifact.s3.auth.credentialsSecretRef` for static credentials. AIM
+    Engine mounts the selected keys and configures the downloader through
+    `_FILE` variables, keeping values out of both the resource and the process
+    environment.
+
+S3 downloads bind each transfer to object metadata collected before the body is
+written. The downloader verifies the resulting file size before its atomic
+rename, so a truncated or partial transfer is never published.
+
+!!! danger "Disabling TLS verification"
+    `insecureSkipVerify: true` disables both certificate-chain and hostname
+    verification. It is mutually exclusive with `caBundleRef`, emits a warning
+    event, and should only be used briefly while diagnosing a certificate
+    problem.
 
 ## Credential Scope
 

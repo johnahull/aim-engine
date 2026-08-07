@@ -337,6 +337,14 @@ func matchArtifactForSource(
 			continue
 		}
 
+		if !s3RuntimeConfigMatches(
+			modelSource.SourceURI,
+			cached.Spec.RuntimeConfigRef,
+			templateCache.Spec.RuntimeConfigRef,
+		) {
+			continue
+		}
+
 		// Must precede the empty-status guard: an artifact deleted before its first
 		// status still has to be waited out, and an apply over a deletionTimestamp is
 		// accepted silently, so classifying it as missing writes to the dying object.
@@ -432,6 +440,9 @@ func generateArtifactName(tc *aimv1alpha1.AIMTemplateCache, modelSource aimv1alp
 		utils.MergeEnvVars(tc.Spec.Env, modelSource.Env),
 		tc.Spec.StorageClassName,
 	}
+	if strings.HasPrefix(modelSource.SourceURI, "s3://") {
+		hashInputs = append(hashInputs, normalizedRuntimeConfigName(tc.Spec.RuntimeConfigRef))
+	}
 
 	if tc.Spec.Mode == aimv1alpha1.TemplateCacheModeDedicated {
 		hashInputs = append(hashInputs, "dedicated", tc.Name)
@@ -470,6 +481,22 @@ func ArtifactAdoptableBy(templateCache *aimv1alpha1.AIMTemplateCache, artifact *
 
 	return templateCache.Spec.StorageClassName == "" ||
 		templateCache.Spec.StorageClassName == artifact.Spec.StorageClassName
+}
+
+func s3RuntimeConfigMatches(
+	sourceURI string,
+	left aimv1alpha1.RuntimeConfigRef,
+	right aimv1alpha1.RuntimeConfigRef,
+) bool {
+	return !strings.HasPrefix(sourceURI, "s3://") ||
+		normalizedRuntimeConfigName(left) == normalizedRuntimeConfigName(right)
+}
+
+func normalizedRuntimeConfigName(ref aimv1alpha1.RuntimeConfigRef) string {
+	if ref.Name == "" {
+		return aimruntimeconfig.DefaultRuntimeConfigName
+	}
+	return ref.Name
 }
 
 func hasOwnerReferenceUID(ownerRefs []metav1.OwnerReference, ownerUID types.UID) bool {

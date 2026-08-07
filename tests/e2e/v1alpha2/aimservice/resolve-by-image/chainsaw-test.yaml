@@ -22,6 +22,8 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: v1alpha2-aimservice-resolve-by-image
+  labels:
+    hf-access: live
 spec:
   description: |
     Authors an AIMService with spec.model.image + the reconciler-pipeline
@@ -33,6 +35,9 @@ spec:
   timeouts:
     assert: 300s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Apply the image-shape service with the reconciler-pipeline annotation
       try:
         - apply:

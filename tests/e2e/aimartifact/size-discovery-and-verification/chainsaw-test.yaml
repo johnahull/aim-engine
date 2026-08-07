@@ -27,8 +27,12 @@ metadata:
   name: size-discovery-and-verification
   labels:
     requires: longhorn
+    hf-access: live
 spec:
   steps:
+    - use:
+        template: ../../_shared/hf-token-step.yaml
+
     # ========================================
     # Phase 1: Setup MinIO
     # ========================================

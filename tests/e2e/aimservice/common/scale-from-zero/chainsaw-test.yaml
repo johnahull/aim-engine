@@ -57,11 +57,16 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: aimservice-scale-from-zero
+  labels:
+    hf-access: live
 spec:
   description: Test AIMService scale-from-zero with routing-backed activation trigger and end-to-end HTTP request
   timeouts:
     assert: 300s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create routing-enabled runtime config
       try:
         - apply:

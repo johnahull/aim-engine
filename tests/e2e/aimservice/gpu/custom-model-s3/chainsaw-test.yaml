@@ -15,11 +15,15 @@ metadata:
   name: aimservice-gpu-custom-model-s3
   labels:
     requires: gpu
+    hf-access: live
 spec:
   description: Test GPU AIMService with S3-backed model source
   timeouts:
     assert: 900s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create runtime config with routing
       try:
         - apply:

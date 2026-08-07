@@ -1,0 +1,41 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: s3-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: s3-root-ca
+spec:
+  secretName: s3-root-ca
+  commonName: AIM Engine S3 Test Root
+  isCA: true
+  issuerRef:
+    name: s3-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: s3-ca
+spec:
+  ca:
+    secretName: s3-root-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: minio-tls
+spec:
+  secretName: minio-tls
+  issuerRef:
+    name: s3-ca
+    kind: Issuer
+  dnsNames:
+  - minio-admin
+  - (join('.', ['minio-admin', $namespace]))
+  - (join('.', ['minio-admin', $namespace, 'svc']))
+  - (join('.', ['minio-admin', $namespace, 'svc', 'cluster', 'local']))

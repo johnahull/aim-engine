@@ -126,8 +126,10 @@ spec:
                   rule: self == oldSelf
               env:
                 description: |-
-                  Env lists the environment variables to use for authentication when downloading models.
-                  These variables are used for authentication with model registries (e.g., HuggingFace tokens).
+                  Env lists environment variables used when downloading the artifact.
+                  For a typed S3 connection, artifact-level env is restricted to bounded
+                  downloader tuning; configure proxy, transport, trust, and credential
+                  providers through the administrator-owned RuntimeConfig.
                 items:
                   description: EnvVar represents an environment variable present in
                     a Container.
@@ -308,9 +310,11 @@ spec:
                 type: array
               modelDownloadImage:
                 description: |-
-                  ModelDownloadImage specifies the container image used to download and initialize the artifact.
-                  This image runs as a job to download model artifacts from the source URI to the cache volume.
-                  When not specified, the controller uses its built-in default (matching the release version).
+                  ModelDownloadImage specifies the container image used to download and
+                  initialize the artifact. Direct S3 artifacts using typed S3 configuration
+                  always use the controller's built-in image so administrator-managed
+                  credentials and trust settings are not exposed to an arbitrary image.
+                  When not specified, the controller uses its built-in default.
                 type: string
               modelId:
                 description: |-
@@ -609,9 +613,9 @@ spec:
                 type: object
               resolvedSourceUri:
                 description: |-
-                  ResolvedSourceURI is the effective download source after cache resolution.
-                  When the S3 artifact cache has a hit, this contains the rewritten s3:// URI.
-                  When empty, spec.sourceUri is used directly.
+                  DEPRECATED: ResolvedSourceURI was populated when the removed embedded
+                  Hugging Face-to-S3 cache rewrote a source URI. It is retained temporarily
+                  for API compatibility and is no longer populated.
                 type: string
               status:
                 default: Pending

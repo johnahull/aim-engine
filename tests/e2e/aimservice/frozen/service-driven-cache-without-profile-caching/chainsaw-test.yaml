@@ -22,6 +22,8 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: service-driven-cache-without-profile-caching
+  labels:
+    hf-access: live
 spec:
   description: |
     Pins Path B service-driven cache materialisation when the referenced
@@ -32,6 +34,9 @@ spec:
   timeouts:
     assert: 60s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create frozen namespace AIMProfile (Ready, modelSources, no caching)
       try:
         - apply:

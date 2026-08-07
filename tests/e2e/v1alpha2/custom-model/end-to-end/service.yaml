@@ -20,3 +20,10 @@ spec:
       # which excludes the derived general profile; lower the floor to
       # unoptimized so the general candidate is eligible.
       minimumType: unoptimized
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token

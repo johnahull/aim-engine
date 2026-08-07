@@ -18,11 +18,15 @@ metadata:
   name: aimservice-label-propagation
   labels:
     requires: external-network
+    hf-access: live
 spec:
   description: Test AIMService label propagation to child resources via RuntimeConfig
   timeouts:
     assert: 3m
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Create runtime config with label propagation and routing
       try:
         - apply:

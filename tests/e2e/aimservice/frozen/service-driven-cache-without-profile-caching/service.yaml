@@ -9,4 +9,11 @@ metadata:
 spec:
   profile:
     name: test-no-profile-caching
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   replicas: 1

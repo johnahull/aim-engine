@@ -228,8 +228,6 @@ kind-create: manifests ## Create kind cluster with all dependencies for local de
 	@echo "Installing RBAC..."
 	@kustomize build config/local-dev-kind | kubectl apply -f - --server-side
 	@$(MAKE) seaweedfs-init-bucket
-	@$(MAKE) seaweedfs-default-config
-	@$(MAKE) cache-warm
 	@# Publish aim-dummy to Zot for operator-side metadata discovery and load the
 	@# exact in-cluster references into Kind for workload pods.
 	@$(MAKE) aim-dummy-zot-push KIND_CLUSTER=aim-engine
@@ -244,35 +242,12 @@ seaweedfs-init-bucket: ## Create the aim-cache S3 bucket in SeaweedFS.
 		--image=alpine/curl:latest -- \
 		sh -c 'curl -sf -X PUT http://seaweedfs-s3.seaweedfs-system:8333/aim-cache -o /dev/null -w "bucket created (HTTP %{http_code})\n"' || true
 
-.PHONY: seaweedfs-default-config
-seaweedfs-default-config: ## Apply default AIMClusterRuntimeConfig with S3 cache enabled.
-	@echo "Applying default AIMClusterRuntimeConfig..."
-	@kubectl apply -f hack/default-cluster-runtime-config.yaml
-
 .PHONY: install-scale-from-zero-prereq
 install-scale-from-zero-prereq: ## Install kgateway-metrics-collector (scale-from-zero activation prereq).
 	@echo "Installing scale-from-zero prereq (kgateway-metrics-collector)..."
 	@kubectl apply -f config/prereqs/scale-from-zero/kgateway-metrics-collector.yaml
 	@echo "Waiting for kgateway-metrics-collector deployment..."
 	@kubectl -n keda rollout status deploy/kgateway-metrics-collector --timeout=180s
-
-.PHONY: cache-warm
-cache-warm: ## Pre-warm the S3 artifact cache with test models.
-	@echo "Pre-warming S3 artifact cache..."
-	@kubectl delete job cache-warm -n aim-system --ignore-not-found
-	@kubectl apply -f hack/cache-warm-job.yaml
-	@if ! kubectl wait --for=condition=complete job/cache-warm -n aim-system --timeout=10m; then \
-		echo "::group::cache-warm job failed - diagnostics"; \
-		echo "=== job ==="; kubectl get job cache-warm -n aim-system -o wide || true; \
-		echo "=== pods ==="; kubectl get pods -n aim-system -l job-name=cache-warm -o wide || true; \
-		echo "=== describe pods ==="; kubectl describe pods -n aim-system -l job-name=cache-warm || true; \
-		echo "=== downloader (initContainer) logs ==="; kubectl logs -n aim-system -l job-name=cache-warm -c downloader --tail=300 --prefix || true; \
-		echo "=== uploader logs ==="; kubectl logs -n aim-system -l job-name=cache-warm -c uploader --tail=200 --prefix || true; \
-		echo "=== recent aim-system events ==="; kubectl get events -n aim-system --sort-by=.lastTimestamp | tail -40 || true; \
-		echo "::endgroup::"; \
-		exit 1; \
-	fi
-	@echo "S3 cache warm complete."
 
 .PHONY: kind-zot-inotify-limit
 kind-zot-inotify-limit: ## Ensure Kind's host kernel has enough inotify instances for Zot.
@@ -343,10 +318,9 @@ CHAINSAW_DEBUG_DIR := .tmp/chainsaw-debug
 CHAINSAW_CONFIG_DIR := tests/chainsaw/config
 
 # needs-secret tags tests with environmental credential prerequisites
-# (HF token in aim-system, Docker Hub pull secret for docker.io/silogenai, etc.)
-# that aren't universally provisioned. Excluded from both default selectors;
-# opt-in by overriding the selector or pointing CHAINSAW_TEST_DIR at the
-# specific test directory.
+# (HF token, Docker Hub pull secret for docker.io/silogenai, etc.)
+# that aren't universally provisioned. Excluded from the default selectors;
+# opt in through a dedicated target or by overriding the selector.
 CHAINSAW_NEEDS_SECRET_EXCLUDE := needs-secret notin (hf_token,dockerhub_pull_secret)
 
 # reduced-mode gates the eager-runtime-projection-mode tests, which only pass
@@ -375,21 +349,28 @@ CHAINSAW_PROJECTION_MODE_DIR := tests/e2e/v1alpha2/runtime-projection
 # as NVIDIA coverage grows.
 
 # Kind environment: no real accelerators, so exclude every GPU-vendor value plus
-# longhorn storage, HF-token, and NFD-gated tests. Expensive / operator-gated
+# longhorn storage and NFD-gated tests. Expensive / operator-gated
 # tests (e.g. multi-hundred-GiB live model downloads) gate themselves via one of
 # these `requires` values rather than a separate tier axis.
-CHAINSAW_SELECTOR_KIND := requires notin (gpu,gpu-amd,gpu-nvidia,longhorn,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+CHAINSAW_SELECTOR_KIND := requires notin (gpu,gpu-amd,gpu-nvidia,longhorn,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
 
 # AMD GPU environment: runs AMD GPU tests (gpu, gpu-amd) end-to-end. Excludes
-# Kind-only tests (mocked node labels), NVIDIA-only tests, and HF-token/NFD-gated
+# Kind-only tests (mocked node labels), NVIDIA-only tests, and NFD-gated
 # tests. Run an excluded test explicitly by invoking chainsaw directly against
 # its dir without a selector.
-CHAINSAW_SELECTOR_GPU := requires notin (kind,gpu-nvidia,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+CHAINSAW_SELECTOR_GPU := requires notin (kind,gpu-nvidia,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
 
 # NVIDIA GPU environment: runs only NVIDIA GPU tests (gpu-nvidia). Excludes
 # Kind-only tests and the AMD GPU values (bare gpu is AMD-built today), plus
-# HF-token/NFD-gated tests.
-CHAINSAW_SELECTOR_NVIDIA := requires notin (kind,gpu,gpu-amd,hf_token,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+# NFD-gated tests.
+CHAINSAW_SELECTOR_NVIDIA := requires notin (kind,gpu,gpu-amd,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+
+# Dedicated authenticated lane for tests whose model/size makes a token a hard
+# prerequisite. Normal trusted suites also receive HF_TOKEN and exercise all
+# other hf-access=live tests.
+CHAINSAW_HF_SELECTOR_KIND := needs-secret in (hf_token),requires notin (gpu,gpu-amd,gpu-nvidia,longhorn,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE))
+CHAINSAW_HF_SELECTOR_GPU := needs-secret in (hf_token),requires notin (kind,gpu-nvidia,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE))
+CHAINSAW_HF_SELECTOR_NVIDIA := needs-secret in (hf_token),requires notin (kind,gpu,gpu-amd,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE))
 
 # Select appropriate config based on ENV and CI detection
 # CI is detected via CI env var (set by GitHub Actions, GitLab CI, etc.)
@@ -402,9 +383,14 @@ CHAINSAW_ENV_CONFIG := $(if $(filter nvidia,$(ENV)),$(CHAINSAW_CONFIG_NVIDIA),$(
 # Select appropriate selector and parallelism based on ENV
 CHAINSAW_ENV_SELECTOR := $(if $(filter nvidia,$(ENV)),--selector "$(CHAINSAW_SELECTOR_NVIDIA)",$(if $(filter gpu,$(ENV)),--selector "$(CHAINSAW_SELECTOR_GPU)",$(if $(filter kind,$(ENV)),--selector "$(CHAINSAW_SELECTOR_KIND)",)))
 CHAINSAW_ENV_PARALLEL := $(if $(filter kind,$(ENV)),--parallel 4,)
+CHAINSAW_HF_ENV_SELECTOR := $(if $(filter nvidia,$(ENV)),--selector "$(CHAINSAW_HF_SELECTOR_NVIDIA)",$(if $(filter gpu,$(ENV)),--selector "$(CHAINSAW_HF_SELECTOR_GPU)",--selector "$(CHAINSAW_HF_SELECTOR_KIND)"))
+
+.PHONY: check-chainsaw-hf
+check-chainsaw-hf: ## Validate Hugging Face Chainsaw labels, setup, and secret references.
+	@hack/check-chainsaw-hf.sh
 
 .PHONY: test-chainsaw
-test-chainsaw: ## Run chainsaw e2e tests (selector based on ENV). Pass CHAINSAW_ARGS for additional options.
+test-chainsaw: check-chainsaw-hf ## Run chainsaw e2e tests (selector based on ENV). Pass CHAINSAW_ARGS for additional options.
 	@echo "Environment: $(ENV) (context: $(CURRENT_CONTEXT))"
 	@echo "Config: $(CHAINSAW_ENV_CONFIG)"
 	@echo "Selector: $(if $(filter nvidia,$(ENV)),$(CHAINSAW_SELECTOR_NVIDIA),$(if $(filter gpu,$(ENV)),$(CHAINSAW_SELECTOR_GPU),$(CHAINSAW_SELECTOR_KIND)))"
@@ -418,6 +404,21 @@ test-chainsaw: ## Run chainsaw e2e tests (selector based on ENV). Pass CHAINSAW_
 .PHONY: test-chainsaw-kind
 test-chainsaw-kind: ## Run chainsaw e2e tests for KIND environment
 	$(MAKE) test-chainsaw ENV=kind
+
+.PHONY: test-chainsaw-hf
+test-chainsaw-hf: check-chainsaw-hf ## Run authenticated live-HuggingFace tests; requires HF_TOKEN.
+	@if [ -z "$${HF_TOKEN:-}" ]; then echo "HF_TOKEN must be set"; exit 1; fi
+	@echo "Environment: $(ENV) (context: $(CURRENT_CONTEXT))"
+	@echo "Config: $(CHAINSAW_ENV_CONFIG)"
+	@echo "Selector: $(if $(filter nvidia,$(ENV)),$(CHAINSAW_HF_SELECTOR_NVIDIA),$(if $(filter gpu,$(ENV)),$(CHAINSAW_HF_SELECTOR_GPU),$(CHAINSAW_HF_SELECTOR_KIND)))"
+	@mkdir -p $(CHAINSAW_REPORT_DIR) $(CHAINSAW_DEBUG_DIR)
+	@CHAINSAW_DEBUG_DIR="$(CURDIR)/$(CHAINSAW_DEBUG_DIR)" PATH="$(CURDIR)/hack:$(PATH)" chainsaw test --full-name \
+		--test-dir $(CHAINSAW_TEST_DIR) \
+		--config $(CHAINSAW_ENV_CONFIG) \
+		$(CHAINSAW_HF_ENV_SELECTOR) \
+		$(CHAINSAW_ENV_PARALLEL) \
+		--report-format JSON --report-name chainsaw-hf-report --report-path $(CHAINSAW_REPORT_DIR) \
+		$(CHAINSAW_ARGS)
 
 .PHONY: test-chainsaw-projection-mode
 test-chainsaw-projection-mode: ## Run ONLY the mode-gated projection tests (MODE=Reduced) against an operator ALREADY running in that mode. Inverse of the default lanes' CHAINSAW_PROJECTION_MODE_EXCLUDE: the selector INCLUDES requires in (<mode>-mode). Set the mode first via the Helm value manager.runtimeProjectionMode or `make set-projection-mode MODE=...`.
@@ -573,8 +574,6 @@ vcluster-create: ## Create personal vcluster, install dependencies, and connect.
 	@echo "Installing RBAC..."
 	@kustomize build config/local-dev-kind | kubectl apply -f - --server-side
 	@$(MAKE) seaweedfs-init-bucket
-	@$(MAKE) seaweedfs-default-config
-	@$(MAKE) cache-warm
 	@echo "vCluster '$(VCLUSTER_NAME)' ready."
 
 .PHONY: vcluster-delete

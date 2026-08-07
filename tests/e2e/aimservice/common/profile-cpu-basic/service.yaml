@@ -7,4 +7,11 @@ metadata:
 spec:
   profile:
     name: test-cpu-basic-profile
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   replicas: 1

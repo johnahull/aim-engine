@@ -9,6 +9,13 @@ metadata:
 spec:
   profile:
     name: overlay-img-seed
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   profileOverrides:
     modelSources:
       - modelId: user/finetune-weights

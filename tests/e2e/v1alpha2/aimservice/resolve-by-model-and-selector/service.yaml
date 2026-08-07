@@ -14,3 +14,10 @@ spec:
       # would exclude the general profile; "any" disables the floor so the
       # precision-narrowing axis under test is not masked by it.
       minimumType: any
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token

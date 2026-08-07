@@ -143,9 +143,19 @@ type AIMArtifactConfig struct {
 	// ModelDownloadImage specifies the default container image for artifact
 	// download and size-check jobs. Applies when an AIMArtifact does not set
 	// spec.modelDownloadImage. When neither is set, the operator falls back
-	// to its build-time default (matching the release version).
+	// to its build-time default (matching the release version). Direct S3
+	// artifacts using typed S3 configuration always use the build-time image so
+	// administrator-managed credentials are not exposed to arbitrary images.
 	// +optional
 	ModelDownloadImage string `json:"modelDownloadImage,omitempty"`
+
+	// S3 configures typed connection settings for AIMArtifacts whose sourceUri
+	// uses the s3:// scheme. RuntimeConfig env remains available for
+	// administrator-owned infrastructure settings, while artifact-level env is
+	// restricted to bounded downloader tuning. Typed fields take final
+	// precedence.
+	// +optional
+	S3 *S3ConnectionConfig `json:"s3,omitempty"`
 }
 
 // AIMRuntimeConfigCommon captures configuration fields shared across cluster and namespace scopes.
@@ -164,9 +174,13 @@ type AIMRuntimeConfigCommon struct {
 	// +optional
 	Artifact *AIMArtifactConfig `json:"artifact,omitempty"`
 
-	// ArtifactCache configures the S3-backed artifact cache for HuggingFace models.
-	// When enabled, the controller checks internal S3 before downloading from HuggingFace.
+	// DEPRECATED: The embedded Hugging Face-to-S3 artifact cache has been
+	// removed. This field is retained temporarily for API compatibility and is
+	// no longer honored by the controller. Use direct s3:// model sources with
+	// Artifact.S3 connection settings instead.
 	// +optional
+	// +kubebuilder:validation:Deprecated
+	// +kubebuilder:validation:DeprecatedMessage="The embedded artifact cache has been removed. Use direct s3:// sources with spec.artifact.s3 instead."
 	ArtifactCache *ArtifactCacheConfig `json:"artifactCache,omitempty"`
 
 	// LabelPropagation controls how labels from parent AIM resources are propagated to child resources.
@@ -223,30 +237,161 @@ type AIMArtifactStorageQuota struct {
 	DefaultNamespaceLimit *resource.Quantity `json:"defaultNamespaceLimit,omitempty"`
 }
 
-// ArtifactCacheConfig configures the S3-backed artifact cache.
-// When enabled, the controller checks internal S3 for cached models before
-// downloading from HuggingFace. On cache hit, the download source is rewritten
-// to s3:// so the download job pulls from the local cache instead.
+// ArtifactCacheConfig is the deprecated configuration for the removed embedded
+// Hugging Face-to-S3 artifact cache. It is retained only so existing manifests
+// remain valid while migrating to direct s3:// sources.
+//
+// Deprecated: this configuration is ignored by the controller.
 type ArtifactCacheConfig struct {
-	// Enabled controls whether the S3 artifact cache is active.
+	// Enabled formerly controlled whether the embedded S3 artifact cache was
+	// active. It is retained for API compatibility and has no effect.
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
-	// S3URI is the base S3 path for cached artifacts (e.g. s3://aim-cache/artifacts).
+	// S3URI formerly selected the base S3 path for cached artifacts. It is
+	// retained for API compatibility and has no effect.
 	// +optional
 	S3URI string `json:"s3Uri,omitempty"`
 
-	// Env provides S3 endpoint configuration for the cache bucket.
-	// Injected into download jobs when the source is rewritten to s3://.
-	// Typical var: AWS_ENDPOINT_URL (http:// vs https:// selects TLS automatically).
-	// For an unauthenticated cache bucket, request anonymous access explicitly with
-	// AIM_S3_ANONYMOUS=true (or AWS_ACCESS_KEY_ID=anonymous). Omitting the
-	// credentials instead means "resolve them the normal boto3 way" (IRSA,
-	// instance role, shared profile), which will fail if none is available.
+	// Env formerly provided S3 endpoint and credential configuration for the
+	// embedded cache. It is retained for API compatibility and has no effect.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	Env []corev1.EnvVar `json:"env,omitempty"`
+}
+
+// S3AddressingStyle controls how the bucket is encoded in S3 HTTP requests.
+// +kubebuilder:validation:Enum=auto;path;virtual
+type S3AddressingStyle string
+
+const (
+	S3AddressingStyleAuto    S3AddressingStyle = "auto"
+	S3AddressingStylePath    S3AddressingStyle = "path"
+	S3AddressingStyleVirtual S3AddressingStyle = "virtual"
+)
+
+// S3SignatureVersion controls request signing for authenticated S3 requests.
+// +kubebuilder:validation:Enum=auto;s3v4
+type S3SignatureVersion string
+
+const (
+	S3SignatureVersionAuto S3SignatureVersion = "auto"
+	S3SignatureVersionV4   S3SignatureVersion = "s3v4"
+)
+
+// S3AuthMode selects how the S3 client obtains credentials.
+// +kubebuilder:validation:Enum=chain;static;anonymous
+type S3AuthMode string
+
+const (
+	// S3AuthModeChain uses the standard boto3 credential provider chain.
+	S3AuthModeChain S3AuthMode = "chain"
+	// S3AuthModeStatic loads credentials from a namespace-local Secret.
+	S3AuthModeStatic S3AuthMode = "static"
+	// S3AuthModeAnonymous sends unsigned requests to a public bucket.
+	S3AuthModeAnonymous S3AuthMode = "anonymous"
+)
+
+// S3CredentialsSecretReference identifies credential keys in a
+// namespace-local Secret.
+type S3CredentialsSecretReference struct {
+	// Name is the Secret name in the AIMArtifact namespace.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// AccessKeyIDKey is the Secret data key containing the access key ID.
+	// +kubebuilder:default=accessKeyId
+	// +optional
+	AccessKeyIDKey string `json:"accessKeyIdKey,omitempty"`
+
+	// SecretAccessKeyKey is the Secret data key containing the secret access key.
+	// +kubebuilder:default=secretAccessKey
+	// +optional
+	SecretAccessKeyKey string `json:"secretAccessKeyKey,omitempty"`
+
+	// SessionTokenKey is an optional Secret data key containing a temporary
+	// credential session token.
+	// +optional
+	SessionTokenKey string `json:"sessionTokenKey,omitempty"`
+}
+
+// S3AuthConfig configures S3 authentication.
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'static' || has(self.credentialsSecretRef)",message="credentialsSecretRef is required when auth mode is static"
+// +kubebuilder:validation:XValidation:rule="!has(self.credentialsSecretRef) || (has(self.mode) && self.mode == 'static')",message="credentialsSecretRef may only be set when auth mode is static"
+type S3AuthConfig struct {
+	// Mode selects the authentication strategy. Omitted mode defaults to chain.
+	// +kubebuilder:default=chain
+	// +optional
+	Mode S3AuthMode `json:"mode,omitempty"`
+
+	// CredentialsSecretRef is required for static authentication.
+	// +optional
+	CredentialsSecretRef *S3CredentialsSecretReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// S3CABundleReference identifies a PEM CA bundle in a namespace-local
+// ConfigMap or Secret.
+type S3CABundleReference struct {
+	// Kind is the object kind containing the CA bundle.
+	// +kubebuilder:validation:Enum=ConfigMap;Secret
+	Kind string `json:"kind"`
+
+	// Name is the ConfigMap or Secret name in the AIMArtifact namespace.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Key is the data key containing the PEM CA bundle.
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
+}
+
+// S3TLSConfig controls TLS certificate and hostname verification.
+// +kubebuilder:validation:XValidation:rule="!has(self.insecureSkipVerify) || !self.insecureSkipVerify || !has(self.caBundleRef)",message="caBundleRef and insecureSkipVerify cannot be set together"
+type S3TLSConfig struct {
+	// CABundleRef selects a namespace-local PEM CA bundle for S3 TLS
+	// verification.
+	// +optional
+	CABundleRef *S3CABundleReference `json:"caBundleRef,omitempty"`
+
+	// InsecureSkipVerify disables certificate-chain and hostname verification.
+	// This is unsafe and intended only as a temporary diagnostic escape hatch.
+	// +optional
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
+}
+
+// S3ConnectionConfig provides typed S3 endpoint, authentication, addressing,
+// signing, and TLS settings.
+// +structType=atomic
+type S3ConnectionConfig struct {
+	// Endpoint is an optional S3-compatible API endpoint. Leave empty for AWS
+	// S3. Custom endpoints must include an explicit http:// or https:// scheme.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^https?://[^ \t\r\n]+$`
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Region is the signing region. Custom endpoints default to us-east-1 when
+	// omitted; AWS S3 uses normal SDK region resolution.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// AddressingStyle controls path-style versus virtual-hosted bucket routing.
+	// Custom endpoints default to path when omitted.
+	// +optional
+	AddressingStyle S3AddressingStyle `json:"addressingStyle,omitempty"`
+
+	// SignatureVersion controls authenticated request signing.
+	// +optional
+	SignatureVersion S3SignatureVersion `json:"signatureVersion,omitempty"`
+
+	// Auth configures credential-chain, static, or anonymous access. Omitted
+	// auth defaults to the standard SDK credential provider chain.
+	// +optional
+	Auth *S3AuthConfig `json:"auth,omitempty"`
+
+	// TLS configures custom CA trust or the unsafe verification bypass.
+	// +optional
+	TLS *S3TLSConfig `json:"tls,omitempty"`
 }
 
 // AIMClusterRuntimeConfigSpec defines cluster-wide defaults for AIM resources.

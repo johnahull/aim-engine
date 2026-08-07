@@ -26,3 +26,10 @@ metadata:
 spec:
   profile:
     name: resolve-by-name-profile
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token

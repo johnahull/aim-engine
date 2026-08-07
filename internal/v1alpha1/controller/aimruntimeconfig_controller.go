@@ -25,7 +25,7 @@ package controller
 import (
 	"context"
 
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -36,12 +36,10 @@ import (
 // AIMRuntimeConfigReconciler reconciles a AIMRuntimeConfig object
 type AIMRuntimeConfigReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
-// +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimruntimeconfigs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimruntimeconfigs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimruntimeconfigs/finalizers,verbs=update
+// +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimruntimeconfigs,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -53,10 +51,18 @@ type AIMRuntimeConfigReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.4/pkg/reconcile
 func (r *AIMRuntimeConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	config := &aimv1alpha1.AIMRuntimeConfig{}
+	if err := r.Get(ctx, req.NamespacedName, config); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-	// TODO(user): your logic here
-
+	if config.Spec.ArtifactCache != nil {
+		logf.FromContext(ctx).Info(
+			"deprecated spec.artifactCache is configured and ignored",
+			"reason", artifactCacheDeprecatedReason,
+		)
+		warnArtifactCacheDeprecated(r.Recorder, config)
+	}
 	return ctrl.Result{}, nil
 }
 

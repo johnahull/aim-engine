@@ -11,6 +11,13 @@ metadata:
 spec:
   profile:
     name: test-profile-autoscaling-profile
+  caching:
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: huggingface-creds
+            key: token
   minReplicas: 1
   maxReplicas: 3
   autoScaling:

@@ -38,15 +38,6 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 )
 
-// effectiveSourceURI returns the download source URI, using the resolved
-// cache URI when available (cache hit) and falling back to spec.sourceUri.
-func effectiveSourceURI(mc *aimv1alpha1.AIMArtifact) string {
-	if mc.Status.ResolvedSourceURI != "" {
-		return mc.Status.ResolvedSourceURI
-	}
-	return mc.Spec.SourceURI
-}
-
 // ResolveDownloadImage exposes the download-image resolution to other packages
 // (e.g. the AIMService adapter staging Jobs) so they share the same image
 // precedence: artifact spec > runtime config > build-time default.
@@ -118,10 +109,9 @@ const downloadJobActiveDeadlineSeconds = int64(24 * 60 * 60)
 // An explicit empty filter (downloadFilter: {}) on the artifact disables all filtering.
 //
 // The implicit subdir-exclude default applies only to hf:// sources. For s3://
-// sources (including hf:// artifacts whose source was rewritten to a cache
-// s3:// path on a cache hit) the default is no filter, so the entire prefix is
-// downloaded. Both the size-check and download jobs call this, so the file set
-// they select stays identical and the cache PVC is never undersized.
+// sources the default is no filter, so the entire prefix is downloaded. Both
+// the size-check and download jobs call this, so the file set they select stays
+// identical and the cache PVC is never undersized.
 func resolveDownloadFilter(mc *aimv1alpha1.AIMArtifact, runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon) *aimv1alpha1.AIMDownloadFilter {
 	if mc.Spec.DownloadFilter != nil {
 		return mc.Spec.DownloadFilter
@@ -129,7 +119,7 @@ func resolveDownloadFilter(mc *aimv1alpha1.AIMArtifact, runtimeConfig *aimv1alph
 	if runtimeConfig != nil && runtimeConfig.Storage != nil && runtimeConfig.Storage.DownloadFilter != nil {
 		return runtimeConfig.Storage.DownloadFilter
 	}
-	if strings.HasPrefix(effectiveSourceURI(mc), "hf://") {
+	if strings.HasPrefix(mc.Spec.SourceURI, "hf://") {
 		return defaultDownloadFilter
 	}
 	return nil
@@ -154,12 +144,19 @@ func getDownloadJobName(mc *aimv1alpha1.AIMArtifact) string {
 	return name
 }
 
-func buildDownloadJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alpha1.AIMRuntimeConfigCommon, expectedSizeBytes int64, cacheEnv ...corev1.EnvVar) *batchv1.Job {
+func buildDownloadJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alpha1.AIMRuntimeConfigCommon, expectedSizeBytes int64) *batchv1.Job {
 	mountPath := "/cache/models"
 	downloadImage := resolveDownloadImage(mc, runtimeConfigSpec)
-
-	// Use resolved source (cache hit) or original spec source
-	sourceURI := effectiveSourceURI(mc)
+	var s3Connection *aimv1alpha1.S3ConnectionConfig
+	if strings.HasPrefix(mc.Spec.SourceURI, "s3://") {
+		s3Connection = DirectS3Connection(runtimeConfigSpec)
+		if s3Connection != nil {
+			// Typed credentials and trust settings are administrator-managed.
+			// Keep them inside the release-coupled downloader contract instead
+			// of exposing them to an arbitrary artifact-selected image.
+			downloadImage = aimv1alpha1.DefaultDownloadImage
+		}
+	}
 
 	// Get env vars from runtime config, or empty slice if nil
 	var runtimeEnv []corev1.EnvVar
@@ -183,9 +180,26 @@ func buildDownloadJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alpha
 		{Name: "TARGET_DIR", Value: mountPath},
 	}
 	defaultEnv = append(defaultEnv, downloadFilterEnvVars(resolveDownloadFilter(mc, runtimeConfigSpec))...)
-	newEnv := utils.MergeEnvVars(defaultEnv, cacheEnv)
-	newEnv = utils.MergeEnvVars(newEnv, runtimeEnv)
-	newEnv = utils.MergeEnvVars(newEnv, mc.Spec.Env)
+	s3Settings := ResolveS3PodSettings(
+		s3Connection,
+		defaultEnv,
+		runtimeEnv,
+		mc.Spec.Env,
+	)
+
+	volumes := []corev1.Volume{
+		{
+			Name: "cache",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: GenerateCachePvcName(mc),
+				},
+			},
+		},
+	}
+	volumes = append(volumes, s3Settings.Volumes...)
+	volumeMounts := []corev1.VolumeMount{{Name: "cache", MountPath: mountPath}}
+	volumeMounts = append(volumeMounts, s3Settings.VolumeMounts...)
 
 	return &batchv1.Job{
 		TypeMeta: metav1.TypeMeta{
@@ -222,14 +236,7 @@ func buildDownloadJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alpha
 						RunAsNonRoot: ptr.To(true),
 					},
 					ImagePullSecrets: mc.Spec.ImagePullSecrets,
-					Volumes: []corev1.Volume{
-						{
-							Name: "cache",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: GenerateCachePvcName(mc)},
-							},
-						},
-					},
+					Volumes:          volumes,
 					Containers: []corev1.Container{
 						{
 							Name:            "model-download",
@@ -239,11 +246,9 @@ func buildDownloadJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alpha
 								RunAsUser:  ptr.To(int64(1000)),
 								RunAsGroup: ptr.To(int64(1000)),
 							},
-							Env:  newEnv,
-							Args: []string{sourceURI},
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "cache", MountPath: mountPath},
-							},
+							Env:          s3Settings.Env,
+							Args:         []string{mc.Spec.SourceURI},
+							VolumeMounts: volumeMounts,
 						},
 					},
 				},
@@ -257,10 +262,15 @@ func getCheckSizeJobName(mc *aimv1alpha1.AIMArtifact) string {
 	return name
 }
 
-func buildCheckSizeJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alpha1.AIMRuntimeConfigCommon, cacheEnv ...corev1.EnvVar) *batchv1.Job {
+func buildCheckSizeJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alpha1.AIMRuntimeConfigCommon) *batchv1.Job {
 	downloadImage := resolveDownloadImage(mc, runtimeConfigSpec)
-
-	sourceURI := effectiveSourceURI(mc)
+	var s3Connection *aimv1alpha1.S3ConnectionConfig
+	if strings.HasPrefix(mc.Spec.SourceURI, "s3://") {
+		s3Connection = DirectS3Connection(runtimeConfigSpec)
+		if s3Connection != nil {
+			downloadImage = aimv1alpha1.DefaultDownloadImage
+		}
+	}
 
 	// Get auth env vars from runtime config and spec, plus download filter
 	var runtimeEnv []corev1.EnvVar
@@ -268,9 +278,12 @@ func buildCheckSizeJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alph
 		runtimeEnv = runtimeConfigSpec.Env
 	}
 	filterEnv := downloadFilterEnvVars(resolveDownloadFilter(mc, runtimeConfigSpec))
-	envVars := utils.MergeEnvVars(filterEnv, cacheEnv)
-	envVars = utils.MergeEnvVars(envVars, runtimeEnv)
-	envVars = utils.MergeEnvVars(envVars, mc.Spec.Env)
+	s3Settings := ResolveS3PodSettings(
+		s3Connection,
+		filterEnv,
+		runtimeEnv,
+		mc.Spec.Env,
+	)
 
 	return &batchv1.Job{
 		TypeMeta: metav1.TypeMeta{
@@ -305,14 +318,16 @@ func buildCheckSizeJob(mc *aimv1alpha1.AIMArtifact, runtimeConfigSpec *aimv1alph
 						RunAsNonRoot: ptr.To(true),
 					},
 					ImagePullSecrets: mc.Spec.ImagePullSecrets,
+					Volumes:          s3Settings.Volumes,
 					Containers: []corev1.Container{
 						{
 							Name:            "check-size",
 							Image:           downloadImage,
 							ImagePullPolicy: pullPolicyForImage(downloadImage),
 							Command:         []string{"/check-size.sh"},
-							Args:            []string{sourceURI},
-							Env:             envVars,
+							Args:            []string{mc.Spec.SourceURI},
+							Env:             s3Settings.Env,
+							VolumeMounts:    s3Settings.VolumeMounts,
 						},
 					},
 				},

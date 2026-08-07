@@ -35,6 +35,7 @@ metadata:
     # CHAINSAW_TEST_DIR at this directory. See ../../../_shared/ensure-pull-secret.sh
     # for how the pull secret is sourced (local file / cluster / warn).
     needs-secret: dockerhub_pull_secret
+    hf-access: live
 spec:
   description: Full profile cache pipeline with real CPU inference and endpoint validation
   timeouts:
@@ -48,16 +49,8 @@ spec:
                 value: ($namespace)
             content: bash ../../../_shared/ensure-pull-secret.sh
 
-    # Even public HF repos hit anonymous rate limits on the XET backend, which
-    # makes the downloader job stall. Inject a real user token so the download
-    # job can authenticate. Referenced as HF_TOKEN via caching.env in profile.yaml.
-    - name: Ensure HF token secret in the test namespace
-      try:
-        - script:
-            env:
-              - name: NAMESPACE
-                value: ($namespace)
-            content: bash ../../../_shared/ensure-hf-secret.sh
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
 
     - name: Create runtime config with routing
       try:

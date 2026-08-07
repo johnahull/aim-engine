@@ -53,7 +53,11 @@ class DownloadTask(ABC):
 # operator classifies download failures by pattern-matching that message in the
 # pod logs, so the real error string must propagate.
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
-def download_file(source: CloudPath, destination: Path) -> None:
+def download_file(
+    source: CloudPath,
+    destination: Path,
+    expected_size: int,
+) -> None:
     destination.parent.mkdir(exist_ok=True, parents=True)
 
     # Skip objects already fully present so Job retries don't re-pull them.
@@ -63,10 +67,14 @@ def download_file(source: CloudPath, destination: Path) -> None:
     # is a cheap secondary guard for the source object changing between runs.
     if destination.exists():
         try:
-            if destination.stat().st_size == source.stat().st_size:
-                logger.info(f"Skipping {source} (already present, size matches)")
+            if _file_matches_size(destination, expected_size):
+                logger.info(
+                    f"Skipping {source} (already present, size matches)"
+                )
                 return
-            logger.warning(f"Size mismatch for {destination} (have {destination.stat().st_size}, want {source.stat().st_size}); re-downloading")
+            logger.warning(
+                f"Size mismatch for {destination}; re-downloading {source}"
+            )
         except OSError:
             pass
 
@@ -81,6 +89,7 @@ def download_file(source: CloudPath, destination: Path) -> None:
     logger.info(f"Downloading {source} to {destination}")
     try:
         source.download_to(tmp)
+        _verify_file(tmp, expected_size)
         os.replace(tmp, destination)
     except BaseException:
         try:
@@ -90,16 +99,43 @@ def download_file(source: CloudPath, destination: Path) -> None:
         raise
 
 
+def _verify_file(path: Path, expected_size: int) -> None:
+    actual_size = path.stat().st_size
+    if actual_size != expected_size:
+        raise RuntimeError(
+            f"size mismatch for {path}: downloaded {actual_size} bytes, "
+            f"expected {expected_size}"
+        )
+
+
+def _file_matches_size(path: Path, expected_size: int) -> bool:
+    try:
+        _verify_file(path, expected_size)
+        return True
+    except (OSError, RuntimeError):
+        return False
+
+
 class CloudDownloadTask(DownloadTask):
     """A single object -> local file download."""
 
-    def __init__(self, cloud_path: CloudPath, target_path: Path):
+    def __init__(
+        self,
+        cloud_path: CloudPath,
+        target_path: Path,
+        expected_size: int,
+    ):
         self.cloud_path = cloud_path
         self.target_path = target_path
+        self.expected_size = expected_size
 
     def run(self) -> None:
         logger.info(f"Downloading {self.title}")
-        download_file(source=self.cloud_path, destination=self.target_path)
+        download_file(
+            source=self.cloud_path,
+            destination=self.target_path,
+            expected_size=self.expected_size,
+        )
 
     @property
     def title(self) -> str:

@@ -19,11 +19,15 @@ metadata:
   name: aimservice-cache-cleanup-ready-preserved
   labels:
     requires: external-network
+    hf-access: live
 spec:
   description: Test that Ready caches are preserved when AIMService is deleted
   timeouts:
     assert: 180s
   steps:
+    - use:
+        template: ../../../../_shared/hf-token-step.yaml
+
     - name: Create service with caching enabled
       try:
         - apply:

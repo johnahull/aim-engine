@@ -536,6 +536,7 @@ func quantityPtrEqual(a, b *resource.Quantity) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AIMArtifactReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.Recorder = mgr.GetEventRecorderFor("aim-" + artifactName + "-controller")
 	r.reconciler = &aimartifact.ArtifactReconciler{
 		Clientset: r.Clientset,
 		Scheme:    r.Scheme,
@@ -556,8 +557,6 @@ func (r *AIMArtifactReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Scheme:         r.Scheme,
 		Clientset:      r.Clientset,
 	}
-	r.Recorder = mgr.GetEventRecorderFor(r.pipeline.GetFullName())
-	r.pipeline.Recorder = r.Recorder
 
 	// Index adapter artifacts by their parent reference so a parent change can
 	// enqueue its adapters.

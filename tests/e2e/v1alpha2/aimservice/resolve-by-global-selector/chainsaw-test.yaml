@@ -7,10 +7,15 @@ apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
   name: v1alpha2-aimservice-resolve-by-global-selector
+  labels:
+    hf-access: live
 spec:
   timeouts:
     assert: 120s
   steps:
+    - use:
+        template: ../../../_shared/hf-token-step.yaml
+
     - name: Apply two AIMProfiles with the same aimId but different precision
       try:
         - apply:
