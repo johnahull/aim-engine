@@ -50,6 +50,12 @@ repos:
     pass_filenames: false
     files: ^docs/diagrams/.*\.d2$
 
+  - id: inject-svg-license
+    name: Inject license header into SVG files
+    entry: hack/inject-svg-license.sh
+    language: system
+    files: \.svg$
+
   # - id: build-crds
   #   name: Build CRDs for Helm chart
   #   entry: bash -lc 'kubectl kustomize config/crd/ > crd/crds.yaml'

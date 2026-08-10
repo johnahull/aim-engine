@@ -845,6 +845,7 @@ diagrams: ## Render D2 diagram sources (docs/diagrams/*.d2) to committed SVGs.
 		d2 $$f $(DIAGRAM_OUT_DIR)/$$base.svg || exit 1; \
 		d2 --theme 200 $$f $(DIAGRAM_OUT_DIR)/$$base-dark.svg || exit 1; \
 	done
+	@DIAGRAM_OUT_DIR=$(DIAGRAM_OUT_DIR) hack/inject-svg-license.sh
 
 .PHONY: diagrams-watch
 diagrams-watch: ## Live-preview one diagram: make diagrams-watch DIAGRAM=architecture-overview
