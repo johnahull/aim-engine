@@ -5,6 +5,8 @@
 # theme and all extensions we use.
 # Diagrams are authored in D2 (docs/diagrams/*.d2) and rendered to committed
 # SVGs via `make diagrams` (requires the `d2` CLI, provided by mise).
-rocm-docs-core>=1.35,<2
+# 1.39.0 ships a malformed rocm_docs/data/projects.yaml (hipthreads entry),
+# which prevents the Sphinx extension from loading.
+rocm-docs-core>=1.35,<2,!=1.39.0
 sphinx-autobuild>=2024.10
 linkify-it-py>=2.0,<3
