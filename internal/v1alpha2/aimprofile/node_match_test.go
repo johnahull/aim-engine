@@ -561,10 +561,13 @@ func TestResolveResources(t *testing.T) {
 		wantMemoryLimit  string
 	}{
 		{
-			name:       "GPU count injected",
-			accelType:  aimv1alpha1.AcceleratorTypeGPU,
-			accelCount: 4,
-			wantGPU:    "4",
+			name:            "GPU count injects device and host resource defaults",
+			accelType:       aimv1alpha1.AcceleratorTypeGPU,
+			accelCount:      4,
+			wantGPU:         "4",
+			wantCPU:         "16",
+			wantMemory:      "128Gi",
+			wantMemoryLimit: "192Gi",
 		},
 		{
 			name:       "CPU count injected",
@@ -579,7 +582,10 @@ func TestResolveResources(t *testing.T) {
 			resources: &corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{"amd.com/gpu": resource.MustParse("2")},
 			},
-			wantGPU: "2",
+			wantGPU:         "2",
+			wantCPU:         "16",
+			wantMemory:      "128Gi",
+			wantMemoryLimit: "192Gi",
 		},
 		{
 			name:       "count merged with cpu/memory resources",
@@ -591,9 +597,24 @@ func TestResolveResources(t *testing.T) {
 					corev1.ResourceMemory: resource.MustParse("64Gi"),
 				},
 			},
-			wantGPU:    "1",
-			wantCPU:    "8",
-			wantMemory: "64Gi",
+			wantGPU:         "1",
+			wantCPU:         "8",
+			wantMemory:      "64Gi",
+			wantMemoryLimit: "48Gi",
+		},
+		{
+			name:       "explicit GPU memory limit preserves override",
+			accelType:  aimv1alpha1.AcceleratorTypeGPU,
+			accelCount: 1,
+			resources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("96Gi"),
+				},
+			},
+			wantGPU:         "1",
+			wantCPU:         "4",
+			wantMemory:      "32Gi",
+			wantMemoryLimit: "96Gi",
 		},
 		{
 			name: "nil type nil count with resources passes through",
@@ -669,12 +690,15 @@ func TestResolveResources(t *testing.T) {
 			wantCPU:          "32",
 		},
 		{
-			name:             "GPU profile with EPYC model prefix does not derive memory",
+			name:             "GPU profile ignores EPYC memory derivation and uses GPU defaults",
 			accelType:        aimv1alpha1.AcceleratorTypeGPU,
 			accelCount:       4,
 			acceleratorModel: "EPYC_FAKE_GPU",
 			engineEnv:        map[string]string{"VLLM_CPU_KVCACHE_SPACE": "80"},
 			wantGPU:          "4",
+			wantCPU:          "16",
+			wantMemory:       "128Gi",
+			wantMemoryLimit:  "192Gi",
 		},
 	}
 

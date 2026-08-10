@@ -284,6 +284,14 @@ const (
 	DefaultGatewayPort = 80
 	// DefaultGPUResourceName is the default resource name for AMD GPUs
 	DefaultGPUResourceName = "amd.com/gpu"
+	// DefaultCPURequestPerGPU is the default host CPU request for each GPU.
+	DefaultCPURequestPerGPU int64 = 4
+	// DefaultMemoryRequestGiPerGPU is the default host memory request, in GiB,
+	// for each GPU.
+	DefaultMemoryRequestGiPerGPU int64 = 32
+	// DefaultMemoryLimitGiPerGPU is the default host memory limit, in GiB, for
+	// each GPU.
+	DefaultMemoryLimitGiPerGPU int64 = 48
 	// AIMCacheBasePath is the base directory for cached models
 	AIMCacheBasePath = "/workspace/cache"
 	// AIMAdapterMountPath is the path inside the inference container where the

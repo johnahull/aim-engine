@@ -70,11 +70,14 @@ type NodeMatchResult struct {
 	NodeAffinity  *corev1.NodeAffinity
 }
 
-// ResolveResources merges the accelerator-derived device request with explicit resources.
+// ResolveResources merges accelerator-derived defaults with explicit resources.
 // The accelerator count is translated to a Kubernetes resource name based on type:
 //
 //	gpu → constants.DefaultGPUResourceName (amd.com/gpu)
 //	cpu → corev1.ResourceCPU
+//
+// GPU profiles also receive the same per-GPU host CPU and memory defaults used
+// by the v1alpha1 service path. Explicit spec.resources entries win per key.
 //
 // For EPYC CPU profiles (acceleratorModel starts with "EPYC"), memory is derived from
 // the engine env var VLLM_CPU_KVCACHE_SPACE (doubled) to enable Guaranteed QoS pods.
@@ -128,6 +131,10 @@ func ResolveResources(
 		}
 	}
 
+	if accelType == aimv1alpha1.AcceleratorTypeGPU && accelCount > 0 {
+		applyDefaultGPUResources(resolved, int64(accelCount))
+	}
+
 	// EPYC CPU profiles: derive memory from VLLM_CPU_KVCACHE_SPACE to enable
 	// Guaranteed QoS (requests==limits for both CPU and memory). Explicit
 	// spec.resources memory takes precedence.
@@ -144,6 +151,37 @@ func ResolveResources(
 	}
 
 	return resolved
+}
+
+// applyDefaultGPUResources fills host CPU and memory defaults for GPU profiles.
+// Existing entries are preserved so profile and service overrides remain
+// authoritative per resource key. CPU intentionally has no default limit.
+func applyDefaultGPUResources(resources *corev1.ResourceRequirements, gpuCount int64) {
+	if resources.Requests == nil {
+		resources.Requests = make(corev1.ResourceList)
+	}
+	if _, exists := resources.Requests[corev1.ResourceCPU]; !exists {
+		resources.Requests[corev1.ResourceCPU] = *resource.NewQuantity(
+			gpuCount*constants.DefaultCPURequestPerGPU,
+			resource.DecimalSI,
+		)
+	}
+	if _, exists := resources.Requests[corev1.ResourceMemory]; !exists {
+		resources.Requests[corev1.ResourceMemory] = resource.MustParse(fmt.Sprintf(
+			"%dGi",
+			gpuCount*constants.DefaultMemoryRequestGiPerGPU,
+		))
+	}
+
+	if resources.Limits == nil {
+		resources.Limits = make(corev1.ResourceList)
+	}
+	if _, exists := resources.Limits[corev1.ResourceMemory]; !exists {
+		resources.Limits[corev1.ResourceMemory] = resource.MustParse(fmt.Sprintf(
+			"%dGi",
+			gpuCount*constants.DefaultMemoryLimitGiPerGPU,
+		))
+	}
 }
 
 const defaultEPYCMemoryGi int64 = 120

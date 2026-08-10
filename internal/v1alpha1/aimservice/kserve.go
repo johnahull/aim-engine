@@ -552,11 +552,20 @@ func defaultResourceRequirementsForGPU(gpuCount int64) corev1.ResourceRequiremen
 
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    *resource.NewQuantity(gpuCount*4, resource.DecimalSI),
-			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dGi", gpuCount*32)),
+			corev1.ResourceCPU: *resource.NewQuantity(
+				gpuCount*constants.DefaultCPURequestPerGPU,
+				resource.DecimalSI,
+			),
+			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf(
+				"%dGi",
+				gpuCount*constants.DefaultMemoryRequestGiPerGPU,
+			)),
 		},
 		Limits: corev1.ResourceList{
-			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dGi", gpuCount*48)),
+			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf(
+				"%dGi",
+				gpuCount*constants.DefaultMemoryLimitGiPerGPU,
+			)),
 		},
 	}
 }
