@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
@@ -50,28 +51,88 @@ func sampleSpec() *aimv1alpha2.AIMProfileSpecCommon {
 
 func TestProfileFilename(t *testing.T) {
 	cases := []struct {
-		name      string
-		accModel  string
-		precision string
-		accCount  int32
-		metric    string
-		want      string
+		name string
+		spec *aimv1alpha2.AIMProfileSpecCommon
+		want string
 	}{
-		{"gpu profile", "MI300X", "fp8", 1, "latency", "vllm-mi300x-fp8-tp1-latency.yaml"},
-		{"empty accelerator falls back to none", "", "fp16", 0, "latency", "vllm-none-fp16-tp0-latency.yaml"},
+		{
+			name: "discovered profile id is authoritative",
+			spec: &aimv1alpha2.AIMProfileSpecCommon{
+				ProfileId: "vllm_omni-mi300x-fp16-tp4-latency-usp4",
+				Engine:    "vllm_omni",
+				Variant:   "usp4",
+			},
+			want: "vllm_omni-mi300x-fp16-tp4-latency-usp4.yaml",
+		},
+		{
+			name: "engine-aware fallback includes variant",
+			spec: &aimv1alpha2.AIMProfileSpecCommon{
+				Engine:           "vllm_omni",
+				Variant:          "usp4",
+				AcceleratorModel: "MI300X",
+				Precision:        aimv1alpha1.AIMPrecision("fp16"),
+				AcceleratorCount: 4,
+				Metric:           aimv1alpha1.AIMMetric("latency"),
+			},
+			want: "vllm_omni-mi300x-fp16-tp4-latency-usp4.yaml",
+		},
+		{
+			name: "empty engine preserves legacy vllm fallback",
+			spec: &aimv1alpha2.AIMProfileSpecCommon{
+				Precision: aimv1alpha1.AIMPrecision("fp16"),
+				Metric:    aimv1alpha1.AIMMetric("latency"),
+			},
+			want: "vllm-none-fp16-tp0-latency.yaml",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ProfileFilename(tc.accModel, tc.precision, tc.accCount, tc.metric); got != tc.want {
+			got, err := ProfileFilename(tc.spec)
+			if err != nil {
+				t.Fatalf("ProfileFilename error: %v", err)
+			}
+			if got != tc.want {
 				t.Fatalf("ProfileFilename = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
+func TestProfileFilename_InvalidDiscoveredID(t *testing.T) {
+	_, err := ProfileFilename(&aimv1alpha2.AIMProfileSpecCommon{ProfileId: "nested/profile"})
+	if err == nil {
+		t.Fatal("expected invalid ConfigMap key error")
+	}
+}
+
 func TestAssembleProfileYAML_NilSpec(t *testing.T) {
 	if _, _, err := AssembleProfileYAML(nil); err == nil {
 		t.Fatalf("expected error for nil spec")
+	}
+}
+
+func TestAssembleProfileYAML_PreservesWanIdentity(t *testing.T) {
+	spec := sampleSpec()
+	spec.ProfileId = "vllm_omni-mi300x-fp16-tp4-latency-usp4"
+	spec.Engine = "vllm_omni"
+	spec.Variant = "usp4"
+	spec.Precision = aimv1alpha1.AIMPrecision("fp16")
+	spec.AcceleratorCount = 4
+
+	yamlBytes, filename, err := AssembleProfileYAML(spec)
+	if err != nil {
+		t.Fatalf("AssembleProfileYAML error: %v", err)
+	}
+	if filename != spec.ProfileId+".yaml" {
+		t.Fatalf("filename = %q, want %q", filename, spec.ProfileId+".yaml")
+	}
+
+	var parsed ProfileYAML
+	if err := yaml.Unmarshal(yamlBytes, &parsed); err != nil {
+		t.Fatalf("unmarshal profile yaml: %v", err)
+	}
+	if parsed.Metadata.Variant != "usp4" {
+		t.Errorf("metadata.variant = %q, want usp4", parsed.Metadata.Variant)
 	}
 }
 
@@ -101,9 +162,9 @@ func TestBuildProfileVolumeMount_ReadOnlyUnderBase(t *testing.T) {
 	}
 }
 
-// TestBuildFrameworkEnvVars_NoModelSources asserts the standalone case: only
-// AIM_PROFILE_ID and AIM_ID (set to the profile's aimId) are emitted, so a
-// per-AIM image can serve without a cache redirect.
+// TestBuildFrameworkEnvVars_NoModelSources asserts the standalone case:
+// AIM_ENGINE, AIM_PROFILE_ID and AIM_ID (set to the profile's aimId) are
+// emitted, so a per-AIM image can serve without a cache redirect.
 func TestBuildFrameworkEnvVars_NoModelSources(t *testing.T) {
 	env := envMap(BuildFrameworkEnvVars(sampleSpec(), "vllm-mi300x-fp8-tp1-latency.yaml"))
 
@@ -112,6 +173,9 @@ func TestBuildFrameworkEnvVars_NoModelSources(t *testing.T) {
 	}
 	if env[constants.EnvAIMID] != "qwen/qwen3-32b" {
 		t.Errorf("AIM_ID = %q, want the profile aimId when not redirecting", env[constants.EnvAIMID])
+	}
+	if env[constants.EnvAIMEngine] != sampleSpec().Engine {
+		t.Errorf("AIM_ENGINE = %q, want %q", env[constants.EnvAIMEngine], sampleSpec().Engine)
 	}
 	if _, ok := env[constants.EnvAIMModelID]; ok {
 		t.Errorf("AIM_MODEL_ID must be unset without modelSources")
@@ -135,6 +199,19 @@ func TestBuildFrameworkEnvVars_WithModelSources(t *testing.T) {
 	}
 	if env[constants.EnvAIMCachePath] != constants.AIMCacheBasePath {
 		t.Errorf("AIM_CACHE_PATH = %q, want %q", env[constants.EnvAIMCachePath], constants.AIMCacheBasePath)
+	}
+	if env[constants.EnvAIMEngine] != spec.Engine {
+		t.Errorf("AIM_ENGINE = %q, want %q", env[constants.EnvAIMEngine], spec.Engine)
+	}
+}
+
+func TestBuildFrameworkEnvVars_EmptyEngineIsOmitted(t *testing.T) {
+	spec := sampleSpec()
+	spec.Engine = ""
+
+	env := envMap(BuildFrameworkEnvVars(spec, "vllm-mi300x-fp8-tp1-latency.yaml"))
+	if _, ok := env[constants.EnvAIMEngine]; ok {
+		t.Errorf("AIM_ENGINE must be unset when the profile does not declare an engine")
 	}
 }
 

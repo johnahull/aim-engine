@@ -125,6 +125,7 @@ type imageProfileFile struct {
 
 type imageProfileMetadata struct {
 	Engine              string                      `json:"engine"`
+	Variant             string                      `json:"variant,omitempty"`
 	Metric              aimv1alpha1.AIMMetric       `json:"metric"`
 	Precision           aimv1alpha1.AIMPrecision    `json:"precision"`
 	Type                aimv1alpha1.AIMProfileType  `json:"type"`
@@ -375,6 +376,7 @@ func parseProfileYAMLIntoCatalogItem(raw []byte, relpath, defaultAimID, sourceIm
 			ModelId:             parsed.ModelID,
 			ProfileId:           profileID,
 			Engine:              parsed.Metadata.Engine,
+			Variant:             parsed.Metadata.Variant,
 			Metric:              parsed.Metadata.Metric,
 			Precision:           parsed.Metadata.Precision,
 			Type:                parsed.Metadata.Type,

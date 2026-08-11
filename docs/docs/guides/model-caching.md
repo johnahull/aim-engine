@@ -82,6 +82,46 @@ spec:
     defaultStorageClassName: longhorn
 ```
 
+## Repositories with required subdirectories
+
+When no download filter is configured, AIM Engine excludes files in
+subdirectories (equivalent to `exclude: ["*/*"]`). This is suitable for many
+flat model repositories, but repository layouts such as Diffusers commonly
+store required transformer, VAE, text-encoder, scheduler, and tokenizer files
+under nested directories.
+
+Set an explicitly empty filter to download all files:
+
+```yaml
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: diffusers-model
+  namespace: ml-team
+spec:
+  storage:
+    downloadFilter: {}
+```
+
+Reference that runtime config from the relevant `AIMService`:
+
+```yaml
+spec:
+  runtimeConfigName: diffusers-model
+```
+
+Prefer a scoped runtime config over changing the cluster-wide default:
+downloading every nested file can increase transfer time and storage usage for
+unrelated models.
+
+This setting is based on repository layout, not inference engine. For example,
+a Diffusers model served by vLLM-Omni needs it, while a flat repository served
+by the same engine may not.
+
+`AIMArtifact.spec.downloadFilter` is immutable. If an artifact was created with
+the wrong filter, delete and recreate that artifact after changing the runtime
+configuration.
+
 ## Download Verification
 
 After each download completes, AIM Engine automatically verifies that all expected files are present on disk and persisted to storage. If verification fails, the download job retries with a clean state. No configuration is required — verification runs by default for all HuggingFace downloads.

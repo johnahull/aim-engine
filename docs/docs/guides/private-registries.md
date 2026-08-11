@@ -28,9 +28,26 @@ spec:
 
 The secret must exist in the same namespace as the service.
 
-### Model Source Secrets
+### Model discovery secrets
 
-For `AIMClusterModelSource` pulling from private registries, secrets must be in the operator namespace:
+Secret references are resolved in the namespace where the discovery or
+inference workload runs:
+
+| Resource or workload | Secret namespace |
+|---|---|
+| `AIMModel` image discovery | The model's namespace |
+| `AIMClusterModel` image discovery | The operator namespace |
+| `AIMClusterModelSource` registry scan | The operator namespace |
+| `AIMService` inference pod | The service's namespace |
+
+For a private `AIMClusterModel`, create the discovery pull secret in the
+operator namespace. A service consuming one of the resulting cluster profiles
+also needs usable credentials in its own namespace. You can create a secret
+with the same name in every consumer namespace, or set a namespace-local secret
+through `AIMService.spec.imagePullSecrets`.
+
+For `AIMClusterModelSource` pulling from private registries, the same
+operator-namespace rule applies:
 
 ```yaml
 apiVersion: aim.eai.amd.com/v1alpha1

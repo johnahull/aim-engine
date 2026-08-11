@@ -24,7 +24,8 @@
 # Required env:
 #   NAMESPACE  target test namespace (chainsaw passes ($namespace)).
 # Optional env:
-#   PULL_SECRET_NAME            secret name to copy / expect (default dockerhub-regcred)
+#   PULL_SECRET_NAME            source secret name to copy / expect (default dockerhub-regcred)
+#   PULL_SECRET_TARGET_NAME     target secret name (default PULL_SECRET_NAME)
 #   DOCKERHUB_PULL_SECRET_FILE  path to a local dockerconfigjson Secret manifest
 #   PULL_SECRET_SOURCE_NS       namespace to copy an existing secret from (default: default)
 #   PULL_SECRET_REQUIRED        if set (non-empty), a missing secret is a hard error
@@ -32,13 +33,34 @@ set -euo pipefail
 
 NS="${NAMESPACE:?NAMESPACE must be set (chainsaw passes ($namespace))}"
 SECRET_NAME="${PULL_SECRET_NAME:-dockerhub-regcred}"
+TARGET_SECRET_NAME="${PULL_SECRET_TARGET_NAME:-$SECRET_NAME}"
 SECRET_FILE="${DOCKERHUB_PULL_SECRET_FILE:-$HOME/.config/aim-engine/dockerhub-regcred.yaml}"
 SOURCE_NS="${PULL_SECRET_SOURCE_NS:-default}"
 
 # 1) Local manifest file: the canonical "manage it locally" path.
 if [ -f "$SECRET_FILE" ]; then
-  echo "ensure-pull-secret: applying local manifest '$SECRET_FILE' into namespace '$NS'"
-  kubectl -n "$NS" apply -f "$SECRET_FILE"
+  if [ "$TARGET_SECRET_NAME" = "$SECRET_NAME" ]; then
+    echo "ensure-pull-secret: applying local manifest '$SECRET_FILE' into namespace '$NS'"
+    kubectl -n "$NS" apply -f "$SECRET_FILE"
+  else
+    if ! command -v jq >/dev/null 2>&1; then
+      echo "ensure-pull-secret: ERROR: jq is required to rename secret/$SECRET_NAME to secret/$TARGET_SECRET_NAME" >&2
+      exit 1
+    fi
+    echo "ensure-pull-secret: applying local manifest '$SECRET_FILE' as secret/$TARGET_SECRET_NAME in namespace '$NS'"
+    kubectl create --dry-run=client -f "$SECRET_FILE" -o json \
+      | jq --arg name "$TARGET_SECRET_NAME" '
+          .metadata.name = $name
+          | del(
+              .metadata.namespace,
+              .metadata.resourceVersion,
+              .metadata.uid,
+              .metadata.creationTimestamp,
+              .metadata.managedFields,
+              .metadata.ownerReferences
+            )' \
+      | kubectl -n "$NS" apply -f -
+  fi
   exit 0
 fi
 
@@ -48,9 +70,18 @@ if kubectl -n "$SOURCE_NS" get secret "$SECRET_NAME" >/dev/null 2>&1; then
     echo "ensure-pull-secret: ERROR: jq is required to copy secret/$SECRET_NAME from '$SOURCE_NS'" >&2
     exit 1
   fi
-  echo "ensure-pull-secret: copying secret/$SECRET_NAME from namespace '$SOURCE_NS' into '$NS'"
+  echo "ensure-pull-secret: copying secret/$SECRET_NAME from namespace '$SOURCE_NS' as secret/$TARGET_SECRET_NAME into '$NS'"
   kubectl -n "$SOURCE_NS" get secret "$SECRET_NAME" -o json \
-    | jq 'del(.metadata.namespace, .metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields, .metadata.ownerReferences)' \
+    | jq --arg name "$TARGET_SECRET_NAME" '
+        .metadata.name = $name
+        | del(
+            .metadata.namespace,
+            .metadata.resourceVersion,
+            .metadata.uid,
+            .metadata.creationTimestamp,
+            .metadata.managedFields,
+            .metadata.ownerReferences
+          )' \
     | kubectl -n "$NS" apply -f -
   exit 0
 fi

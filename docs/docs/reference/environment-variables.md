@@ -83,7 +83,8 @@ These are set on inference containers by the operator. The "Source" column lists
 | `AIM_CACHE_PATH` | Constant | Base path for cached model artifacts. |
 | `VLLM_ENABLE_METRICS` | Constant | Always `true` — enables vLLM Prometheus metrics. |
 | `AIM_ID` | Profile (v1alpha2) / Template (v1alpha1) | AIM product family identifier (e.g., `meta-llama/Llama-3-8B`). Determines the model-specific profile search path and serves as a fallback model identifier. Mutually exclusive with `AIM_MODEL_ID`. |
-| `AIM_PROFILE_ID` | Profile (v1alpha2) / Template (v1alpha1) | Active profile identifier. For custom-profile templates (v1alpha1), set to `custom/{aimId}/{profileName}` to bypass the runtime's normal profile selection logic. v1alpha2 always sets this from the resolved `AIMProfile.spec.profileId`. |
+| `AIM_ENGINE` | Profile (v1alpha2) | Runtime engine selected from the resolved profile's `spec.engine` (for example `vllm` or `vllm_omni`). |
+| `AIM_PROFILE_ID` | Profile (v1alpha2) / Template (v1alpha1) | Active profile identifier. For custom-profile templates (v1alpha1), set to `custom/{aimId}/{profileName}` to bypass the runtime's normal profile selection logic. In v1alpha2, discovered profiles preserve `spec.profileId` as the projected filename; hand-authored profiles without it receive an engine-aware generated filename. |
 | `AIM_METRIC` | Profile / Template | Optimization metric (`latency` or `throughput`). |
 | `AIM_PRECISION` | Profile / Template | Model precision (e.g., `fp16`, `fp8`). |
 | `AIM_MODEL_ID` | Profile / Template | Model identifier for custom models (base container deployments). Mutually exclusive with `AIM_ID`. |
@@ -91,7 +92,17 @@ These are set on inference containers by the operator. The "Source" column lists
 
 ### Environment Variable Merge Order
 
-When the same variable is set at multiple levels, the most specific wins:
+For variables that are not framework-owned, the most specific value wins:
+
+:::{admonition} Framework-owned v1alpha2 variables
+:class: important
+
+`AIM_ENGINE`, `AIM_PROFILE_ID`, `AIM_ID`, `AIM_MODEL_ID`, and
+`AIM_CACHE_PATH` are assembled from the resolved profile and cache state after
+normal environment merging. Values with those names in service or profile
+`containerEnv` do not override the operator-managed values. Configure the
+corresponding profile fields instead.
+:::
 
 ::::{tab-set}
 :::{tab-item} v1alpha2

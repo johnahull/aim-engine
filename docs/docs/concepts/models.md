@@ -203,7 +203,7 @@ The unified `spec` shape used by all three flows:
 |---|---|---|
 | `image` | Official, Base | Source image to inspect for discovery. Mutually exclusive with `derivedFrom`. |
 | `derivedFrom` | Fine-tuned, Custom | Derivation spec — selector, version policy, overrides. Mutually exclusive with `image`. Reuses [`AIMProfileSetSpec`](profilesets.md#spec-shape). |
-| `imagePullSecrets` | All | Secrets used for image inspection and propagated to derived runtime profiles. |
+| `imagePullSecrets` | All | Secret names used for image inspection and propagated to derived runtime profiles. `AIMModel` discovery resolves them in the model namespace; `AIMClusterModel` discovery resolves them in the operator namespace. Consumers of a cluster profile need corresponding credentials in their service namespace. See [Private Registries](../guides/private-registries.md). |
 | `serviceAccountName` | All | Service account propagated to managed child resources. |
 
 The v1alpha2 CRD explicitly forbids the legacy v1alpha1 fields (`spec.aimId`, `spec.modelSources`, `spec.custom`, `spec.customTemplates`, `spec.discovery`, `spec.defaultServiceTemplate`, `spec.runtimeConfigName`, `spec.env`, `spec.imageMetadata`, `spec.profileCopy`) — admission rejects them with a targeted error message.

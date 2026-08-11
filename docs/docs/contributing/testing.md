@@ -86,7 +86,7 @@ kubectl create secret docker-registry dockerhub-regcred \
 
 Or create the same-named pull secret in the `default` namespace and the helper will copy it in.
 
-Useful overrides: `PULL_SECRET_SOURCE_NS` changes the copy-from namespace, and `PULL_SECRET_REQUIRED=1` makes a missing pull secret fail instead of warn.
+Useful overrides: `PULL_SECRET_SOURCE_NS` changes the copy-from namespace, `PULL_SECRET_TARGET_NAME` copies a pull secret under a temporary test-owned name, and `PULL_SECRET_REQUIRED=1` makes a missing pull secret fail instead of warn.
 
 #### Authenticated Hugging Face tests
 
@@ -112,6 +112,64 @@ The `needs-secret` exclusion lives in the ENV selector, so pointing `CHAINSAW_TE
 make test-chainsaw \
   CHAINSAW_TEST_DIR=tests/e2e/aimservice/gpu/v1alpha2-profile-via-model-cpu-live \
   CHAINSAW_ENV_SELECTOR=
+```
+
+#### WAN 2.2 vLLM-Omni live reference
+
+`tests/e2e/aimservice/gpu/wan22-vllm-omni-live` is an opt-in,
+executable reference for deploying the private WAN 2.2 T2V image through the
+complete v1alpha2 path. It demonstrates:
+
+- copying a private-registry pull secret into both the test namespace and
+  `aim-system`, where `AIMClusterModel` discovery runs;
+- discovering and pinning the exact 1-GPU USP1 profile;
+- preserving the embedded vLLM-Omni profile filename and projecting
+  `AIM_ENGINE=vllm_omni`, `AIM_PROFILE_ID`, and a 32 GiB `/dev/shm`;
+- downloading the complete Diffusers repository with `downloadFilter: {}`;
+- generating a three-second MP4 through `/v1/videos/sync` and validating its
+  frame count and duration.
+
+Prerequisites are one available MI300X, Longhorn, the vLLM-Omni-capable
+operator build under test, and credentials for `docker.io/silogenai`. A cold
+namespace downloads approximately 118 GiB, so allow substantial storage and up
+to 90 minutes for the cache:
+
+```bash
+make test-chainsaw \
+  ENV=gpu \
+  CHAINSAW_TEST_DIR=tests/e2e/aimservice/gpu/wan22-vllm-omni-live \
+  CHAINSAW_ENV_SELECTOR=
+```
+
+By default the helper looks for `dockerhub-regcred` in `default` or at the
+documented local manifest path. To reuse a differently named cluster secret,
+set the source name and namespace; the test copies it to a unique temporary
+name and removes only that copy:
+
+```bash
+PULL_SECRET_NAME=silogenai-pull \
+PULL_SECRET_SOURCE_NS=aim-testing \
+make test-chainsaw \
+  ENV=gpu \
+  CHAINSAW_TEST_DIR=tests/e2e/aimservice/gpu/wan22-vllm-omni-live \
+  CHAINSAW_ENV_SELECTOR=
+```
+
+For a development cluster that already has the WAN artifact ready in a
+long-lived namespace, pass that namespace to Chainsaw to reuse the existing
+artifact rather than downloading another copy. The test's service, runtime
+config, profile cache, cluster model, generated profiles, and temporary secrets
+use reserved `wan22-vllm-omni-live` names and are removed at the end; an
+already-existing shared artifact is not deleted:
+
+```bash
+PULL_SECRET_NAME=silogenai-pull \
+PULL_SECRET_SOURCE_NS=aim-testing \
+make test-chainsaw \
+  ENV=gpu \
+  CHAINSAW_TEST_DIR=tests/e2e/aimservice/gpu/wan22-vllm-omni-live \
+  CHAINSAW_ENV_SELECTOR= \
+  CHAINSAW_ARGS="--namespace aim-testing"
 ```
 
 ### Runtime projection mode tests (`Reduced`)

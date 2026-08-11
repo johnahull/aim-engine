@@ -34,6 +34,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/yaml"
 
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
@@ -86,6 +87,7 @@ type ProfileMetadata struct {
 	Metric              string `json:"metric"`
 	Precision           string `json:"precision"`
 	Type                string `json:"type"`
+	Variant             string `json:"variant,omitempty"`
 	// Features carries optional capability tokens (e.g. "adapters") into runtime
 	// ProfileMetadata; the runtime computes supports_adapters from it. Omitted
 	// when empty.
@@ -135,6 +137,7 @@ func AssembleProfileYAML(spec *aimv1alpha2.AIMProfileSpecCommon) ([]byte, string
 			Metric:              string(spec.Metric),
 			Precision:           string(spec.Precision),
 			Type:                string(spec.Type),
+			Variant:             spec.Variant,
 			Features:            append([]string(nil), spec.Features...),
 		},
 		EngineArgs: engineArgs,
@@ -146,18 +149,56 @@ func AssembleProfileYAML(spec *aimv1alpha2.AIMProfileSpecCommon) ([]byte, string
 		return nil, "", fmt.Errorf("failed to marshal profile YAML: %w", err)
 	}
 
-	filename := ProfileFilename(accModel, string(spec.Precision), accCount, string(spec.Metric))
+	filename, err := ProfileFilename(spec)
+	if err != nil {
+		return nil, "", err
+	}
 	return yamlBytes, filename, nil
 }
 
-// ProfileFilename returns the deterministic on-disk name of the assembled
-// profile YAML the runtime resolves AIM_PROFILE_ID against.
-func ProfileFilename(accModel, precision string, accCount int32, metric string) string {
-	accSegment := strings.ToLower(accModel)
+// ProfileFilename returns the on-disk name of the assembled profile YAML the
+// runtime resolves AIM_PROFILE_ID against. Discovered profiles retain their
+// original filename stem through spec.profileId. Manually authored profiles
+// without a profileId use an engine-aware deterministic fallback.
+func ProfileFilename(spec *aimv1alpha2.AIMProfileSpecCommon) (string, error) {
+	if spec == nil {
+		return "", fmt.Errorf("profile spec is nil")
+	}
+
+	if profileID := strings.TrimSuffix(spec.ProfileId, ".yaml"); profileID != "" {
+		filename := profileID + ".yaml"
+		if problems := validation.IsConfigMapKey(filename); len(problems) > 0 {
+			return "", fmt.Errorf("profileId %q cannot be used as a profile filename: %s", spec.ProfileId, strings.Join(problems, "; "))
+		}
+		return filename, nil
+	}
+
+	engine := strings.ToLower(spec.Engine)
+	if engine == "" {
+		// Preserve the historical filename for hand-authored profiles that
+		// predate spec.engine being populated.
+		engine = "vllm"
+	}
+	accSegment := strings.ToLower(spec.AcceleratorModel)
 	if accSegment == "" {
 		accSegment = "none"
 	}
-	return fmt.Sprintf("vllm-%s-%s-tp%d-%s.yaml", accSegment, precision, accCount, metric)
+	stem := fmt.Sprintf(
+		"%s-%s-%s-tp%d-%s",
+		engine,
+		accSegment,
+		spec.Precision,
+		spec.AcceleratorCount,
+		spec.Metric,
+	)
+	if spec.Variant != "" {
+		stem += "-" + spec.Variant
+	}
+	filename := stem + ".yaml"
+	if problems := validation.IsConfigMapKey(filename); len(problems) > 0 {
+		return "", fmt.Errorf("generated profile filename %q is invalid: %s", filename, strings.Join(problems, "; "))
+	}
+	return filename, nil
 }
 
 // BuildProfileConfigMap creates a ConfigMap containing the pre-assembled profile
@@ -205,9 +246,9 @@ func BuildProfileVolumeMount(aimId string) corev1.VolumeMount {
 }
 
 // BuildFrameworkEnvVars returns the operator-managed environment variables that
-// must be present on the predictor container for the AIM runtime to locate the
-// projected profile and, when model caching is active, to redirect model
-// loading to the PVC-backed local path.
+// must be present on the predictor container for the AIM runtime to select the
+// profile's engine, locate the projected profile and, when model caching is
+// active, redirect model loading to the PVC-backed local path.
 //
 // These vars are framework-owned: neither profile.ContainerEnv nor a consumer's
 // containerEnv overrides can override them. Consumers layer them on top of the
@@ -237,6 +278,9 @@ func BuildFrameworkEnvVars(profileSpec *aimv1alpha2.AIMProfileSpecCommon, profil
 	// (see BuildClusterServingRuntime).
 	vars := []corev1.EnvVar{
 		{Name: constants.EnvAIMProfileID, Value: aimProfileID},
+	}
+	if profileSpec.Engine != "" {
+		vars = append(vars, corev1.EnvVar{Name: constants.EnvAIMEngine, Value: profileSpec.Engine})
 	}
 
 	// When the profile declares modelSources, the AIMProfileCache has populated

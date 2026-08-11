@@ -350,7 +350,7 @@ spec:
                 x-kubernetes-list-type: map
               engine:
                 description: Engine identifies the inference engine (e.g., "vllm",
-                  "tgi").
+                  "vllm_omni").
                 type: string
               engineArgs:
                 description: |-
@@ -690,8 +690,9 @@ spec:
                 description: |-
                   ProfileId is the on-disk profile identifier from the AIM image
                   (e.g., "vllm-mi300x-fp8-tp1-latency"). Populated during discovery to link this
-                  CRD back to the profile YAML inside the container. Not required for manually
-                  created profiles.
+                  CRD back to the profile YAML inside the container. Runtime projection retains
+                  this identifier as the mounted YAML filename. Not required for manually created
+                  profiles, which receive an engine-aware generated filename when omitted.
                 type: string
               resources:
                 description: |-
@@ -774,6 +775,14 @@ spec:
                   - unoptimized
                 description: 'Type indicates the optimization level. Hierarchy: optimized
                   > general > preview > unoptimized.'
+                type: string
+              variant:
+                description: |-
+                  Variant distinguishes profiles that share the same engine, accelerator,
+                  precision, count, and metric but use a different runtime recipe (for
+                  example, "usp4"). Discovered profiles preserve metadata.variant here so
+                  the projected profile YAML and filename retain the image's identity.
+                pattern: ^[a-z][a-z0-9-]*$
                 type: string
             required:
             - image

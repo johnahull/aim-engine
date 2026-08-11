@@ -30,6 +30,7 @@ import (
 	kserveconstants "github.com/kserve/kserve/pkg/constants"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/yaml"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
@@ -82,6 +83,78 @@ func findMount(mounts []corev1.VolumeMount, name string) *corev1.VolumeMount {
 		}
 	}
 	return nil
+}
+
+func TestSharedMemoryVolume_EngineDefaults(t *testing.T) {
+	cases := []struct {
+		name   string
+		engine string
+		want   string
+	}{
+		{name: "generic runtime", engine: "vllm", want: constants.DefaultSharedMemorySize},
+		{name: "vLLM Omni", engine: "vllm_omni", want: constants.VLLMOmniSharedMemorySize},
+		{name: "vLLM Omni case insensitive", engine: "VLLM_OMNI", want: constants.VLLMOmniSharedMemorySize},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			volume := sharedMemoryVolume(tc.engine)
+			if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit == nil {
+				t.Fatalf("shared memory volume missing emptyDir size limit: %#v", volume)
+			}
+			if got := volume.EmptyDir.SizeLimit.String(); got != tc.want {
+				t.Errorf("shared memory size = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildNamespaceServingRuntime_WanProfileFidelity(t *testing.T) {
+	const variant = "usp4"
+
+	spec := sampleSpec()
+	spec.ProfileId = "vllm_omni-mi300x-fp16-tp4-latency-usp4"
+	spec.Engine = "vllm_omni"
+	spec.Variant = variant
+	spec.Precision = aimv1alpha1.AIMPrecision("fp16")
+	spec.AcceleratorCount = 4
+
+	runtime, cm, err := BuildNamespaceServingRuntime(NamespaceRuntimeInput{
+		ProfileName: "wan22-tp4-latency",
+		Namespace:   "aim-testing",
+		Spec:        spec,
+	})
+	if err != nil {
+		t.Fatalf("BuildNamespaceServingRuntime: %v", err)
+	}
+
+	filename := spec.ProfileId + ".yaml"
+	raw, ok := cm.Data[filename]
+	if !ok {
+		t.Fatalf("profile ConfigMap keys = %v, want %q", cm.Data, filename)
+	}
+
+	var emitted ProfileYAML
+	if err := yaml.Unmarshal([]byte(raw), &emitted); err != nil {
+		t.Fatalf("unmarshal projected profile: %v", err)
+	}
+	if emitted.Metadata.Variant != variant {
+		t.Errorf("projected metadata.variant = %q, want usp4", emitted.Metadata.Variant)
+	}
+
+	container := runtime.Spec.Containers[0]
+	wantProfileID := "custom/" + spec.AimId + "/" + spec.ProfileId
+	if got := envMap(container.Env)[constants.EnvAIMProfileID]; got != wantProfileID {
+		t.Errorf("AIM_PROFILE_ID = %q, want %q", got, wantProfileID)
+	}
+
+	dshm := findVolume(runtime.Spec.Volumes, constants.VolumeSharedMemory)
+	if dshm == nil || dshm.EmptyDir == nil || dshm.EmptyDir.SizeLimit == nil {
+		t.Fatalf("runtime missing sized shared-memory volume: %#v", dshm)
+	}
+	if got := dshm.EmptyDir.SizeLimit.String(); got != constants.VLLMOmniSharedMemorySize {
+		t.Errorf("shared memory size = %q, want %q", got, constants.VLLMOmniSharedMemorySize)
+	}
 }
 
 // completeNoCacheRuntime builds the representative projectable, non-caching

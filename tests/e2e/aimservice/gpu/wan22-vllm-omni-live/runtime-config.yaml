@@ -1,0 +1,21 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: wan22-vllm-omni-live
+spec:
+  routing:
+    enabled: true
+    gatewayRef:
+      name: kserve-ingress-gateway
+      namespace: kgateway-system
+    pathTemplate: "/integration/wan22-vllm-omni-live/{.metadata.namespace}/{.metadata.name}"
+    # Synchronous video generation can take several minutes on a cold runtime.
+    requestTimeout: "1200s"
+  storage:
+    defaultStorageClassName: longhorn
+    # Diffusers repositories contain required nested component directories.
+    # An empty filter means "download the complete repository tree".
+    downloadFilter: {}
+    # The downloaded WAN snapshot is about 118 GiB. Keep enough headroom for
+    # XET staging and filesystem overhead.
+    pvcHeadroomPercent: 120

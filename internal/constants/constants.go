@@ -278,6 +278,10 @@ const (
 	MountPathSharedMemory = "/dev/shm"
 	// DefaultSharedMemorySize is the default size for /dev/shm
 	DefaultSharedMemorySize = "8Gi"
+	// VLLMOmniSharedMemorySize is the /dev/shm size used by vLLM-Omni
+	// diffusion workloads, whose multi-process USP/VAE workers require more
+	// shared memory than the generic runtime default.
+	VLLMOmniSharedMemorySize = "32Gi"
 	// DefaultHTTPPort is the default HTTP port for inference services
 	DefaultHTTPPort = 8000
 	// DefaultGatewayPort is the default gateway port
@@ -355,6 +359,8 @@ const (
 	EnvAIMCachePath = "AIM_CACHE_PATH"
 	// EnvAIMID is the environment variable for the AIM product family identifier
 	EnvAIMID = "AIM_ID"
+	// EnvAIMEngine selects the runtime engine declared by the resolved profile
+	EnvAIMEngine = "AIM_ENGINE"
 	// EnvAIMMetric is the environment variable for the optimization metric
 	EnvAIMMetric = "AIM_METRIC"
 	// EnvAIMModelID is the environment variable for the model ID

@@ -60,20 +60,31 @@ func sampleProfileSpec() *aimv1alpha2.AIMProfileSpecCommon {
 
 func TestProfileFilename(t *testing.T) {
 	cases := []struct {
-		name      string
-		accModel  string
-		precision string
-		accCount  int32
-		metric    string
-		want      string
+		name string
+		spec *aimv1alpha2.AIMProfileSpecCommon
+		want string
 	}{
-		{"standard gpu profile", "MI300X", "fp8", 1, "latency", "vllm-mi300x-fp8-tp1-latency.yaml"},
-		{"multi gpu", "MI300X", "bf16", 8, "throughput", "vllm-mi300x-bf16-tp8-throughput.yaml"},
-		{"cpu profile empty accelerator", "", "fp16", 0, "latency", "vllm-none-fp16-tp0-latency.yaml"},
+		{
+			name: "standard gpu profile",
+			spec: sampleProfileSpec(),
+			want: "vllm-mi300x-fp8-tp1-latency.yaml",
+		},
+		{
+			name: "discovered Wan profile",
+			spec: &aimv1alpha2.AIMProfileSpecCommon{
+				ProfileId: "vllm_omni-mi300x-fp16-tp4-latency-usp4",
+				Engine:    "vllm_omni",
+				Variant:   "usp4",
+			},
+			want: "vllm_omni-mi300x-fp16-tp4-latency-usp4.yaml",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := profileFilename(tc.accModel, tc.precision, tc.accCount, tc.metric)
+			got, err := profileFilename(tc.spec)
+			if err != nil {
+				t.Fatalf("profileFilename error: %v", err)
+			}
 			if got != tc.want {
 				t.Fatalf("profileFilename: got %q want %q", got, tc.want)
 			}
@@ -89,6 +100,9 @@ func TestAssembleProfileYAML_NilSpec(t *testing.T) {
 
 func TestAssembleProfileYAML_RoundTrip(t *testing.T) {
 	spec := sampleProfileSpec()
+	spec.ProfileId = "vllm_omni-mi300x-fp8-tp1-latency-usp1"
+	spec.Engine = "vllm_omni"
+	spec.Variant = "usp1"
 	spec.EngineArgs = mustJSON(t, map[string]any{
 		"max-model-len": 8192.0,
 		"dtype":         "auto",
@@ -99,7 +113,7 @@ func TestAssembleProfileYAML_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assembleProfileYAML error: %v", err)
 	}
-	if filename != "vllm-mi300x-fp8-tp1-latency.yaml" {
+	if filename != "vllm_omni-mi300x-fp8-tp1-latency-usp1.yaml" {
 		t.Fatalf("unexpected filename: %q", filename)
 	}
 
@@ -132,8 +146,11 @@ func TestAssembleProfileYAML_RoundTrip(t *testing.T) {
 	if parsed.Metadata.GPUCount != 1 {
 		t.Errorf("gpu_count mismatch: %d", parsed.Metadata.GPUCount)
 	}
-	if parsed.Metadata.Engine != "vllm" {
+	if parsed.Metadata.Engine != "vllm_omni" {
 		t.Errorf("engine mismatch: %q", parsed.Metadata.Engine)
+	}
+	if parsed.Metadata.Variant != "usp1" {
+		t.Errorf("variant mismatch: %q", parsed.Metadata.Variant)
 	}
 	if parsed.EngineArgs["dtype"] != "auto" {
 		t.Errorf("engine_args dtype mismatch: %v", parsed.EngineArgs["dtype"])

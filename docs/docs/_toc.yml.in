@@ -57,6 +57,8 @@ subtrees:
                 title: AIM Models
               - file: concepts/profiles
                 title: Profiles
+              - file: concepts/inference-engines
+                title: Inference Engines
               - file: concepts/profilesets
                 title: AIM Profile Sets
               - file: concepts/model-sources

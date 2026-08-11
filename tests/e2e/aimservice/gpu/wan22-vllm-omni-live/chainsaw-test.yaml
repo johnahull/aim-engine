@@ -1,0 +1,255 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# WAN 2.2 T2V + vLLM-Omni live reference
+#
+# This opt-in test is executable deployment documentation for the complete
+# private-image path:
+#   AIMClusterModel image discovery -> exact USP1 AIMClusterProfile ->
+#   AIMService/cache/runtime projection -> POST /v1/videos/sync.
+#
+# It is intentionally excluded from routine suites. A cold run downloads about
+# 118 GiB and requires one MI300X plus Longhorn. See contributing/testing.md for
+# credentials, the exact opt-in command, and how to reuse a prewarmed namespace.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: wan22-vllm-omni-live
+  labels:
+    requires: gpu-amd
+    needs-secret: dockerhub_pull_secret
+spec:
+  description: >-
+    Discover the private WAN 2.2 T2V image, pin its 1-GPU USP1 vLLM-Omni
+    profile, verify runtime projection fidelity, and generate a three-second MP4.
+  timeouts:
+    assert: 600s
+    cleanup: 600s
+  steps:
+    # Keep the complete flow in one step so finally always removes the
+    # cluster-scoped model/profiles and the temporary aim-system pull secret.
+    - name: Deploy WAN 2.2 with vLLM-Omni and generate video
+      try:
+        - script:
+            timeout: 60s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: PULL_SECRET_TARGET_NAME
+                value: wan22-vllm-omni-live-pull
+              - name: PULL_SECRET_REQUIRED
+                value: "1"
+            content: |
+              set -eu
+              if kubectl get aimclustermodel wan22-vllm-omni-live >/dev/null 2>&1; then
+                echo "ERROR: reserved AIMClusterModel/wan22-vllm-omni-live already exists" >&2
+                exit 1
+              fi
+              if kubectl -n aim-system get secret wan22-vllm-omni-live-pull >/dev/null 2>&1; then
+                echo "ERROR: reserved secret/wan22-vllm-omni-live-pull already exists in aim-system" >&2
+                exit 1
+              fi
+              bash ../../../_shared/ensure-pull-secret.sh
+              NAMESPACE=aim-system bash ../../../_shared/ensure-pull-secret.sh
+
+        - apply:
+            file: runtime-config.yaml
+
+        - apply:
+            file: cluster-model.yaml
+
+        - assert:
+            timeout: 10m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterModel
+              metadata:
+                name: wan22-vllm-omni-live
+              status:
+                aimId: Wan-AI/Wan2.2-T2V-A14B-Diffusers
+                (managedProfiles.ready >= `1`): true
+                (conditions[?type == 'Ready']):
+                  - status: "True"
+
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: wan22-vllm-omni-live-vllm-omni-mi300x-fp16-tp1-latency-e60caca4
+                labels:
+                  aim.eai.amd.com/source-model: wan22-vllm-omni-live
+                  aim.eai.amd.com/profile-role: deployable
+              spec:
+                aimId: Wan-AI/Wan2.2-T2V-A14B-Diffusers
+                modelId: Wan-AI/Wan2.2-T2V-A14B-Diffusers
+                engine: vllm_omni
+                profileId: vllm_omni-mi300x-fp16-tp1-latency-usp1
+                variant: usp1
+                acceleratorModel: MI300X
+                acceleratorCount: 1
+                precision: fp16
+                metric: latency
+                engineArgs:
+                  usp: 1
+                  vae-patch-parallel-size: 1
+                imagePullSecrets:
+                  - name: wan22-vllm-omni-live-pull
+                modelSources:
+                  - modelId: Wan-AI/Wan2.2-T2V-A14B-Diffusers
+                    sourceUri: hf://Wan-AI/Wan2.2-T2V-A14B-Diffusers
+              status:
+                status: Ready
+                version: 0.13.0-rc1
+
+        - apply:
+            file: service.yaml
+
+        - assert:
+            timeout: 90m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  aim.eai.amd.com/service: wan22-vllm-omni-live
+              spec:
+                profileName: wan22-vllm-omni-live-vllm-omni-mi300x-fp16-tp1-latency-e60caca4
+                profileScope: Cluster
+                mode: Shared
+              status:
+                status: Ready
+
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                namespace: ($namespace)
+              spec:
+                modelId: Wan-AI/Wan2.2-T2V-A14B-Diffusers
+                sourceUri: hf://Wan-AI/Wan2.2-T2V-A14B-Diffusers
+                type: model
+              status:
+                status: Ready
+
+        - assert:
+            timeout: 30m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMService
+              metadata:
+                name: wan22-vllm-omni-live
+              status:
+                status: Running
+                resolvedProfile:
+                  name: wan22-vllm-omni-live-vllm-omni-mi300x-fp16-tp1-latency-e60caca4
+                  scope: Cluster
+
+        - script:
+            timeout: 5m
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              PROFILE=wan22-vllm-omni-live-vllm-omni-mi300x-fp16-tp1-latency-e60caca4
+              PROFILE_FILE=vllm_omni-mi300x-fp16-tp1-latency-usp1.yaml
+              EXPECTED_PROFILE_ID=custom/Wan-AI/Wan2.2-T2V-A14B-Diffusers/vllm_omni-mi300x-fp16-tp1-latency-usp1
+
+              deadline=$(( $(date +%s) + 300 ))
+              while [ "$(date +%s)" -lt "$deadline" ]; do
+                RUNTIME_NAME=$(kubectl -n "$NAMESPACE" get servingruntime -l "aim.eai.amd.com/profile=$PROFILE" \
+                  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+                if [ -n "$RUNTIME_NAME" ]; then
+                  break
+                fi
+                sleep 5
+              done
+              if [ -z "${RUNTIME_NAME:-}" ]; then
+                echo "ERROR: projected ServingRuntime for $PROFILE was not created" >&2
+                exit 1
+              fi
+
+              kubectl -n "$NAMESPACE" get servingruntime "$RUNTIME_NAME" -o json \
+                | jq -e --arg image "docker.io/silogenai/aim-instinct-target-wan-ai-wan2-2-t2v-a14b-diffusers-model-wan-ai-wan2-2-t2v-a14b-diffusers:0.13.0-rc1" \
+                    --arg profileID "$EXPECTED_PROFILE_ID" '
+                    .spec.containers[0].image == $image
+                    and any(.spec.containers[0].env[]; .name == "AIM_ENGINE" and .value == "vllm_omni")
+                    and any(.spec.containers[0].env[]; .name == "AIM_PROFILE_ID" and .value == $profileID)
+                    and any(.spec.volumes[]; .name == "dshm" and .emptyDir.medium == "Memory" and .emptyDir.sizeLimit == "32Gi")
+                    and any(.spec.imagePullSecrets[]; .name == "wan22-vllm-omni-live-pull")
+                  ' >/dev/null
+
+              CM_JSON=$(kubectl -n "$NAMESPACE" get configmap "$RUNTIME_NAME" -o json)
+              printf '%s' "$CM_JSON" | jq -e --arg key "$PROFILE_FILE" '.data[$key] != null' >/dev/null
+              PROFILE_YAML=$(printf '%s' "$CM_JSON" | jq -r --arg key "$PROFILE_FILE" '.data[$key]')
+              printf '%s\n' "$PROFILE_YAML" | grep -q '^aim_id: Wan-AI/Wan2.2-T2V-A14B-Diffusers$'
+              printf '%s\n' "$PROFILE_YAML" | grep -q '^model_id: Wan-AI/Wan2.2-T2V-A14B-Diffusers$'
+              printf '%s\n' "$PROFILE_YAML" | grep -q '^  engine: vllm_omni$'
+              printf '%s\n' "$PROFILE_YAML" | grep -q '^  variant: usp1$'
+              printf '%s\n' "$PROFILE_YAML" | grep -q '^  usp: 1$'
+              echo "Verified ServingRuntime/$RUNTIME_NAME and ConfigMap profile $PROFILE_FILE"
+
+        - script:
+            timeout: 25m
+            env:
+              - name: HTTP_BASE_PATH
+                value: (join('', ['/integration/wan22-vllm-omni-live/', $namespace, '/wan22-vllm-omni-live/v1']))
+            content: bash generate-video.sh
+
+      catch:
+        - describe:
+            apiVersion: aim.eai.amd.com/v1alpha2
+            kind: AIMClusterModel
+            name: wan22-vllm-omni-live
+        - describe:
+            apiVersion: aim.eai.amd.com/v1alpha2
+            kind: AIMClusterProfile
+            name: wan22-vllm-omni-live-vllm-omni-mi300x-fp16-tp1-latency-e60caca4
+        - describe:
+            apiVersion: aim.eai.amd.com/v1alpha2
+            kind: AIMService
+            name: wan22-vllm-omni-live
+        - describe:
+            apiVersion: aim.eai.amd.com/v1alpha2
+            kind: AIMProfileCache
+        - describe:
+            apiVersion: aim.eai.amd.com/v1alpha1
+            kind: AIMArtifact
+        - get:
+            apiVersion: v1
+            kind: Pod
+        - podLogs:
+            selector: aim.eai.amd.com/service=wan22-vllm-omni-live
+            tail: 200
+
+      finally:
+        - script:
+            timeout: 10m
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set +e
+              PROFILE=wan22-vllm-omni-live-vllm-omni-mi300x-fp16-tp1-latency-e60caca4
+
+              kubectl -n "$NAMESPACE" delete aimservice wan22-vllm-omni-live \
+                --ignore-not-found --wait=true --timeout=5m
+
+              kubectl -n "$NAMESPACE" get aimprofilecache -o json \
+                | jq -r --arg profile "$PROFILE" \
+                    '.items[] | select(.spec.profileName == $profile) | .metadata.name' \
+                | xargs -r kubectl -n "$NAMESPACE" delete aimprofilecache \
+                    --ignore-not-found --wait=true --timeout=5m
+
+              kubectl delete aimclustermodel wan22-vllm-omni-live \
+                --ignore-not-found --cascade=foreground --wait=true --timeout=5m
+              kubectl -n "$NAMESPACE" delete aimruntimeconfig wan22-vllm-omni-live \
+                --ignore-not-found
+              kubectl -n "$NAMESPACE" delete secret wan22-vllm-omni-live-pull \
+                --ignore-not-found
+              kubectl -n aim-system delete secret wan22-vllm-omni-live-pull \
+                --ignore-not-found

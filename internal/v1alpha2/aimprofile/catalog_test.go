@@ -38,7 +38,8 @@ func TestParseDiscoveryCatalog_FromRawYAMLs(t *testing.T) {
 	profileYAML := `aim_id: meta-llama/Llama-3-8B-Instruct
 model_id: meta-llama/Llama-3-8B-Instruct
 metadata:
-  engine: vllm
+  engine: vllm_omni
+  variant: usp1
   metric: latency
   precision: fp8
   type: standard
@@ -53,7 +54,7 @@ env_vars:
 
 	configMap := &corev1.ConfigMap{
 		Data: map[string]string{
-			FlattenProfilePath("meta-llama/Llama-3-8B-Instruct/mi300x-fp8.yaml"): profileYAML,
+			FlattenProfilePath("meta-llama/Llama-3-8B-Instruct/vllm_omni-mi300x-fp8-tp1-latency-usp1.yaml"): profileYAML,
 			DiscoveryCacheMetadataKey: `{
   "aimId": "meta-llama/Llama-3-8B-Instruct",
   "sourceImage": "quay.io/amd/aim-llama:0.9.0",
@@ -78,8 +79,14 @@ env_vars:
 		t.Fatalf("len(parsed.Profiles) = %d, want 1", len(parsed.Profiles))
 	}
 	item := parsed.Profiles[0]
-	if item.Spec.ProfileId != "mi300x-fp8" {
-		t.Fatalf("ProfileId = %q, want mi300x-fp8", item.Spec.ProfileId)
+	if item.Spec.ProfileId != "vllm_omni-mi300x-fp8-tp1-latency-usp1" {
+		t.Fatalf("ProfileId = %q, want discovered vllm_omni filename stem", item.Spec.ProfileId)
+	}
+	if item.Spec.Engine != "vllm_omni" {
+		t.Fatalf("Engine = %q, want vllm_omni", item.Spec.Engine)
+	}
+	if item.Spec.Variant != "usp1" {
+		t.Fatalf("Variant = %q, want usp1", item.Spec.Variant)
 	}
 	if item.Spec.Image != "quay.io/amd/aim-llama:0.9.0" {
 		t.Fatalf("Image = %q, want metadata sourceImage", item.Spec.Image)

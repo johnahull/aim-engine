@@ -122,6 +122,7 @@ Task-oriented walkthroughs for common workflows:
 - [AIM Services](concepts/services.md) — Resolution shapes, overlays, caching, status
 - [AIM Models](concepts/models.md) — The three model flows
 - [Profiles](concepts/profiles.md) — Self-contained runtime configurations
+- [Inference Engines](concepts/inference-engines.md) — vLLM and vLLM-Omni runtime behavior
 - [AIM Profile Sets](concepts/profilesets.md) — Derivation engine
 - [Model Sources](concepts/model-sources.md) — Auto-discovery from container registries
 - [Runtime Configuration](concepts/runtime-config.md) — Storage defaults, routing, environment resolution

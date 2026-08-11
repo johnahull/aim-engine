@@ -338,9 +338,11 @@ mark it with a new "incomplete-runtime" state), because:
 - The env↔ConfigMap-key **invariant makes the dangle self-correcting by
   construction**: both the eager bare CSR and the (eager/lazy) complete namespace
   runtime derive `AIM_PROFILE_ID` and the colocated ConfigMap's data key from the
-  **same** `serving.ProfileFilename` (keyed on the profile's identity axes —
-  aimId, accelerator, precision, count, metric — **not** the KServe runtime OBJECT
-  name), so hashing the runtime object name never changes
+  **same** `serving.ProfileFilename`. Discovered profiles use their authoritative
+  `spec.profileId`; hand-authored profiles without one use the engine-aware
+  fallback axes (engine, accelerator, precision, count, metric, optional
+  variant). Neither path depends on the KServe runtime OBJECT name, so hashing
+  that object name never changes
   `AIM_PROFILE_ID`, and once the shadow's same-key ConfigMap is mounted the env
   resolves. This invariant is load-bearing and must be preserved.
 

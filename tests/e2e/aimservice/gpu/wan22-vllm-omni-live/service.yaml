@@ -1,0 +1,24 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: wan22-vllm-omni-live
+spec:
+  runtimeConfigName: wan22-vllm-omni-live
+  # This exact name is deterministic for:
+  #   model name: wan22-vllm-omni-live
+  #   profileId:  vllm_omni-mi300x-fp16-tp1-latency-usp1
+  # Pinning it documents how callers select a specific USP recipe.
+  profile:
+    name: wan22-vllm-omni-live-vllm-omni-mi300x-fp16-tp1-latency-e60caca4
+  caching:
+    mode: Shared
+  imagePullSecrets:
+    - name: wan22-vllm-omni-live-pull
+  replicas: 1
+  resources:
+    requests:
+      cpu: "8"
+      memory: 64Gi
+    limits:
+      cpu: "16"
+      memory: 128Gi

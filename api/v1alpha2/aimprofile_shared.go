@@ -63,14 +63,23 @@ type AIMProfileSpecCommon struct {
 
 	// ProfileId is the on-disk profile identifier from the AIM image
 	// (e.g., "vllm-mi300x-fp8-tp1-latency"). Populated during discovery to link this
-	// CRD back to the profile YAML inside the container. Not required for manually
-	// created profiles.
+	// CRD back to the profile YAML inside the container. Runtime projection retains
+	// this identifier as the mounted YAML filename. Not required for manually created
+	// profiles, which receive an engine-aware generated filename when omitted.
 	// +optional
 	ProfileId string `json:"profileId,omitempty"`
 
-	// Engine identifies the inference engine (e.g., "vllm", "tgi").
+	// Engine identifies the inference engine (e.g., "vllm", "vllm_omni").
 	// +optional
 	Engine string `json:"engine,omitempty"`
+
+	// Variant distinguishes profiles that share the same engine, accelerator,
+	// precision, count, and metric but use a different runtime recipe (for
+	// example, "usp4"). Discovered profiles preserve metadata.variant here so
+	// the projected profile YAML and filename retain the image's identity.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]*$`
+	Variant string `json:"variant,omitempty"`
 
 	// Metric is the optimization target for this profile.
 	// +optional

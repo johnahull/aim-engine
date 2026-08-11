@@ -233,7 +233,7 @@ func BuildNamespaceServingRuntime(input NamespaceRuntimeInput) (*kservev1alpha1.
 	// identity-of-the-profile vars belong to the framework, not the user.
 	envVars := upsertEnvVars(spec.ContainerEnv, BuildFrameworkEnvVars(spec, filename))
 
-	volumes := []corev1.Volume{sharedMemoryVolume(), BuildProfileVolume(runtimeName)}
+	volumes := []corev1.Volume{sharedMemoryVolume(spec.Engine), BuildProfileVolume(runtimeName)}
 	mounts := []corev1.VolumeMount{sharedMemoryMount(), BuildProfileVolumeMount(spec.AimId)}
 
 	cacheVolumes, cacheMounts := buildProfileCacheMounts(input.Cache)
@@ -332,10 +332,13 @@ func BuildClusterServingRuntime(input ClusterRuntimeInput) (*kservev1alpha1.Clus
 	labels := runtimeLabels(input.ProfileName, spec)
 	annotations := runtimeAnnotations(input.ProfileName, spec)
 
-	filename := ProfileFilename(spec.AcceleratorModel, string(spec.Precision), spec.AcceleratorCount, string(spec.Metric))
+	filename, err := ProfileFilename(spec)
+	if err != nil {
+		return nil, fmt.Errorf("resolve profile filename: %w", err)
+	}
 	envVars := upsertEnvVars(spec.ContainerEnv, BuildFrameworkEnvVars(spec, filename))
 
-	volumes := []corev1.Volume{sharedMemoryVolume()}
+	volumes := []corev1.Volume{sharedMemoryVolume(spec.Engine)}
 	mounts := []corev1.VolumeMount{sharedMemoryMount()}
 
 	return &kservev1alpha1.ClusterServingRuntime{
@@ -409,8 +412,12 @@ func buildRuntimeSpec(
 
 // sharedMemoryVolume returns the emptyDir-backed /dev/shm volume every predictor
 // needs for multi-worker engines.
-func sharedMemoryVolume() corev1.Volume {
-	dshmSizeLimit := resource.MustParse(constants.DefaultSharedMemorySize)
+func sharedMemoryVolume(engine string) corev1.Volume {
+	size := constants.DefaultSharedMemorySize
+	if strings.EqualFold(engine, "vllm_omni") {
+		size = constants.VLLMOmniSharedMemorySize
+	}
+	dshmSizeLimit := resource.MustParse(size)
 	return corev1.Volume{
 		Name: constants.VolumeSharedMemory,
 		VolumeSource: corev1.VolumeSource{

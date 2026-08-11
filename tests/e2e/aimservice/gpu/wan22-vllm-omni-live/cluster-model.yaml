@@ -1,0 +1,11 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterModel
+metadata:
+  name: wan22-vllm-omni-live
+spec:
+  image: docker.io/silogenai/aim-instinct-target-wan-ai-wan2-2-t2v-a14b-diffusers-model-wan-ai-wan2-2-t2v-a14b-diffusers:0.13.0-rc1
+  imagePullSecrets:
+    - name: wan22-vllm-omni-live-pull
+  discovery:
+    createServiceTemplates: false
+    extractMetadata: true
