@@ -42,19 +42,27 @@ The Helm chart deploys an [AcceleratorDetector](../concepts/accelerator-detectio
 
 CRDs are distributed as a separate Helm chart and should be installed before the operator. See [Installation](../getting-started/installation.md#1-install-crds).
 
-### Scale-from-zero collector
+### Scale-from-zero gateway metrics
 
-AIM Engine's scale-from-zero feature is enabled by default and there is no Helm value to toggle it on or off — the controller always authors a gateway-rate activation trigger on ScaledObjects for services with `spec.minReplicas: 0`. For that trigger to fire, the cluster must run the `kgateway-metrics-collector` (a cluster-singleton OpenTelemetryCollector that scrapes the kgateway data-plane envoys and forwards the request counter to keda-otel-scaler). Keep this collector running at all times — it is the sole activation path for idle services, so while it is down no `minReplicas: 0` service can wake from zero.
+AIM Engine adds a gateway activation trigger to services with
+`spec.minReplicas: 0`. The chart defaults `scaleFromZero.gatewayProvider` to
+`none`, which renders no collector and rejects scale-from-zero services until
+a provider is selected. Set it to
+`envoyGateway` or `kgateway`; the chart derives the controller metric contract
+and renders the matching collector. For another implementation, select
+`custom`, use external collector management, and configure
+`scaleFromZero.activationMetricQueryTemplate` through a RuntimeConfig or the
+individual AIMService.
 
-That collector **ships with the AIM Engine Helm chart** and is enabled by default (`scaleFromZero.gatewayMetricsCollector.enable=true`), deployed into the release namespace, so a standard install already includes it. It requires the OpenTelemetry Operator CRDs to be present on the cluster. To manage it yourself instead — for example to run it in another namespace, or because the OpenTelemetry Operator is not installed — set that value to `false` and apply the standalone manifest:
+With Envoy Gateway, the shared `EnvoyExtensionPolicy` and the `EnvoyProxy`
+source-side delta sink remain platform-owned because they configure a specific
+Gateway. Set
+`scaleFromZero.gatewayMetricsCollector.management=external` only when the
+matching collector is also managed as platform infrastructure. See
+[Optional Envoy Gateway scale-from-zero](envoy-gateway-scale-from-zero.md)
+for installation, customization, and security guidance.
 
-```bash
-kubectl apply -f https://raw.githubusercontent.com/amd-enterprise-ai/aim-engine/main/config/prereqs/scale-from-zero/kgateway-metrics-collector.yaml
-```
-
-If your cluster does not match the defaults (kgateway data-plane labeled `gateway.networking.k8s.io/gateway-name=kserve-ingress-gateway`, keda-otel-add-on in the `keda` namespace), override the chart values (or, for the standalone manifest, edit the three `EDIT FOR YOUR CLUSTER` comments inline before applying). The full rationale and per-knob explanation lives in [`config/prereqs/scale-from-zero/README.md`](https://github.com/amd-enterprise-ai/aim-engine/tree/main/config/prereqs/scale-from-zero).
-
-The chart also exposes these scale-from-zero controller-config values, independent of the collector:
+The chart also exposes these scale-from-zero controller-config values:
 
 | Value | Default | Purpose |
 |---|---|---|

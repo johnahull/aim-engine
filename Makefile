@@ -209,16 +209,15 @@ kind-create: manifests ## Create kind cluster with all dependencies for local de
 	@# Create aim-system namespace (needed for cluster-scoped resources)
 	@echo "Creating aim-system namespace..."
 	@kubectl create namespace aim-system --dry-run=client -o yaml | kubectl apply -f -
-	@# Install core dependencies (cert-manager, kgateway, kserve)
+	@# Install core dependencies (cert-manager, Envoy Gateway, kserve)
 	@echo "Installing core dependencies..."
 	@helmfile sync -f hack/dependencies/helmfile.yaml.gotmpl
+	@# Install the OTLP receiver before verifying the gateway's configured sink.
+	@$(MAKE) install-dev-envoy-collector
+	@# Verify the gateway data plane came up and the default Gateway is programmed.
+	@$(MAKE) verify-gateway
 	@# Install the Kind-local TLS registry after cert-manager is ready.
 	@$(MAKE) kind-zot-install KIND_CLUSTER=aim-engine
-	@# Install scale-from-zero activation prereq (kgateway-metrics-collector).
-	@# Cluster-wide OpenTelemetryCollector that scrapes Envoy from kgateway
-	@# data-plane pods and forwards the request counter to keda-otel-scaler;
-	@# required for AIMServices with spec.minReplicas: 0 to ever activate.
-	@$(MAKE) install-scale-from-zero-prereq
 	@# Install kind-specific dependencies (NFS server + csi-driver-nfs)
 	@echo "Installing kind-specific dependencies..."
 	@helmfile sync -f hack/kind/helmfile.yaml.gotmpl
@@ -242,12 +241,22 @@ seaweedfs-init-bucket: ## Create the aim-cache S3 bucket in SeaweedFS.
 		--image=alpine/curl:latest -- \
 		sh -c 'curl -sf -X PUT http://seaweedfs-s3.seaweedfs-system:8333/aim-cache -o /dev/null -w "bucket created (HTTP %{http_code})\n"' || true
 
-.PHONY: install-scale-from-zero-prereq
-install-scale-from-zero-prereq: ## Install kgateway-metrics-collector (scale-from-zero activation prereq).
-	@echo "Installing scale-from-zero prereq (kgateway-metrics-collector)..."
-	@kubectl apply -f config/prereqs/scale-from-zero/kgateway-metrics-collector.yaml
-	@echo "Waiting for kgateway-metrics-collector deployment..."
-	@kubectl -n keda rollout status deploy/kgateway-metrics-collector --timeout=180s
+.PHONY: install-dev-envoy-collector
+install-dev-envoy-collector: ## Install the externally managed Envoy collector used by local development.
+	@echo "Installing local development Envoy collector (envoy-gateway-metrics-collector)..."
+	@kubectl apply -f config/prereqs/scale-from-zero/envoy-gateway-metrics-collector.yaml
+	@echo "Waiting for envoy-gateway-metrics-collector deployment..."
+	@kubectl -n keda rollout status deploy/envoy-gateway-metrics-collector --timeout=180s
+	@COLLECTOR_HOST=envoy-gateway-metrics-collector.keda.svc.cluster.local \
+		bash hack/configure-envoy-collector-sink.sh
+
+.PHONY: verify-gateway
+verify-gateway: ## Verify Envoy Gateway is installed and the default Gateway is programmed.
+	@echo "Verifying Envoy Gateway installation..."
+	@kubectl wait --for=condition=Available deploy/envoy-gateway -n envoy-gateway-system --timeout=300s
+	@kubectl wait --for=condition=Accepted gatewayclass/envoy-gateway --timeout=120s
+	@kubectl wait --for=condition=Programmed gateway/kserve-ingress-gateway -n envoy-gateway-system --timeout=300s
+	@echo "Envoy Gateway is ready."
 
 .PHONY: kind-zot-inotify-limit
 kind-zot-inotify-limit: ## Ensure Kind's host kernel has enough inotify instances for Zot.
@@ -555,18 +564,26 @@ lint-config: ## Verify golangci-lint linter configuration
 
 # vCluster naming convention: aim-{username}-dev
 VCLUSTER_NAME := aim-$(shell whoami)-dev
+# The local development stack deliberately uses Envoy Gateway even though the
+# distributable Helm chart defaults gatewayProvider to none. Helmfile installs
+# the Envoy Gateway dependencies and make watch passes the matching controller
+# metric scope explicitly instead of relying on the binary's legacy fallback.
+DEV_GATEWAY_PROVIDER := envoyGateway
+DEV_GATEWAY_ACTIVATION_SCOPE := httproute
 
 .PHONY: vcluster-create
 vcluster-create: ## Create personal vcluster, install dependencies, and connect.
-	@echo "Creating vcluster '$(VCLUSTER_NAME)'..."
+	@# Disconnect first to avoid creating a nested vcluster.
+	@echo "Disconnecting from any active vcluster (returns to host context)..."
+	@vcluster disconnect || true
+	@echo "Creating vcluster '$(VCLUSTER_NAME)' on host context '$$(kubectl config current-context)'..."
 	vcluster create $(VCLUSTER_NAME) --namespace $(VCLUSTER_NAME) -f hack/dependencies/vcluster.yaml
-	@echo "Installing dependencies..."
+	@echo "Installing development dependencies for $(DEV_GATEWAY_PROVIDER) (including Envoy Gateway Helm charts)..."
 	helmfile sync -f hack/dependencies/helmfile.yaml.gotmpl
-	@# Install scale-from-zero activation prereq (kgateway-metrics-collector).
-	@# Cluster-wide OpenTelemetryCollector that scrapes Envoy from kgateway
-	@# data-plane pods and forwards the request counter to keda-otel-scaler;
-	@# required for AIMServices with spec.minReplicas: 0 to ever activate.
-	@$(MAKE) install-scale-from-zero-prereq
+	@# Verify the gateway data plane came up and the default Gateway is programmed.
+	@$(MAKE) verify-gateway
+	@# Install the standalone collector used by the explicit Envoy dev stack.
+	@$(MAKE) install-dev-envoy-collector
 	@echo "Creating aim-system namespace..."
 	@kubectl create namespace aim-system --dry-run=client -o yaml | kubectl apply -f -
 	@echo "Installing CRDs..."
@@ -601,15 +618,15 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run -ldflags "$(LDFLAGS)" ./cmd/main.go
+	AIM_GATEWAY_ACTIVATION_SCOPE=$(DEV_GATEWAY_ACTIVATION_SCOPE) go run -ldflags "$(LDFLAGS)" ./cmd/main.go
 
 .PHONY: run-debug
 run-debug: manifests generate fmt vet ## Run a controller with debug logging enabled.
-	go run -ldflags "$(LDFLAGS)" ./cmd/main.go --zap-log-level=debug
+	AIM_GATEWAY_ACTIVATION_SCOPE=$(DEV_GATEWAY_ACTIVATION_SCOPE) go run -ldflags "$(LDFLAGS)" ./cmd/main.go --zap-log-level=debug
 
 .PHONY: watch
 watch: manifests generate install ## Run controller with live reload on file changes.
-	air
+	AIM_GATEWAY_ACTIVATION_SCOPE=$(DEV_GATEWAY_ACTIVATION_SCOPE) air
 
 .PHONY: tilt-up
 tilt-up: ## Run controller in cluster with Tilt (live reload, in-container builds).

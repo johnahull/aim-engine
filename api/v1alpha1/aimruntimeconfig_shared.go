@@ -95,6 +95,23 @@ type AIMStorageConfig struct {
 	AdapterDiskSize *resource.Quantity `json:"adapterDiskSize,omitempty"`
 }
 
+// AIMScaleFromZeroConfig configures the gateway activation metric used to wake
+// a service from zero replicas.
+type AIMScaleFromZeroConfig struct {
+	// ActivationMetricQueryTemplate overrides the provider-derived KEDA
+	// OpenTelemetry metric query. The controller expands these placeholders:
+	// ${namespace}, ${serviceName}, ${httpRouteName}, and
+	// ${predictorDeployment}. Unknown placeholders make the service
+	// configuration invalid.
+	//
+	// A value set directly on AIMService takes precedence over namespace and
+	// cluster RuntimeConfig values.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	ActivationMetricQueryTemplate string `json:"activationMetricQueryTemplate,omitempty"`
+}
+
 // AIMServiceRuntimeConfig contains runtime configuration fields that apply to services.
 // This struct is shared between AIMService.spec (inlined) and AIMRuntimeConfigCommon,
 // allowing services to override these specific runtime settings while inheriting defaults
@@ -109,6 +126,11 @@ type AIMServiceRuntimeConfig struct {
 	// When set, these values override namespace/cluster runtime config defaults.
 	// +optional
 	Routing *AIMRuntimeRoutingConfig `json:"routing,omitempty"`
+
+	// ScaleFromZero configures the activation metric query for this service.
+	// When set, these values override namespace/cluster runtime config defaults.
+	// +optional
+	ScaleFromZero *AIMScaleFromZeroConfig `json:"scaleFromZero,omitempty"`
 
 	// Env specifies environment variables for inference containers.
 	// When set on AIMService, these take highest precedence in the merge hierarchy.

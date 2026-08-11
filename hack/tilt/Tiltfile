@@ -183,14 +183,26 @@ else:
 # Kubernetes Resources
 # ============================================================================
 
+# Tilt deliberately uses Envoy Gateway in development, while keeping the
+# Gateway and its EnvoyExtensionPolicy platform-owned. This preflight rejects a
+# conflicting Helm-owned controller/collector, verifies the extension is
+# accepted, and idempotently installs the standalone collector in keda.
+local_resource(
+    'envoy-scale-from-zero',
+    cmd='cd ' + ROOT + ' && mise exec -- ./hack/tilt/ensure-envoy-development.sh',
+    deps=[
+        ROOT + '/hack/tilt/ensure-envoy-development.sh',
+        ROOT + '/config/prereqs/scale-from-zero/envoy-gateway-metrics-collector.yaml',
+    ],
+    labels=['setup'],
+)
+
 # Generate deployment with our customizations (PVC for build cache, image override)
 k8s_yaml(kustomize('kustomize'))
 
-# Configure the main deployment. resource_deps ensures the downloader
-# image is pushed to ttl.sh BEFORE the operator pod tries to spawn any
-# download Job referencing it; without this, a race on first startup
-# could create download Jobs pointing at a tag that hasn't been pushed
-# yet, producing transient ImagePullBackOff loops.
+# Configure the main deployment. resource_deps ensures the Envoy activation
+# path is ready and the downloader image is pushed to ttl.sh before the
+# controller starts.
 k8s_resource(
     'aim-engine-controller-manager',
     port_forwards=[
@@ -198,7 +210,7 @@ k8s_resource(
         port_forward(8080, 8080, name='metrics'),
     ] + ([port_forward(2345, 2345, name='delve')] if DEBUG_MODE else []),
     labels=['aim-engine'],
-    resource_deps=['artifact-downloader-image'],
+    resource_deps=['artifact-downloader-image', 'envoy-scale-from-zero'],
 )
 
 # ============================================================================

@@ -63,7 +63,9 @@ fi
 # .Values.manager.env. The kubebuilder helm/v2-alpha plugin emits no env:
 # stanza, so we splice one in here. The artifactDownloaderImage override lets
 # private installs point download Jobs at a non-public downloader mirror
-# without rebuilding the operator binary.
+# without rebuilding the operator binary. The activation scope is derived from
+# gatewayProvider by a chart helper so the controller and rendered collector
+# cannot be configured for different gateway metric contracts.
 # ------------------------------------------------------------------------------
 echo "  - Adding manager env injection (scale-from-zero + artifactDownloaderImage)..."
 if [[ -f "${MANAGER_YAML}" ]]; then
@@ -93,6 +95,8 @@ env_block = (
     f"{child_indent}  value: {{{{ .Values.scaleFromZero.scalerAddress | quote }}}}\n"
     f"{child_indent}- name: AIM_COOLDOWN_SECONDS_PER_GI_MEMORY\n"
     f"{child_indent}  value: {{{{ .Values.scaleFromZero.cooldownSecondsPerGiMemory | quote }}}}\n"
+    f"{child_indent}- name: AIM_GATEWAY_ACTIVATION_SCOPE\n"
+    f"{child_indent}  value: {{{{ include \"chart.gatewayActivationScope\" . | quote }}}}\n"
     f"{child_indent}{{{{- if .Values.manager.artifactDownloaderImage }}}}\n"
     f"{child_indent}- name: AIM_ARTIFACT_DOWNLOADER_IMAGE\n"
     f"{child_indent}  value: {{{{ .Values.manager.artifactDownloaderImage | quote }}}}\n"
@@ -177,7 +181,6 @@ rm -rf "${CHART_DIR}/templates/crd"
 # Remove kustomize-generated add-on resources from other.yaml. These are
 # replaced by custom Helm templates with values support:
 #   - accelerator-detector  -> templates/accelerator-detector.yaml
-#   - scale-from-zero collector (aim-scale-from-zero) -> templates/scale-from-zero-collector.yaml
 # ------------------------------------------------------------------------------
 OTHER_YAML="${CHART_DIR}/templates/other/other.yaml"
 if [[ -f "${OTHER_YAML}" ]]; then
@@ -187,46 +190,11 @@ import re, sys
 with open('${OTHER_YAML}') as f:
     content = f.read()
 docs = re.split(r'^---$', content, flags=re.MULTILINE)
-tokens = ('accelerator-detector', 'aim-scale-from-zero')
+tokens = ('accelerator-detector',)
 filtered = [d for d in docs if not any(t in d for t in tokens)]
 with open('${OTHER_YAML}', 'w') as f:
     f.write('---'.join(filtered))
 "
-fi
-
-# ------------------------------------------------------------------------------
-# Remove the plugin-generated scale-from-zero collector RBAC fragment. The
-# helm/v2-alpha plugin emits only the ClusterRoleBinding here (gated on
-# metrics.enable, and missing its ServiceAccount + ClusterRole). The complete,
-# values-driven set lives in templates/scale-from-zero-collector.yaml.
-# ------------------------------------------------------------------------------
-COLLECTOR_RBAC="${CHART_DIR}/templates/rbac/kgateway-metrics-collector.yaml"
-if [[ -f "${COLLECTOR_RBAC}" ]]; then
-    echo "  - Removing plugin-generated scale-from-zero collector RBAC fragment..."
-    rm -f "${COLLECTOR_RBAC}"
-fi
-
-# ------------------------------------------------------------------------------
-# Restore the manager ServiceAccount. Whenever extra RBAC (the scale-from-zero
-# collector) is present in config/default, the helm/v2-alpha plugin drops
-# ServiceAccount/aim-engine-controller-manager from its output -- even though
-# the manager Deployment and its RoleBindings still reference it. Without this
-# the operator pods fail to schedule ("serviceaccount not found"). We re-create
-# the SA here to match what the plugin emits when no extra RBAC is present.
-# ------------------------------------------------------------------------------
-MANAGER_SA="${CHART_DIR}/templates/rbac/controller-manager.yaml"
-if [[ ! -f "${MANAGER_SA}" ]]; then
-    echo "  - Restoring manager ServiceAccount (dropped by helm/v2-alpha plugin)..."
-    cat > "${MANAGER_SA}" <<'EOF'
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-    app.kubernetes.io/name: aim-engine
-  name: aim-engine-controller-manager
-  namespace: {{ .Release.Namespace }}
-EOF
 fi
 
 # ------------------------------------------------------------------------------

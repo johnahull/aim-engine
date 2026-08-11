@@ -51,7 +51,8 @@ manager:
   # runtime-config overrides still take precedence over this install-time default.
   artifactDownloaderImage: ""
 
-  # -- Additional environment variables for the controller
+  # -- Additional environment variables for the controller. Variables managed
+  # by dedicated chart values cannot be overridden here.
   env: []
 
   # -- Additional volume mounts for the controller
@@ -142,8 +143,8 @@ clusterRuntimeConfig:
   #     gatewayRef:
   #       group: gateway.networking.k8s.io
   #       kind: Gateway
-  #       name: aim-gateway
-  #       namespace: kgateway-system
+  #       name: kserve-ingress-gateway
+  #       namespace: envoy-gateway-system
   #     pathTemplate: "/{.metadata.namespace}/{.metadata.name}"
   #     annotations: {}
   #   model:
@@ -180,63 +181,57 @@ clusterModelSource:
   #     - "amdenterpriseai/aim-qwen-qwen3-32b:0.8.4"
   spec: {}
 
-# -- Controller-side tuning for scale-from-zero. The feature itself is
-# always on; these knobs adjust how the controller authors KEDA
-# ScaledObjects for services with `spec.minReplicas: 0` and whether the
-# cluster-wide activation collector ships with the chart.
-# See `docs/docs/guides/scaling-and-autoscaling.md` for the full design.
+# -- Configure scale-from-zero triggers and the gateway-specific activation
+# collector.
 scaleFromZero:
-  # -- gRPC endpoint of the keda-otel-add-on scaler. Used for both
-  # gateway-rate activation metrics and in-pod vLLM metrics. Default
-  # matches a stock keda-otel-add-on install in the `keda` namespace.
+  # -- gRPC endpoint written to KEDA external metric triggers
   scalerAddress: keda-otel-scaler.keda.svc:4318
 
-  # -- Seconds-per-GiB multiplier in the cooldown heuristic
+  # -- Seconds per GiB added to the default cooldown period
   #
   #   cooldownPeriod = clamp(300 + memGiB * cooldownSecondsPerGiMemory, 300, 1200)
   #
-  # The default (5) budgets for ~1.6 GB/s warm-cache throughput plus
-  # the scaler's rate-decay window. Tune for your storage:
-  # faster (NVMe/hugepages) -> 2-3; slower (NFS/network PVC) -> 8-12;
-  # CPU-only inference -> 0 to disable the memory contribution.
   # Per-service `spec.autoScaling.cooldownPeriod` always wins.
   cooldownSecondsPerGiMemory: 5
 
   # Note: the gateway-rate *activation* trigger's targetValue (a neutralizing
-  # 0->1 ceiling) and operationOverTime (`avg`, joined to the collector's
-  # cumulativetodelta processor) are compiled-in controller constants, not
-  # Helm values -- the only correct value for each would be the default, so
-  # they are deliberately not exposed.
+  # 0->1 ceiling) and operationOverTime (`avg`) are compiled-in controller
+  # constants, not Helm values. Envoy Gateway supplies source-side deltas;
+  # kgateway currently uses the collector's cumulative-to-delta processor.
 
-  # -- Cluster-singleton OpenTelemetry collector that scrapes kgateway
-  # data-plane Envoy stats and forwards the gateway request-rate counter to
-  # keda-otel-scaler. This is the only activation signal an AIMService with
-  # `spec.minReplicas: 0` has while it sits at zero pods, so it must run for
-  # scale-from-zero to ever wake a service back up. Deployed into the release
-  # namespace. Requires the OpenTelemetry Operator CRDs on the cluster.
+  # -- Gateway implementation that supplies scale-from-zero activation
+  # metrics. Supported values are "none", "envoyGateway", "kgateway", and
+  # "custom". The default "none" installs no collector and makes
+  # minReplicas=0 invalid until a provider is selected. Known providers select
+  # both the controller's default metric contract and the collector rendered
+  # by Helm. "custom" requires external collector management and an
+  # activationMetricQueryTemplate on a service or its RuntimeConfig.
+  gatewayProvider: none
+
+  # -- OpenTelemetry collector that forwards gateway activation metrics to
+  # keda-otel-scaler. Envoy Gateway's EnvoyExtensionPolicy and source-side
+  # delta OTLP sink are managed separately on the platform-owned Gateway.
   gatewayMetricsCollector:
-    # -- Ship and manage the gateway-metrics collector with the chart.
-    # Disable if you install it out-of-band (see
-    # `config/prereqs/scale-from-zero/`) or the OpenTelemetry Operator is
-    # not present, in which case `helm install` would fail on the
-    # OpenTelemetryCollector CR.
-    enable: true
+    # -- Collector ownership. Use "helm" to render the collector selected by
+    # gatewayProvider, or "external" when platform infrastructure manages it.
+    management: helm
 
-    # -- OTLP gRPC endpoint of the keda-otel-add-on receiver the collector
-    # pushes the gateway-rate metric to. Must resolve from the collector's
-    # (release) namespace.
+    # -- OTLP gRPC endpoint for keda-otel-add-on
     otlpEndpoint: keda-otel-scaler.keda.svc:4317
 
-    # -- Value of the `gateway.networking.k8s.io/gateway-name` label on your
-    # kgateway data-plane pods; selects which gateways are scraped.
-    gatewayName: kserve-ingress-gateway
-
-    # -- Collector scrape interval. Keep well below the controller's scaler
-    # pollingInterval so a single request between polls stays visible.
+    # -- Metrics scrape interval used only by the kgateway collector. Envoy
+    # Gateway pushes source-side deltas over OTLP instead of being scraped.
     scrapeInterval: 1s
 
-    # -- Number of collector replicas
+    # -- Number of collector replicas. Envoy Gateway can use multiple OTLP
+    # receivers for availability. Keep this at 1 for kgateway because its
+    # Prometheus receivers would scrape and export the same series repeatedly.
     replicas: 1
+
+    kgateway:
+      # -- Value of the gateway.networking.k8s.io/gateway-name label on the
+      # kgateway proxy pods. Used only when gatewayProvider is "kgateway".
+      gatewayName: kserve-ingress-gateway
 
     # -- Resource requests/limits for the collector pod
     resources:

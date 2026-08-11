@@ -38,6 +38,22 @@ After the initial build, incremental changes are fast (~10s) because:
 - kubectl configured for a Kind or vcluster context
 - Cluster set up with `make kind-create` or `make vcluster-create`
 
+The development platform deliberately uses Envoy Gateway. On startup, Tilt:
+
+1. Refuses to deploy over a Helm-owned AIM Engine controller or
+   Helm-managed gateway collector.
+2. Verifies the platform-owned Envoy Gateway and
+   `EnvoyExtensionPolicy/route-activation-metrics` are ready and accepted.
+3. Idempotently installs the standalone Envoy OTLP collector in `keda` and
+   ensures the development `EnvoyProxy` sends source-side deltas to it.
+4. Starts the Kustomize-managed controller with
+   `AIM_GATEWAY_ACTIVATION_SCOPE=httproute`.
+
+If AIM Engine is currently installed by Helm, uninstall that release before
+starting Tilt. Do not run both ownership modes at once. The standalone
+collector is a development-platform resource and remains available after
+`make tilt-down`.
+
 ## Context Restrictions
 
 Tilt only allows `kind-*` and `vcluster_*` contexts to prevent accidental deployment to production clusters.

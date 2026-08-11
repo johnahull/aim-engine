@@ -1574,8 +1574,8 @@ func TestConfigureReplicasAndAutoscaling_ForwardsUserMetricsForOTelCollector(t *
 	}
 
 	for _, m := range isvc.Spec.Predictor.AutoScaling.Metrics {
-		if m.PodMetric != nil && strings.Contains(m.PodMetric.Metric.Query, "envoy_cluster_external_upstream_rq_completed") {
-			t.Fatalf("controller must not inject the gateway-rate metric into the ISVC AutoScaling spec; got: %+v", m)
+		if m.PodMetric != nil && strings.Contains(m.PodMetric.Metric.Query, "aim_activation_requests") {
+			t.Fatalf("controller must not inject the gateway activation metric into the ISVC AutoScaling spec; got: %+v", m)
 		}
 	}
 }

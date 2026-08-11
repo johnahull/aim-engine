@@ -12,3 +12,11 @@ manager:
     - name: zot-ca
       configMap:
         name: aim-engine-zot-ca
+
+# kind-create installs the Envoy platform policy and one standalone collector
+# in keda. Helm configures the matching controller contract but must not render
+# a second collector in aim-system.
+scaleFromZero:
+  gatewayProvider: envoyGateway
+  gatewayMetricsCollector:
+    management: external

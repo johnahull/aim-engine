@@ -11,6 +11,7 @@ on:
       - 'config/**'
       - 'images/artifact-downloader/**'
       - 'images/aim-dummy/**'
+      - 'hack/verify-helm-gateway-providers.sh'
       - 'Makefile'
       - 'Dockerfile'
       - '.github/workflows/publish-main.yml'
@@ -136,8 +137,8 @@ jobs:
             CHART_IMAGE_TAG=${IMAGE_TAG} \
             TAG=${IMAGE_TAG}
 
-      - name: Validate chart with helm template
-        run: helm template aim-engine ./dist/chart > /dev/null
+      - name: Validate gateway provider render matrix
+        run: ./hack/verify-helm-gateway-providers.sh ./dist/chart
 
       - name: Lint Helm chart
         run: helm lint ./dist/chart
@@ -169,6 +170,15 @@ jobs:
           mkdir -p crd
           cp dist/crds.yaml crd/crds.yaml
           git add crd/crds.yaml
+
+          # Add version-matched scale-from-zero policies and standalone collectors.
+          mkdir -p prereqs/scale-from-zero
+          cp config/prereqs/scale-from-zero/README.md prereqs/scale-from-zero/
+          cp config/prereqs/scale-from-zero/*.yaml prereqs/scale-from-zero/
+          sed -i \
+            's#config/prereqs/scale-from-zero/#prereqs/scale-from-zero/#g' \
+            prereqs/scale-from-zero/README.md
+          git add prereqs/scale-from-zero/
 
           # Create a README for the branch
           cat > README.md << 'EOF'
@@ -218,13 +228,30 @@ jobs:
           helm install aim-engine ./chart --namespace aim-system --create-namespace
           ```
 
-          Scale-from-zero: the chart ships the cluster-wide gateway-metrics
-          collector by default (`scaleFromZero.gatewayMetricsCollector.enable=true`),
-          required for any AIMService with `spec.minReplicas: 0`. It needs the
-          OpenTelemetry Operator on the cluster. To manage it yourself instead,
-          install with `--set scaleFromZero.gatewayMetricsCollector.enable=false`
-          and apply `config/prereqs/scale-from-zero/kgateway-metrics-collector.yaml`
-          (see its README for customization knobs).
+          Gateway activation is disabled by default. The base install does not
+          select a Gateway implementation or render a gateway metrics collector.
+
+          ### Optional Envoy Gateway scale-from-zero
+
+          A platform administrator must install Envoy Gateway and the
+          Gateway-targeted policy independently. The Gateway's `EnvoyProxy`
+          must also push OTLP metrics to the collector with
+          `reportCountersAsDeltas: true`. Edit the policy's Gateway
+          namespace/name, apply it, deliberately enable the matching
+          Helm-managed collector, and follow the setup guide to configure the
+          sink endpoint:
+
+          ```bash
+          curl -LO https://raw.githubusercontent.com/${{ github.repository }}/publish-main/prereqs/scale-from-zero/envoy-gateway-route-metrics.yaml
+          kubectl apply -f envoy-gateway-route-metrics.yaml
+          helm upgrade aim-engine ${{ env.CHART_OCI_REPO }}/${{ env.CHART_NAME }} \
+            --version ${{ steps.ver.outputs.chart_version }} \
+            --namespace aim-system \
+            --set scaleFromZero.gatewayProvider=envoyGateway
+          ```
+
+          See the [Envoy scale-from-zero setup guide](prereqs/scale-from-zero/README.md)
+          for target customization, verification, and security guidance.
 
           Or clone this branch:
 

@@ -1,7 +1,8 @@
 # Namespaced runtime config used by the scale-from-zero test. Scale-from-zero
 # requires routing because the controller-owned ScaledObject's activation
-# trigger (`envoy_cluster_external_upstream_rq_completed`) only has a series
-# to query once an HTTPRoute exists in front of the predictor. We keep this
+# trigger (`envoy_http_lua_aim_activation_requests_*`, emitted by shared Lua)
+# only has a series to query once an HTTPRoute exists in front of the
+# predictor. We keep this
 # config minimal (routing only -- no labelPropagation, storage or
 # unrelated settings) so the test surface is exactly the routing+autoscaling
 # interaction.
@@ -14,7 +15,7 @@ spec:
     enabled: true
     gatewayRef:
       name: kserve-ingress-gateway
-      namespace: kgateway-system
+      namespace: envoy-gateway-system
     # Namespace is included so concurrent / leftover runs don't collide on
     # the shared gateway path.
     pathTemplate: "/integration/scale-from-zero/{.metadata.namespace}/{.metadata.name}"

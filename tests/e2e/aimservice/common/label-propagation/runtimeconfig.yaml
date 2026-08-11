@@ -13,5 +13,5 @@ spec:
     enabled: true
     gatewayRef:
       name: kserve-ingress-gateway
-      namespace: kgateway-system
+      namespace: envoy-gateway-system
     pathTemplate: "/integration/label-propagation/{.metadata.namespace}/{.metadata.name}"

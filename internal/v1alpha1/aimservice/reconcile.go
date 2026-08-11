@@ -31,6 +31,7 @@ import (
 	servingv1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -239,6 +240,9 @@ func (obs ServiceObservation) GetComponentHealth(ctx context.Context, clientset 
 	// ConfigValid=False instead of letting the service idle to a state it can
 	// never wake from.
 	if cfg := ScaleToZeroRoutingComponentHealth(obs.service, obs.mergedRuntimeConfig.Value); cfg.Component != "" {
+		health = append(health, cfg)
+	}
+	if cfg := ScaleToZeroActivationMetricComponentHealth(obs.service, obs.mergedRuntimeConfig.Value); cfg.Component != "" {
 		health = append(health, cfg)
 	}
 
@@ -874,6 +878,334 @@ func isScaleToZeroIdle(scalingActive *autoscalingv2.HorizontalPodAutoscalerCondi
 	return podCount == 0
 }
 
+const kedaZeroActivationMetricPrefix = "s0-"
+
+// withOtherReportedExternalMetrics adds diagnostic context without making user
+// metrics part of the zero-to-one availability decision.
+func withOtherReportedExternalMetrics(
+	detail string,
+	hpa *autoscalingv2.HorizontalPodAutoscaler,
+	excludedMetricName string,
+) string {
+	var metricNames []string
+	for _, metric := range hpa.Status.CurrentMetrics {
+		if metric.Type != autoscalingv2.ExternalMetricSourceType ||
+			metric.External == nil ||
+			metric.External.Metric.Name == excludedMetricName ||
+			(metric.External.Current.Value == nil && metric.External.Current.AverageValue == nil) {
+			continue
+		}
+		metricNames = append(metricNames, metric.External.Metric.Name)
+	}
+	if len(metricNames) == 0 {
+		return detail
+	}
+	return fmt.Sprintf("%s; other reported external metrics: %q", detail, metricNames)
+}
+
+// zeroActivationMetricEvidence resolves KEDA's zero-to-one activation metric
+// from the HPA spec, then requires exactly one matching, valued external metric
+// in status.currentMetrics. Aggregate HPA conditions cannot identify which
+// trigger succeeded, so they are deliberately not consulted here.
+func zeroActivationMetricEvidence(
+	hpa *autoscalingv2.HorizontalPodAutoscaler,
+	expectedExternalMetricCount int,
+) (string, bool, string) {
+	if hpa.Status.ObservedGeneration != nil &&
+		*hpa.Status.ObservedGeneration < hpa.Generation {
+		return "", false, fmt.Sprintf(
+			"HPA status is stale at generation %d; waiting for generation %d",
+			*hpa.Status.ObservedGeneration,
+			hpa.Generation,
+		)
+	}
+
+	externalMetricCount := 0
+	var metricNames []string
+	for _, metric := range hpa.Spec.Metrics {
+		if metric.Type != autoscalingv2.ExternalMetricSourceType || metric.External == nil {
+			continue
+		}
+		externalMetricCount++
+		if strings.HasPrefix(metric.External.Metric.Name, kedaZeroActivationMetricPrefix) {
+			metricNames = append(metricNames, metric.External.Metric.Name)
+		}
+	}
+	if externalMetricCount != expectedExternalMetricCount {
+		return "", false, fmt.Sprintf(
+			"HPA spec contains %d external metrics; waiting for the expected %d "+
+				"(one zero-to-one activation metric and %d user scaling metrics)",
+			externalMetricCount,
+			expectedExternalMetricCount,
+			expectedExternalMetricCount-1,
+		)
+	}
+
+	switch len(metricNames) {
+	case 0:
+		return "", false, fmt.Sprintf(
+			"HPA spec does not contain an external zero-to-one activation metric with prefix %q",
+			kedaZeroActivationMetricPrefix,
+		)
+	case 1:
+		// Continue below.
+	default:
+		return "", false, fmt.Sprintf(
+			"HPA spec contains %d external zero-to-one activation metrics with prefix %q; expected exactly one",
+			len(metricNames),
+			kedaZeroActivationMetricPrefix,
+		)
+	}
+
+	metricName := metricNames[0]
+	if metricName == kedaZeroActivationMetricPrefix {
+		return metricName, false, fmt.Sprintf(
+			"HPA spec contains malformed zero-to-one activation metric name %q",
+			metricName,
+		)
+	}
+
+	matchingStatuses := 0
+	hasCurrentValue := false
+	for _, metric := range hpa.Status.CurrentMetrics {
+		if metric.Type != autoscalingv2.ExternalMetricSourceType ||
+			metric.External == nil ||
+			metric.External.Metric.Name != metricName {
+			continue
+		}
+		matchingStatuses++
+		hasCurrentValue = metric.External.Current.Value != nil ||
+			metric.External.Current.AverageValue != nil
+	}
+
+	switch matchingStatuses {
+	case 0:
+		return metricName, false, withOtherReportedExternalMetrics(
+			fmt.Sprintf(
+				"HPA currentMetrics does not contain zero-to-one activation metric %q",
+				metricName,
+			),
+			hpa,
+			metricName,
+		)
+	case 1:
+		// Continue below.
+	default:
+		return metricName, false, fmt.Sprintf(
+			"HPA currentMetrics contains %d entries for zero-to-one activation metric %q; expected exactly one",
+			matchingStatuses,
+			metricName,
+		)
+	}
+
+	if !hasCurrentValue {
+		return metricName, false, withOtherReportedExternalMetrics(
+			fmt.Sprintf(
+				"HPA currentMetrics entry for zero-to-one activation metric %q has no current value",
+				metricName,
+			),
+			hpa,
+			metricName,
+		)
+	}
+
+	return metricName, true, fmt.Sprintf(
+		"HPA reported zero-to-one activation metric %q in currentMetrics",
+		metricName,
+	)
+}
+
+// activationMetricGracePeriod is how long the scale-from-zero activation
+// trigger may stay unreadable before ActivationMetricAvailable escalates from
+// Unknown to False. It debounces two legitimate transients: KEDA needs a few
+// seconds to create the HPA and report its first current metric, and a collector
+// restart briefly interrupts the series. Deliberately longer than the
+// keda-otel-add-on metric-store retention window (~120s) so a single scrape gap
+// cannot trip the condition.
+const activationMetricGracePeriod = 3 * time.Minute
+
+// activationMetricCondition classifies the scale-from-zero activation signal
+// for reporting only. The condition it drives never gates readiness.
+//
+// Scope is deliberately narrow: the trigger is only diagnosable while the
+// predictor is holding replicas. KEDA cannot idle a Deployment whose trigger it
+// cannot evaluate, so "replicas running + trigger unreadable" is the one state
+// where absence is both actionable and unambiguous -- the service will never
+// idle. At zero replicas absence is the design's normal resting state, because
+// the selected gateway provider's activation counter (and therefore the series)
+// may only come into existence once a request creates it; reporting there would
+// alarm on every healthy idle service and cannot distinguish "resting" from
+// "dark".
+//
+// Returns ok=false when the condition does not apply and should be removed.
+func activationMetricCondition(
+	service *aimv1alpha1.AIMService,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+	hpa controllerutils.FetchResult[*autoscalingv2.HorizontalPodAutoscaler],
+	podCount int,
+	existing *metav1.Condition,
+	now time.Time,
+) (metav1.ConditionStatus, string, string, bool) {
+	if !isScaleToZero(service) || !hpa.OK() || hpa.Value == nil || podCount == 0 {
+		return "", "", "", false
+	}
+	if !isRoutingEnabled(service, runtimeConfig) {
+		return "", "", "", false
+	}
+	_, activationRequired, activationErr := resolveScaleToZeroActivationMetric(service, runtimeConfig)
+	if !activationRequired || activationErr != nil {
+		// Invalid activation configuration is reported by ScaleToZeroConfig.
+		// Do not inspect a potentially stale, user-only HPA and mislabel its s0
+		// metric as zero-to-one activation evidence.
+		return "", "", "", false
+	}
+
+	isvcName, err := GenerateInferenceServiceName(service.Name, service.Namespace)
+	if err != nil {
+		// Query resolution above already reports this as invalid configuration;
+		// keep the defensive guard local in case those implementations diverge.
+		return "", "", "", false
+	}
+	expectedExternalMetricCount := 1 + resolvedUserMetricTriggerCount(
+		service,
+		isvcName+constants.PredictorServiceSuffix,
+	)
+	metricName, readable, detail := zeroActivationMetricEvidence(
+		hpa.Value,
+		expectedExternalMetricCount,
+	)
+	if readable {
+		return metav1.ConditionTrue,
+			aimv1alpha1.AIMServiceReasonActivationMetricAvailable,
+			fmt.Sprintf(
+				"The HPA reported the zero-to-one activation metric %q in currentMetrics; "+
+					"the activation query is readable",
+				metricName,
+			),
+			true
+	}
+
+	if withinActivationGracePeriod(existing, now) {
+		return metav1.ConditionUnknown,
+			aimv1alpha1.AIMServiceReasonAwaitingActivationMetric,
+			fmt.Sprintf("Waiting for the HPA to report the zero-to-one activation metric (%s)", detail),
+			true
+	}
+
+	return metav1.ConditionFalse,
+		aimv1alpha1.AIMServiceReasonActivationMetricUnavailable,
+		fmt.Sprintf(
+			"The HPA has not reported the zero-to-one activation metric for over %s (%s). "+
+				"The service may not wake after scaling to zero. Verify the selected gateway provider's "+
+				"activation counter and scale-from-zero collector path.",
+			activationMetricGracePeriod, detail,
+		),
+		true
+}
+
+// withinActivationGracePeriod reports whether the activation signal has been
+// unreadable for less than activationMetricGracePeriod. ConditionManager
+// preserves LastTransitionTime while status and reason are unchanged, so the
+// existing condition is the "unreadable since" clock -- no extra status field
+// is needed.
+func withinActivationGracePeriod(existing *metav1.Condition, now time.Time) bool {
+	if existing == nil {
+		return true
+	}
+	switch existing.Reason {
+	case aimv1alpha1.AIMServiceReasonActivationMetricUnavailable:
+		// Already escalated; don't silently de-escalate to Unknown.
+		return false
+	case aimv1alpha1.AIMServiceReasonAwaitingActivationMetric:
+		return now.Sub(existing.LastTransitionTime.Time) < activationMetricGracePeriod
+	default:
+		// First observation, or recovering from a readable signal: restart the clock.
+		return true
+	}
+}
+
+// activationMetricRequeueAfter returns the remaining debounce window while the
+// current scale-from-zero activation assessment is AwaitingActivationMetric.
+// Reconciliation at this deadline lets the condition become False even when no
+// Kubernetes object changes after the first unreadable observation.
+func activationMetricRequeueAfter(
+	service *aimv1alpha1.AIMService,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+	hpa controllerutils.FetchResult[*autoscalingv2.HorizontalPodAutoscaler],
+	podCount int,
+	now time.Time,
+) time.Duration {
+	var existing *metav1.Condition
+	if service != nil {
+		for i := range service.Status.Conditions {
+			if service.Status.Conditions[i].Type == aimv1alpha1.AIMServiceConditionActivationMetricAvailable {
+				existing = &service.Status.Conditions[i]
+				break
+			}
+		}
+	}
+
+	status, reason, _, ok := activationMetricCondition(
+		service,
+		runtimeConfig,
+		hpa,
+		podCount,
+		existing,
+		now,
+	)
+	if !ok ||
+		status != metav1.ConditionUnknown ||
+		reason != aimv1alpha1.AIMServiceReasonAwaitingActivationMetric {
+		return 0
+	}
+
+	if existing == nil ||
+		existing.Status != metav1.ConditionUnknown ||
+		existing.Reason != aimv1alpha1.AIMServiceReasonAwaitingActivationMetric ||
+		existing.LastTransitionTime.IsZero() {
+		return activationMetricGracePeriod
+	}
+
+	remaining := existing.LastTransitionTime.Add(activationMetricGracePeriod).Sub(now)
+	switch {
+	case remaining <= 0:
+		return 0
+	case remaining > activationMetricGracePeriod:
+		return activationMetricGracePeriod
+	default:
+		return remaining
+	}
+}
+
+// setActivationMetricCondition publishes (or removes) the informational
+// ActivationMetricAvailable condition. Only the escalated False state emits an
+// event; the healthy and awaiting states are silent so an ordinary deploy stays
+// quiet.
+func setActivationMetricCondition(
+	cm *controllerutils.ConditionManager,
+	service *aimv1alpha1.AIMService,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+	hpa controllerutils.FetchResult[*autoscalingv2.HorizontalPodAutoscaler],
+	podCount int,
+) {
+	if cm == nil {
+		return
+	}
+	condType := aimv1alpha1.AIMServiceConditionActivationMetricAvailable
+	status, reason, message, ok := activationMetricCondition(
+		service, runtimeConfig, hpa, podCount, cm.Get(condType), time.Now(),
+	)
+	if !ok {
+		cm.Delete(condType)
+		return
+	}
+	opts := controllerutils.Silent()
+	if status == metav1.ConditionFalse {
+		opts = controllerutils.AsWarning()
+	}
+	cm.Set(condType, status, reason, message, opts)
+}
+
 func (obs ServiceObservation) getCacheHealth() controllerutils.ComponentHealth {
 	health := controllerutils.ComponentHealth{
 		Component:      "Cache",
@@ -1049,6 +1381,15 @@ func (r *ServiceReconciler) PlanResources(
 	service := obs.service
 
 	planResult := controllerutils.PlanResult{}
+	if requeueAfter := activationMetricRequeueAfter(
+		service,
+		obs.mergedRuntimeConfig.Value,
+		obs.hpa,
+		obs.observedPodCount(),
+		time.Now(),
+	); requeueAfter > 0 {
+		planResult.RequestRequeueAfter(requeueAfter)
+	}
 
 	// 0. Plan model creation if needed (before template check - model can be created independently)
 	// Both custom and image-based models are shared (no owner reference)
@@ -1073,7 +1414,7 @@ func (r *ServiceReconciler) PlanResources(
 	// the template is still resolving; planScaledObject falls back to a
 	// flat cooldown and the next reconcile re-plans idempotently.
 	effectiveResources := resolveEffectiveResources(service, templateSpec, templateStatus)
-	if so := planScaledObject(ctx, service, effectiveResources); so != nil {
+	if so := planScaledObject(ctx, service, effectiveResources, obs.mergedRuntimeConfig.Value); so != nil {
 		planResult.Apply(so)
 	}
 
@@ -1166,9 +1507,7 @@ func (r *ServiceReconciler) PlanResources(
 			// Preserve the current mount while the next PVC generation is unknown
 			// or its service subtree has not finished synchronizing.
 			logger.V(1).Info("Adapter disk binding not mountable yet; preserving running ISVC adapter wiring")
-			if planResult.RequeueAfter == 0 {
-				planResult.RequeueAfter = 5 * time.Second
-			}
+			planResult.RequestRequeueAfter(5 * time.Second)
 		default:
 			if service.Spec.AdaptersEnabled() {
 				if isvcObj, ok := isvc.(*servingv1beta1.InferenceService); ok {
@@ -1218,9 +1557,19 @@ func (obs ServiceObservation) getResolvedModel() (name string, status *aimv1alph
 // allowing the fetch logic to re-search for better alternatives on subsequent reconciles.
 func (r *ServiceReconciler) DecorateStatus(
 	status *aimv1alpha1.AIMServiceStatus,
-	_ *controllerutils.ConditionManager,
+	cm *controllerutils.ConditionManager,
 	obs ServiceObservation,
 ) {
+	// Report-only: whether KEDA can read the scale-from-zero activation
+	// trigger. Never gates readiness.
+	setActivationMetricCondition(
+		cm,
+		obs.service,
+		obs.mergedRuntimeConfig.Value,
+		obs.hpa,
+		obs.observedPodCount(),
+	)
+
 	// Set resolved model reference (only if Ready)
 	modelName, modelStatus, isClusterScoped := obs.getResolvedModel()
 	if modelName != "" && modelStatus != nil && modelStatus.Status == constants.AIMStatusReady {

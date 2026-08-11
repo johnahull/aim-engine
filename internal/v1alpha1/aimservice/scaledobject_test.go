@@ -24,13 +24,16 @@ package aimservice
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
@@ -40,6 +43,8 @@ import (
 // only authors a ScaledObject when the user asks for autoscaling; the
 // legacy fixed-replica path returns nil.
 func TestPlanScaledObject_GatedByAutoscalingFields(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+
 	tests := []struct {
 		name      string
 		mutate    func(*aimv1alpha1.AIMService)
@@ -94,7 +99,7 @@ func TestPlanScaledObject_GatedByAutoscalingFields(t *testing.T) {
 			service := NewService("my-svc").Build()
 			tt.mutate(service)
 
-			obj := planScaledObject(context.Background(), service, nil)
+			obj := planScaledObject(context.Background(), service, nil, nil)
 			if tt.expectObj && obj == nil {
 				t.Fatal("expected ScaledObject, got nil")
 			}
@@ -107,10 +112,12 @@ func TestPlanScaledObject_GatedByAutoscalingFields(t *testing.T) {
 
 // TestPlanScaledObject_ScaleToZeroTriggers verifies that minReplicas=0
 // prepends the gateway-rate activation trigger before the user's vLLM
-// triggers, that both triggers scope the metricQuery to the predictor
-// Deployment, and that the gateway trigger keeps its high targetValue so
-// it never recommends >1 replica.
+// triggers, that the gateway trigger scopes the metricQuery to the HTTPRoute
+// while the user trigger scopes to the predictor Deployment, and that the
+// gateway trigger keeps its high targetValue so it never recommends >1 replica.
 func TestPlanScaledObject_ScaleToZeroTriggers(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+
 	service := NewService("qwen-chat").Build()
 	service.Spec.MinReplicas = ptr.To(int32(0))
 	service.Spec.MaxReplicas = ptr.To(int32(4))
@@ -118,7 +125,7 @@ func TestPlanScaledObject_ScaleToZeroTriggers(t *testing.T) {
 		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{validVLLMMetric()},
 	}
 
-	obj := planScaledObject(context.Background(), service, nil)
+	obj := planScaledObject(context.Background(), service, nil, nil)
 	if obj == nil {
 		t.Fatal("expected ScaledObject")
 	}
@@ -182,7 +189,13 @@ func TestPlanScaledObject_ScaleToZeroTriggers(t *testing.T) {
 		t.Errorf("gateway trigger type should be external, got %v", gateway["type"])
 	}
 	gMeta, _ := gateway["metadata"].(map[string]interface{})
-	wantGatewayQuery := `sum(` + gatewayActivationMetricName + `{namespace="` + service.Namespace + `",deployment="` + wantName + `"})`
+	wantRouteName, err := GenerateHTTPRouteName(service.Name, service.Namespace)
+	if err != nil {
+		t.Fatalf("GenerateHTTPRouteName: %v", err)
+	}
+	// Envoy Gateway's shared Lua extension emits one deterministic metric per
+	// HTTPRoute; no per-route labels or scripts are required.
+	wantGatewayQuery := `sum(` + envoyGatewayActivationMetricName(service.Namespace, wantRouteName) + `)`
 	if got := gMeta["metricQuery"]; got != wantGatewayQuery {
 		t.Errorf("gateway metricQuery: want %q, got %v", wantGatewayQuery, got)
 	}
@@ -210,6 +223,220 @@ func TestPlanScaledObject_ScaleToZeroTriggers(t *testing.T) {
 	}
 }
 
+func TestPlanScaledObject_ActivationMetricQueryOverride(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+
+	service := NewService("qwen-chat").Build()
+	service.Spec.MinReplicas = ptr.To(int32(0))
+	service.Spec.MaxReplicas = ptr.To(int32(1))
+
+	isvcName, err := GenerateInferenceServiceName(service.Name, service.Namespace)
+	if err != nil {
+		t.Fatalf("GenerateInferenceServiceName: %v", err)
+	}
+	predictorName := isvcName + constants.PredictorServiceSuffix
+	routeName, err := GenerateHTTPRouteName(service.Name, service.Namespace)
+	if err != nil {
+		t.Fatalf("GenerateHTTPRouteName: %v", err)
+	}
+
+	runtimeConfig := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			ScaleFromZero: &aimv1alpha1.AIMScaleFromZeroConfig{
+				ActivationMetricQueryTemplate: `sum(custom_requests{namespace="${namespace}",service="${serviceName}",route="${httpRouteName}",deployment="${predictorDeployment}"})`,
+			},
+		},
+	}
+	obj := planScaledObject(context.Background(), service, nil, runtimeConfig)
+	wantRuntimeQuery := fmt.Sprintf(
+		`sum(custom_requests{namespace=%q,service=%q,route=%q,deployment=%q})`,
+		service.Namespace,
+		service.Name,
+		routeName,
+		predictorName,
+	)
+	if got := activationQueryFromScaledObject(t, obj); got != wantRuntimeQuery {
+		t.Errorf("runtime config metricQuery: want %q, got %q", wantRuntimeQuery, got)
+	}
+
+	service.Spec.ScaleFromZero = &aimv1alpha1.AIMScaleFromZeroConfig{
+		ActivationMetricQueryTemplate: `sum(service_override{service="${serviceName}"})`,
+	}
+	obj = planScaledObject(context.Background(), service, nil, runtimeConfig)
+	wantServiceQuery := fmt.Sprintf(`sum(service_override{service=%q})`, service.Name)
+	if got := activationQueryFromScaledObject(t, obj); got != wantServiceQuery {
+		t.Errorf("service metricQuery must override RuntimeConfig: want %q, got %q", wantServiceQuery, got)
+	}
+}
+
+func TestPlanScaledObject_CustomProviderUsesRuntimeConfigQuery(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeCustom)
+
+	service := NewService("qwen-chat").Build()
+	service.Spec.MinReplicas = ptr.To(int32(0))
+	runtimeConfig := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			ScaleFromZero: &aimv1alpha1.AIMScaleFromZeroConfig{
+				ActivationMetricQueryTemplate: `sum(custom_gateway_requests{namespace="${namespace}"})`,
+			},
+		},
+	}
+
+	obj := planScaledObject(context.Background(), service, nil, runtimeConfig)
+	want := fmt.Sprintf(`sum(custom_gateway_requests{namespace=%q})`, service.Namespace)
+	if got := activationQueryFromScaledObject(t, obj); got != want {
+		t.Errorf("custom provider metricQuery: want %q, got %q", want, got)
+	}
+}
+
+func TestPlanScaledObject_NoneProviderDisablesActivation(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeNone)
+
+	service := NewService("qwen-chat").Build()
+	service.Spec.MinReplicas = ptr.To(int32(0))
+	runtimeConfig := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			ScaleFromZero: &aimv1alpha1.AIMScaleFromZeroConfig{
+				ActivationMetricQueryTemplate: "custom_query",
+			},
+		},
+	}
+
+	if obj := planScaledObject(context.Background(), service, nil, runtimeConfig); obj != nil {
+		t.Fatalf("gatewayProvider=none must not author an activation ScaledObject, got %T", obj)
+	}
+}
+
+func TestPlanScaledObject_InvalidActivationDoesNotPromoteUserMetricToS0(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeCustom)
+
+	service := NewService("qwen-chat").Build()
+	service.Spec.MinReplicas = ptr.To(int32(0))
+	service.Spec.MaxReplicas = ptr.To(int32(4))
+	service.Spec.Routing = &aimv1alpha1.AIMRuntimeRoutingConfig{Enabled: ptr.To(true)}
+	service.Spec.AutoScaling = &aimv1alpha1.AIMServiceAutoScaling{
+		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{validVLLMMetric()},
+	}
+
+	// The custom provider has no activation query. A user-only ScaledObject
+	// would make KEDA name the user metric s0 and break the controller's
+	// zero-to-one identity invariant, so planning must stop entirely.
+	if obj := planScaledObject(context.Background(), service, nil, nil); obj != nil {
+		t.Fatalf("invalid activation query must not produce a user-only ScaledObject, got %T", obj)
+	}
+}
+
+func TestGatewayActivationScopeDefaultsToNone(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, "")
+	if got := gatewayActivationScope(); got != constants.GatewayActivationScopeNone {
+		t.Fatalf("unset gateway activation scope = %q, want %q", got, constants.GatewayActivationScopeNone)
+	}
+
+	t.Setenv(constants.EnvAIMGatewayActivationScope, "unsupported")
+	if got := gatewayActivationScope(); got != constants.GatewayActivationScopeNone {
+		t.Fatalf("invalid gateway activation scope = %q, want %q", got, constants.GatewayActivationScopeNone)
+	}
+}
+
+func TestRenderActivationMetricQueryTemplateRejectsUnknownPlaceholder(t *testing.T) {
+	service := NewService("qwen-chat").Build()
+	_, err := renderActivationMetricQueryTemplate(
+		service,
+		"predictor",
+		`sum(custom_requests{route="${unsupported}"})`,
+	)
+	if err == nil || !strings.Contains(err.Error(), "${unsupported}") {
+		t.Fatalf("expected unsupported placeholder error, got %v", err)
+	}
+}
+
+func activationQueryFromScaledObject(t *testing.T, obj client.Object) string {
+	t.Helper()
+	if obj == nil {
+		t.Fatal("expected ScaledObject")
+	}
+	so, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		t.Fatalf("expected *Unstructured, got %T", obj)
+	}
+	triggers, _, _ := unstructured.NestedSlice(so.Object, "spec", "triggers")
+	if len(triggers) == 0 {
+		t.Fatal("expected activation trigger")
+	}
+	trigger, ok := triggers[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected trigger map, got %T", triggers[0])
+	}
+	metadata, ok := trigger["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected trigger metadata map, got %T", trigger["metadata"])
+	}
+	query, _ := metadata["metricQuery"].(string)
+	return query
+}
+
+func TestEnvoyGatewayActivationMetricName(t *testing.T) {
+	t.Parallel()
+
+	if got, want := envoyGatewayActivationMetricName("team-a", "qwen-chat"),
+		"envoy_http_lua_aim_activation_requests_n6_team_x2da_r9_qwen_x2dchat"; got != want {
+		t.Errorf("metric name: want %q, got %q", want, got)
+	}
+
+	// Length prefixes prevent a namespace/route boundary collision.
+	left := envoyGatewayActivationMetricName("a-b", "c")
+	right := envoyGatewayActivationMetricName("a", "b-c")
+	if left == right {
+		t.Fatalf("route metric names collided: %q", left)
+	}
+
+	// Byte escaping prevents same-length names whose punctuation Envoy would
+	// otherwise normalize to the same underscore sequence from colliding.
+	dash := envoyGatewayActivationMetricName("team-a", "route-a")
+	dot := envoyGatewayActivationMetricName("team.a", "route.a")
+	if dash == dot {
+		t.Fatalf("punctuation-normalized metric names collided: %q", dash)
+	}
+}
+
+// TestPlanScaledObject_GatewayActivationScopeDeployment verifies the legacy
+// kgateway compatibility switch: with AIM_GATEWAY_ACTIVATION_SCOPE=deployment
+// the gateway activation trigger scopes the counter by the predictor
+// Deployment (kube_<ns>_<svc>_<port> cluster naming) instead of the HTTPRoute.
+func TestPlanScaledObject_GatewayActivationScopeDeployment(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeDeployment)
+
+	service := NewService("qwen-chat").Build()
+	service.Spec.MinReplicas = ptr.To(int32(0))
+	service.Spec.MaxReplicas = ptr.To(int32(4))
+	service.Spec.AutoScaling = &aimv1alpha1.AIMServiceAutoScaling{
+		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{validVLLMMetric()},
+	}
+
+	obj := planScaledObject(context.Background(), service, nil, nil)
+	if obj == nil {
+		t.Fatal("expected ScaledObject")
+	}
+	so := obj.(*unstructured.Unstructured)
+	spec := mustNestedMap(t, so.Object, "spec")
+	triggers, _, _ := unstructured.NestedSlice(spec, "triggers")
+	if len(triggers) != 2 {
+		t.Fatalf("expected 2 triggers (gateway + vllm), got %d", len(triggers))
+	}
+
+	isvcName, err := GenerateInferenceServiceName(service.Name, service.Namespace)
+	if err != nil {
+		t.Fatalf("GenerateInferenceServiceName: %v", err)
+	}
+	wantPredictor := isvcName + constants.PredictorServiceSuffix
+
+	gMeta := triggers[0].(map[string]interface{})["metadata"].(map[string]interface{})
+	wantQuery := `sum(` + gatewayActivationMetricName + `{namespace="` + service.Namespace + `",deployment="` + wantPredictor + `"})`
+	if got := gMeta["metricQuery"]; got != wantQuery {
+		t.Errorf("deployment-scoped gateway metricQuery: want %q, got %v", wantQuery, got)
+	}
+}
+
 // TestPlanScaledObject_WarmModeDefaults verifies that with minReplicas>=1
 // we don't prepend a gateway trigger and don't override KEDA's
 // pollingInterval/cooldownPeriod defaults.
@@ -221,7 +448,7 @@ func TestPlanScaledObject_WarmModeDefaults(t *testing.T) {
 		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{validVLLMMetric()},
 	}
 
-	obj := planScaledObject(context.Background(), service, nil)
+	obj := planScaledObject(context.Background(), service, nil, nil)
 	if obj == nil {
 		t.Fatal("expected ScaledObject")
 	}
@@ -268,7 +495,7 @@ func TestPlanScaledObject_UserQueryWithLabelSelectorPreserved(t *testing.T) {
 		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{metric},
 	}
 
-	obj := planScaledObject(context.Background(), service, nil)
+	obj := planScaledObject(context.Background(), service, nil, nil)
 	if obj == nil {
 		t.Fatal("expected ScaledObject")
 	}
@@ -284,6 +511,8 @@ func TestPlanScaledObject_UserQueryWithLabelSelectorPreserved(t *testing.T) {
 // TestPlanScaledObject_PollingAndCooldownOverrides verifies user-supplied
 // pollingInterval/cooldownPeriod take precedence over the defaults.
 func TestPlanScaledObject_PollingAndCooldownOverrides(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+
 	service := NewService("qwen-chat").Build()
 	service.Spec.MinReplicas = ptr.To(int32(0))
 	service.Spec.MaxReplicas = ptr.To(int32(3))
@@ -293,7 +522,7 @@ func TestPlanScaledObject_PollingAndCooldownOverrides(t *testing.T) {
 		Metrics:         []aimv1alpha1.AIMServiceMetricsSpec{validVLLMMetric()},
 	}
 
-	obj := planScaledObject(context.Background(), service, nil)
+	obj := planScaledObject(context.Background(), service, nil, nil)
 	if obj == nil {
 		t.Fatal("expected ScaledObject")
 	}
@@ -311,6 +540,8 @@ func TestPlanScaledObject_PollingAndCooldownOverrides(t *testing.T) {
 // TestPlanScaledObject_ReplicaBoundsClampMax verifies maxReplicas is
 // clamped to at least 1 when unspecified, even with minReplicas=0.
 func TestPlanScaledObject_ReplicaBoundsClampMax(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+
 	service := NewService("qwen-chat").Build()
 	service.Spec.MinReplicas = ptr.To(int32(0))
 	service.Spec.AutoScaling = &aimv1alpha1.AIMServiceAutoScaling{
@@ -318,7 +549,7 @@ func TestPlanScaledObject_ReplicaBoundsClampMax(t *testing.T) {
 	}
 	// MaxReplicas intentionally left nil.
 
-	obj := planScaledObject(context.Background(), service, nil)
+	obj := planScaledObject(context.Background(), service, nil, nil)
 	if obj == nil {
 		t.Fatal("expected ScaledObject")
 	}
@@ -333,6 +564,8 @@ func TestPlanScaledObject_ReplicaBoundsClampMax(t *testing.T) {
 // is garbage-collected with its owning AIMService and discoverable via
 // the standard label selectors operators already use.
 func TestPlanScaledObject_OwnerReferenceAndLabels(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+
 	service := NewService("qwen-chat").Build()
 	service.UID = testServiceUID
 	service.Spec.MinReplicas = ptr.To(int32(0))
@@ -340,7 +573,7 @@ func TestPlanScaledObject_OwnerReferenceAndLabels(t *testing.T) {
 		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{validVLLMMetric()},
 	}
 
-	obj := planScaledObject(context.Background(), service, nil)
+	obj := planScaledObject(context.Background(), service, nil, nil)
 	if obj == nil {
 		t.Fatal("expected ScaledObject")
 	}
@@ -372,6 +605,7 @@ func TestPlanScaledObject_OwnerReferenceAndLabels(t *testing.T) {
 // endpoint can be overridden via AIM_KEDA_OTEL_SCALER_ADDRESS.
 func TestPlanScaledObject_ScalerAddressEnvOverride(t *testing.T) {
 	t.Setenv(constants.EnvAIMKEDAOTelScalerAddress, "scaler.custom.svc:5555")
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
 
 	service := NewService("qwen-chat").Build()
 	service.Spec.MinReplicas = ptr.To(int32(0))
@@ -379,7 +613,7 @@ func TestPlanScaledObject_ScalerAddressEnvOverride(t *testing.T) {
 		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{validVLLMMetric()},
 	}
 
-	obj := planScaledObject(context.Background(), service, nil)
+	obj := planScaledObject(context.Background(), service, nil, nil)
 	so := obj.(*unstructured.Unstructured)
 	triggers, _, _ := unstructured.NestedSlice(so.Object, "spec", "triggers")
 	for i, raw := range triggers {
@@ -394,16 +628,18 @@ func TestPlanScaledObject_ScalerAddressEnvOverride(t *testing.T) {
 // TestPlanScaledObject_GatewayActivationDefaultsAreCompiledIn verifies the
 // gateway activation trigger always uses the compiled-in targetValue and
 // operationOverTime constants. These are deliberately not env/Helm knobs:
-// `avg` is the only correct operationOverTime (joined to the collector's
-// cumulativetodelta pipeline; see the invariant guard in invariant_test.go).
+// `avg` is the correct operationOverTime for both Envoy's source-side deltas
+// and kgateway's collector-produced deltas (see invariant_test.go).
 func TestPlanScaledObject_GatewayActivationDefaultsAreCompiledIn(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+
 	service := NewService("qwen-chat").Build()
 	service.Spec.MinReplicas = ptr.To(int32(0))
 	service.Spec.AutoScaling = &aimv1alpha1.AIMServiceAutoScaling{
 		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{validVLLMMetric()},
 	}
 
-	obj := planScaledObject(context.Background(), service, nil)
+	obj := planScaledObject(context.Background(), service, nil, nil)
 	so := obj.(*unstructured.Unstructured)
 	triggers, _, _ := unstructured.NestedSlice(so.Object, "spec", "triggers")
 	if len(triggers) == 0 {
@@ -422,6 +658,8 @@ func TestPlanScaledObject_GatewayActivationDefaultsAreCompiledIn(t *testing.T) {
 // TestPlanScaledObject_Idempotent verifies the planner is pure -- two
 // calls on the same service yield equal objects (required for SSA).
 func TestPlanScaledObject_Idempotent(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+
 	service := NewService("qwen-chat").Build()
 	service.Spec.MinReplicas = ptr.To(int32(0))
 	service.Spec.MaxReplicas = ptr.To(int32(3))
@@ -429,8 +667,8 @@ func TestPlanScaledObject_Idempotent(t *testing.T) {
 		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{validVLLMMetric()},
 	}
 
-	a := planScaledObject(context.Background(), service, nil)
-	b := planScaledObject(context.Background(), service, nil)
+	a := planScaledObject(context.Background(), service, nil, nil)
+	b := planScaledObject(context.Background(), service, nil, nil)
 	if a == nil || b == nil {
 		t.Fatal("expected ScaledObject from both calls")
 	}

@@ -2115,6 +2115,25 @@ spec:
                   over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster
                   runtime config with the name `default` is used, if it exists.
                 type: string
+              scaleFromZero:
+                description: |-
+                  ScaleFromZero configures the activation metric query for this service.
+                  When set, these values override namespace/cluster runtime config defaults.
+                properties:
+                  activationMetricQueryTemplate:
+                    description: |-
+                      ActivationMetricQueryTemplate overrides the provider-derived KEDA
+                      OpenTelemetry metric query. The controller expands these placeholders:
+                      ${namespace}, ${serviceName}, ${httpRouteName}, and
+                      ${predictorDeployment}. Unknown placeholders make the service
+                      configuration invalid.
+
+                      A value set directly on AIMService takes precedence over namespace and
+                      cluster RuntimeConfig values.
+                    maxLength: 4096
+                    minLength: 1
+                    type: string
+                type: object
               serviceAccountName:
                 description: |-
                   ServiceAccountName specifies the Kubernetes service account to use for the inference workload.
@@ -4720,6 +4739,25 @@ spec:
                   over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster
                   runtime config with the name `default` is used, if it exists.
                 type: string
+              scaleFromZero:
+                description: |-
+                  ScaleFromZero configures the activation metric query for this service.
+                  When set, these values override namespace/cluster runtime config defaults.
+                properties:
+                  activationMetricQueryTemplate:
+                    description: |-
+                      ActivationMetricQueryTemplate overrides the provider-derived KEDA
+                      OpenTelemetry metric query. The controller expands these placeholders:
+                      ${namespace}, ${serviceName}, ${httpRouteName}, and
+                      ${predictorDeployment}. Unknown placeholders make the service
+                      configuration invalid.
+
+                      A value set directly on AIMService takes precedence over namespace and
+                      cluster RuntimeConfig values.
+                    maxLength: 4096
+                    minLength: 1
+                    type: string
+                type: object
               serviceAccountName:
                 description: |-
                   ServiceAccountName specifies the Kubernetes service account to use for the inference workload.

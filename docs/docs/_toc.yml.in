@@ -89,6 +89,12 @@ subtrees:
                 title: Troubleshooting
               - file: admin/security
                 title: Security
+              - file: admin/envoy-gateway-scale-from-zero
+                title: Envoy Gateway Scale-from-Zero
+              - file: admin/migrating-kgateway-to-envoy-gateway
+                title: Migrate from kgateway to Envoy Gateway
+              - file: admin/kgateway-setup
+                title: kgateway Setup
       - file: reference/reference
         title: Reference
         subtrees:

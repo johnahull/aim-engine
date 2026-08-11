@@ -25,8 +25,8 @@ spec:
   routing:
     enabled: true
     gatewayRef:
-      name: inference-gateway
-      namespace: kgateway-system
+      name: <gateway-name>
+      namespace: <gateway-namespace>
     pathTemplate: "/{.metadata.namespace}/{.metadata.name}"
 ```
 
@@ -47,8 +47,8 @@ spec:
     gatewayRef:
       group: gateway.networking.k8s.io
       kind: Gateway
-      name: inference-gateway
-      namespace: kgateway-system
+      name: <gateway-name>
+      namespace: <gateway-namespace>
     pathTemplate: "/{.metadata.namespace}/{.metadata.name}"
 ```
 
@@ -77,8 +77,8 @@ spec:
   routing:
     enabled: true
     gatewayRef:
-      name: inference-gateway
-      namespace: kgateway-system
+      name: <gateway-name>
+      namespace: <gateway-namespace>
     hostnames:
       - workloads.example.com
 ```

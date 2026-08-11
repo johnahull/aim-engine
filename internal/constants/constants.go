@@ -376,6 +376,23 @@ const (
 	// to derive scale-to-zero cooldownPeriod from the predictor's memory
 	// request. Set to 0 to disable the memory contribution.
 	EnvAIMCooldownSecondsPerGiMemory = "AIM_COOLDOWN_SECONDS_PER_GI_MEMORY"
+
+	// EnvAIMGatewayActivationScope selects the label scheme the
+	// scale-from-zero gateway activation trigger queries, matching the OTel
+	// collector deployed on the cluster:
+	//   - GatewayActivationScopeHTTPRoute: Envoy Gateway names the
+	//     upstream cluster httproute/<ns>/<name>/rule/N; the collector labels
+	//     the series by HTTPRoute.
+	//   - GatewayActivationScopeDeployment: legacy kgateway names the cluster
+	//     kube_<ns>_<svc>_<port>; the collector labels the series by the
+	//     predictor Deployment.
+	//   - GatewayActivationScopeCustom: every scale-to-zero service must resolve
+	//     an activationMetricQueryTemplate from its service or RuntimeConfig.
+	//   - GatewayActivationScopeNone: gateway activation is disabled; services
+	//     requesting minReplicas=0 fail configuration validation.
+	// JOINED INVARIANT with the collector: both must match the gateway
+	// implementation, or activation silently never fires.
+	EnvAIMGatewayActivationScope = "AIM_GATEWAY_ACTIVATION_SCOPE"
 )
 
 // keda-otel-add-on defaults
@@ -401,17 +418,35 @@ const (
 	// DefaultGatewayActivationTargetValue is the targetValue of the
 	// gateway-rate activation trigger. Compiled-in, not operator-tunable: the
 	// gateway trigger is activation-only
-	// (0->1); this value is deliberately large so the trigger never influences
-	// the 1->N decision -- it is a neutralizing ceiling, not a req/s target.
-	DefaultGatewayActivationTargetValue = "1000"
+	// (0->1); this value is deliberately unreachable for an activation export
+	// interval so the trigger never influences the 1->N decision. It is a
+	// neutralizing ceiling, not a req/s target.
+	DefaultGatewayActivationTargetValue = "1000000000"
 
 	// DefaultGatewayActivationOperationOverTime is the aggregation the scaler
 	// applies to the gateway series. Compiled-in, not operator-tunable: it must
-	// be `avg` because the collector emits per-scrape deltas via
-	// `cumulativetodelta` -- `rate` would go negative across Envoy counter
-	// resets. This is a JOINED INVARIANT with the collector's processor
-	// pipeline (pinned by TestGatewayActivationInvariant); change them together.
+	// be `avg` because gateway integrations emit delta values -- Envoy Gateway
+	// at the source and kgateway through its collector. Applying `rate` again
+	// would distort those deltas. This is pinned with the provider pipelines by
+	// TestGatewayActivationInvariant; change them together.
 	DefaultGatewayActivationOperationOverTime = "avg"
+
+	// GatewayActivationScopeHTTPRoute scopes the gateway activation trigger by
+	// the HTTPRoute name (Envoy Gateway cluster naming).
+	GatewayActivationScopeHTTPRoute = "httproute"
+
+	// GatewayActivationScopeDeployment scopes the gateway activation trigger by
+	// the predictor Deployment (legacy kgateway cluster naming).
+	GatewayActivationScopeDeployment = "deployment"
+
+	// GatewayActivationScopeCustom requires a service or RuntimeConfig-provided
+	// activation metric query and does not imply a bundled collector.
+	GatewayActivationScopeCustom = "custom"
+
+	// GatewayActivationScopeNone disables gateway activation. It is also the
+	// default when the environment variable is unset or invalid, so non-Helm
+	// installations remain gateway-neutral unless they opt in explicitly.
+	GatewayActivationScopeNone = "none"
 )
 
 // KServe annotation and label keys

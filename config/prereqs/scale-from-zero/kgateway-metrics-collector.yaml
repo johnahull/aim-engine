@@ -148,6 +148,9 @@ spec:
       # scaler-side trigger uses `avg` so 1s scrape * window-average =
       # req/s -- same semantics as the original rate, reset-safe.
       cumulativetodelta:
+        # Preserve the first observed value. With usedonly enabled, a route's
+        # first cold request may also be the counter's first exported sample.
+        initial_value: keep
         include:
           metrics:
             - envoy_cluster_external_upstream_rq_completed

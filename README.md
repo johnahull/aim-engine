@@ -34,18 +34,18 @@ git clone -b publish-main https://github.com/amd-enterprise-ai/aim-engine.git ai
 cd aim-engine-deploy
 
 # Install CRDs (distributed separately from Helm chart)
-kubectl apply -f crds.yaml
+kubectl apply -f crd/crds.yaml
 kubectl wait --for=condition=Established crd --all --timeout=60s
 
-# Install the scale-from-zero collector prerequisite (cluster-wide)
-# Required for AIMServices with spec.minReplicas: 0. See
-# config/prereqs/scale-from-zero/README.md in main for customization knobs.
-kubectl apply -f https://raw.githubusercontent.com/amd-enterprise-ai/aim-engine/main/config/prereqs/scale-from-zero/kgateway-metrics-collector.yaml
-kubectl -n keda rollout status deploy/kgateway-metrics-collector --timeout=120s
-
-# Install operator via Helm
+# Install the operator. Gateway activation remains disabled by default.
 helm install aim-engine ./chart --namespace aim-system --create-namespace
 ```
+
+Scale-from-zero gateway activation is an optional platform integration. To
+enable it on Envoy Gateway, follow the
+[optional Envoy scale-from-zero guide](docs/docs/admin/envoy-gateway-scale-from-zero.md).
+In a `publish-main` checkout, the version-matched policy and standalone
+collector documentation are under `prereqs/scale-from-zero/`.
 
 ## Manual Build and Deploy
 
@@ -60,9 +60,6 @@ make helm
 kubectl apply -f dist/crds.yaml
 kubectl wait --for=condition=Established crd --all --timeout=60s
 
-# Install the scale-from-zero collector prerequisite (cluster-wide)
-make install-scale-from-zero-prereq
-
 # Option 1: Install directly with Helm
 helm install aim-engine ./dist/chart --namespace aim-system --create-namespace
 
@@ -72,6 +69,12 @@ helm template aim-engine ./dist/chart \
   --values dist/chart/values.yaml > rendered.yaml
 kubectl apply -f rendered.yaml
 ```
+
+Both commands leave gateway activation disabled. Enabling Envoy Gateway is a
+deliberate add-on: the platform administrator installs the Gateway-targeted
+`EnvoyExtensionPolicy`, then installs or upgrades AIM Engine with
+`--set scaleFromZero.gatewayProvider=envoyGateway`. The chart manages the
+matching collector by default but never manages the Gateway or extension.
 
 ## Example AIMService Deployment
 

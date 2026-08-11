@@ -10,6 +10,6 @@ spec:
     enabled: true
     gatewayRef:
       name: kserve-ingress-gateway
-      namespace: kgateway-system
+      namespace: envoy-gateway-system
     pathTemplate: "/integration/v1alpha2-via-model-cpu-live/{.metadata.namespace}/{.metadata.name}"
     requestTimeout: "180s"

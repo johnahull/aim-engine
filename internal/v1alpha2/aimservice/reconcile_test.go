@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	servingv1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -1261,6 +1262,8 @@ func TestPlanProfileCache_PropagatesRuntimeConfigRef(t *testing.T) {
 // pipeline wires the ScaledObject planner. Asserts at the GVK level so the
 // v1alpha1 planner tests remain the source of truth for resource shape.
 func TestPlanResources_ScaleToZeroEmitsScaledObject(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
 		Spec: aimv1alpha1.AIMServiceSpec{
@@ -1322,6 +1325,57 @@ func TestPlanResources_ScaleToZeroEmitsScaledObject(t *testing.T) {
 	}
 	if !sawScaledObject {
 		t.Errorf("scale-to-zero v1alpha2 service must produce a KEDA ScaledObject")
+	}
+}
+
+func TestPlanResourcesSchedulesActivationMetricGraceDeadline(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeHTTPRoute)
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			MinReplicas: ptr.To(int32(0)),
+		},
+	}
+	service.Spec.Routing = &aimv1alpha1.AIMRuntimeRoutingConfig{Enabled: ptr.To(true)}
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{Generation: 1},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			Metrics: []autoscalingv2.MetricSpec{{
+				Type: autoscalingv2.ExternalMetricSourceType,
+				External: &autoscalingv2.ExternalMetricSource{
+					Metric: autoscalingv2.MetricIdentifier{Name: "s0-test-service"},
+					Target: autoscalingv2.MetricTarget{
+						Type:  autoscalingv2.ValueMetricType,
+						Value: ptr.To(resource.MustParse("1")),
+					},
+				},
+			}},
+		},
+		Status: autoscalingv2.HorizontalPodAutoscalerStatus{
+			ObservedGeneration: ptr.To(int64(1)),
+			Conditions: []autoscalingv2.HorizontalPodAutoscalerCondition{{
+				Type:   autoscalingv2.ScalingActive,
+				Status: corev1.ConditionFalse,
+				Reason: "FailedGetExternalMetric",
+			}},
+		},
+	}
+	obs := ServiceObservation{ServiceFetchResult: ServiceFetchResult{
+		service: service,
+		hpa:     controllerutils.FetchResult[*autoscalingv2.HorizontalPodAutoscaler]{Value: hpa},
+		inferenceServicePods: &controllerutils.FetchResult[*corev1.PodList]{
+			Value: &corev1.PodList{Items: []corev1.Pod{{}}},
+		},
+	}}
+
+	plan := (&ProfileServiceReconciler{}).PlanResources(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha1.AIMService]{Object: service},
+		obs,
+	)
+	const gracePeriod = 3 * time.Minute
+	if plan.RequeueAfter < gracePeriod-10*time.Second || plan.RequeueAfter > gracePeriod {
+		t.Errorf("RequeueAfter=%s, want approximately %s", plan.RequeueAfter, gracePeriod)
 	}
 }
 

@@ -25,6 +25,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sort"
 
 	servingv1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -336,7 +338,7 @@ func (r *AIMServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&autoscalingv2.HorizontalPodAutoscaler{},
 			handler.EnqueueRequestsFromMapFunc(r.findServicesForHPA),
-			builder.WithPredicates(hpaReplicaChangePredicate()),
+			builder.WithPredicates(hpaRelevantChangePredicate()),
 		).
 		Watches(
 			&gatewayapiv1.Gateway{},
@@ -422,7 +424,21 @@ func (r *AIMServiceReconciler) findServicesForInferenceServiceEvent(ctx context.
 	return nil
 }
 
-func hpaReplicaChangePredicate() predicate.Predicate {
+type hpaExternalMetricAvailability struct {
+	name     string
+	hasValue bool
+}
+
+type hpaConditionState struct {
+	conditionType autoscalingv2.HorizontalPodAutoscalerConditionType
+	status        corev1.ConditionStatus
+	reason        string
+}
+
+// hpaRelevantChangePredicate accepts only HPA updates that can change
+// AIMService status. In particular, it observes the shape and availability of
+// external metrics without reconciling on every numeric metric sample.
+func hpaRelevantChangePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool { return true },
 		DeleteFunc: func(e event.DeleteEvent) bool { return true },
@@ -440,6 +456,19 @@ func hpaReplicaChangePredicate() predicate.Predicate {
 				oldHPA.Status.DesiredReplicas != newHPA.Status.DesiredReplicas {
 				return true
 			}
+			if oldHPA.Generation != newHPA.Generation ||
+				!int64PointersEqual(oldHPA.Status.ObservedGeneration, newHPA.Status.ObservedGeneration) {
+				return true
+			}
+			if !slices.Equal(
+				hpaExternalMetricAvailabilityFingerprint(oldHPA),
+				hpaExternalMetricAvailabilityFingerprint(newHPA),
+			) || !slices.Equal(
+				hpaRelevantConditionFingerprint(oldHPA),
+				hpaRelevantConditionFingerprint(newHPA),
+			) {
+				return true
+			}
 
 			oldMin, newMin := int32(1), int32(1)
 			if oldHPA.Spec.MinReplicas != nil {
@@ -452,6 +481,63 @@ func hpaReplicaChangePredicate() predicate.Predicate {
 		},
 		GenericFunc: func(e event.GenericEvent) bool { return false },
 	}
+}
+
+func int64PointersEqual(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func hpaExternalMetricAvailabilityFingerprint(
+	hpa *autoscalingv2.HorizontalPodAutoscaler,
+) []hpaExternalMetricAvailability {
+	fingerprint := make([]hpaExternalMetricAvailability, 0, len(hpa.Status.CurrentMetrics))
+	for _, metric := range hpa.Status.CurrentMetrics {
+		if metric.Type != autoscalingv2.ExternalMetricSourceType || metric.External == nil {
+			continue
+		}
+		fingerprint = append(fingerprint, hpaExternalMetricAvailability{
+			name: metric.External.Metric.Name,
+			hasValue: metric.External.Current.Value != nil ||
+				metric.External.Current.AverageValue != nil,
+		})
+	}
+	sort.Slice(fingerprint, func(i, j int) bool {
+		if fingerprint[i].name == fingerprint[j].name {
+			return !fingerprint[i].hasValue && fingerprint[j].hasValue
+		}
+		return fingerprint[i].name < fingerprint[j].name
+	})
+	return fingerprint
+}
+
+func hpaRelevantConditionFingerprint(
+	hpa *autoscalingv2.HorizontalPodAutoscaler,
+) []hpaConditionState {
+	fingerprint := make([]hpaConditionState, 0, 2)
+	for _, condition := range hpa.Status.Conditions {
+		if condition.Type != autoscalingv2.ScalingActive &&
+			condition.Type != autoscalingv2.AbleToScale {
+			continue
+		}
+		fingerprint = append(fingerprint, hpaConditionState{
+			conditionType: condition.Type,
+			status:        condition.Status,
+			reason:        condition.Reason,
+		})
+	}
+	sort.Slice(fingerprint, func(i, j int) bool {
+		if fingerprint[i].conditionType != fingerprint[j].conditionType {
+			return fingerprint[i].conditionType < fingerprint[j].conditionType
+		}
+		if fingerprint[i].status != fingerprint[j].status {
+			return fingerprint[i].status < fingerprint[j].status
+		}
+		return fingerprint[i].reason < fingerprint[j].reason
+	})
+	return fingerprint
 }
 
 func (r *AIMServiceReconciler) findServicesForHPA(ctx context.Context, obj client.Object) []reconcile.Request {

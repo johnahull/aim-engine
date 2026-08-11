@@ -267,6 +267,15 @@ jobs:
       - name: Install core dependencies
         run: helmfile sync -f hack/dependencies/helmfile.yaml.gotmpl
 
+      - name: Verify Envoy Gateway platform integration
+        run: |
+          mise exec -- make verify-gateway
+          kubectl wait \
+            --for=jsonpath='{.status.ancestors[0].conditions[?(@.type=="Accepted")].status}'=True \
+            envoyextensionpolicy/route-activation-metrics \
+            --namespace envoy-gateway-system \
+            --timeout=180s
+
       - name: Install Kind-local Zot registry
         run: make kind-zot-install
 
@@ -329,7 +338,7 @@ jobs:
         # post-install patch race) so each matrix leg's operator starts in its
         # mode. The Kind values mount Zot's public CA without replacing the
         # operator's normal public root set.
-        run: helm install aim-engine dist/chart --namespace aim-system --create-namespace -f hack/kind/operator-values.yaml --set manager.image.repository="${OPERATOR_IMAGE_REPOSITORY}" --set manager.image.tag="${OPERATOR_IMAGE_TAG}" --set manager.runtimeProjectionMode="${{ matrix.mode }}" --set acceleratorDetector.enable=false
+        run: helm install aim-engine dist/chart --namespace aim-system --create-namespace -f hack/kind/operator-values.yaml --set manager.image.repository="${OPERATOR_IMAGE_REPOSITORY}" --set manager.image.tag="${OPERATOR_IMAGE_TAG}" --set manager.runtimeProjectionMode="${{ matrix.mode }}" --set acceleratorDetector.enable=false --set scaleFromZero.gatewayProvider=envoyGateway --set scaleFromZero.gatewayMetricsCollector.management=helm
 
       - name: Wait for operator to be ready
         run: kubectl wait --for=condition=Available --timeout=120s deployment/aim-engine-controller-manager -n aim-system
@@ -348,14 +357,21 @@ jobs:
           fi
           echo "confirmed operator running with --runtime-projection-mode=${{ matrix.mode }}"
       
-      - name: Wait for kgateway metrics collector to be ready
+      - name: Wait for Envoy Gateway metrics collector to be ready
         run: |
           set -euo pipefail
-          COLLECTOR_DEPLOY=aim-engine-kgateway-metrics-collector
+          COLLECTOR_DEPLOY=aim-engine-envoy-gateway-metrics-collector
           for i in $(seq 1 24); do
             if kubectl -n aim-system get deploy "${COLLECTOR_DEPLOY}" >/dev/null 2>&1; then
               kubectl -n aim-system rollout status "deploy/${COLLECTOR_DEPLOY}" --timeout=120s
-              exit 0
+              RECEIVER_PORT="$(
+                kubectl -n aim-system get service "${COLLECTOR_DEPLOY}" \
+                  -o jsonpath='{.spec.ports[?(@.port==4317)].port}' 2>/dev/null || true
+              )"
+              if [ "${RECEIVER_PORT}" = "4317" ]; then
+                exit 0
+              fi
+              echo "Waiting for ${COLLECTOR_DEPLOY} Service port 4317..."
             fi
             echo "Waiting for OTel Operator to create ${COLLECTOR_DEPLOY} ($i/24)..."
             sleep 5
@@ -363,6 +379,11 @@ jobs:
           echo "scale-from-zero collector deployment never appeared" >&2
           kubectl -n aim-system get opentelemetrycollectors,deploy 2>&1 || true
           exit 1
+
+      - name: Point Envoy Gateway at the Helm-managed OTLP collector
+        run: >
+          COLLECTOR_HOST=aim-engine-envoy-gateway-metrics-collector.aim-system.svc.cluster.local
+          bash hack/configure-envoy-collector-sink.sh
 
       # Whole-run metrics history: an in-cluster poller scrapes the operator's
       # protected /metrics every few seconds for the duration of the suite, so we

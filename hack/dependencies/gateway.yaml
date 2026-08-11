@@ -1,12 +1,48 @@
-# Default Gateway for KServe/AIM routing
-# Created after kgateway installation
+# Envoy Gateway resources used by the development cluster.
+# The proxy is exposed as ClusterIP for in-cluster access and port-forwarding.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: kserve-proxy-config
+  namespace: envoy-gateway-system
+spec:
+  # Required until Envoy Gateway's validator supports Envoy 1.38 handle:stats().
+  luaValidation: InsecureSyntax
+  # Calculate activation-counter deltas in the proxy that owns the cumulative
+  # counters. The development collector is installed separately in keda.
+  telemetry:
+    metrics:
+      sinks:
+        - type: OpenTelemetry
+          openTelemetry:
+            host: envoy-gateway-metrics-collector.keda.svc.cluster.local
+            port: 4317
+            reportCountersAsDeltas: true
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: ClusterIP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy-gateway
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: kserve-proxy-config
+    namespace: envoy-gateway-system
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: kserve-ingress-gateway
-  namespace: kgateway-system
+  namespace: envoy-gateway-system
 spec:
-  gatewayClassName: kgateway
+  gatewayClassName: envoy-gateway
   listeners:
     - name: http
       protocol: HTTP
@@ -14,3 +50,51 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+---
+# Shared activation metrics for all HTTPRoutes on this Gateway.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: route-activation-metrics
+  namespace: envoy-gateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: kserve-ingress-gateway
+  lua:
+    - type: Inline
+      inline: |
+        local function metric_token(value)
+          return (string.gsub(value, "([^%a%d])", function(character)
+            return string.format("_x%02x", string.byte(character))
+          end))
+        end
+
+        function envoy_on_request(request_handle)
+          local route_name = request_handle:streamInfo():routeName()
+          local kind, namespace, name = string.match(
+            route_name, "^([^/]+)/([^/]+)/([^/]+)/")
+          if kind ~= "httproute" or namespace == nil or name == nil then
+            return
+          end
+
+          local metric_name = "aim_activation_requests.n" ..
+            string.len(namespace) .. "." .. metric_token(namespace) ..
+            ".r" .. string.len(name) .. "." .. metric_token(name)
+          request_handle:stats():counter(metric_name):inc()
+        end
+---
+# Increase Envoy's default 32KiB buffer for model responses.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: client-buffer-limit
+  namespace: envoy-gateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: kserve-ingress-gateway
+  connection:
+    bufferLimit: 50Mi

@@ -852,6 +852,25 @@ spec:
                       Individual services can override this value via spec.routing.requestTimeout.
                     type: string
                 type: object
+              scaleFromZero:
+                description: |-
+                  ScaleFromZero configures the activation metric query for this service.
+                  When set, these values override namespace/cluster runtime config defaults.
+                properties:
+                  activationMetricQueryTemplate:
+                    description: |-
+                      ActivationMetricQueryTemplate overrides the provider-derived KEDA
+                      OpenTelemetry metric query. The controller expands these placeholders:
+                      ${namespace}, ${serviceName}, ${httpRouteName}, and
+                      ${predictorDeployment}. Unknown placeholders make the service
+                      configuration invalid.
+
+                      A value set directly on AIMService takes precedence over namespace and
+                      cluster RuntimeConfig values.
+                    maxLength: 4096
+                    minLength: 1
+                    type: string
+                type: object
               storage:
                 description: |-
                   Storage configures storage defaults for this service's PVCs and caches.

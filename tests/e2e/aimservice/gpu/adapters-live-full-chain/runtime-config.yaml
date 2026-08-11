@@ -7,7 +7,7 @@ spec:
     enabled: true
     gatewayRef:
       name: kserve-ingress-gateway
-      namespace: kgateway-system
+      namespace: envoy-gateway-system
     # Namespace in the path so leftover/parallel runs don't collide on the
     # shared gateway. validate-adapter-loaded.sh hits this base path + /models.
     pathTemplate: "/integration/adapters-live-full-chain/{.metadata.namespace}/{.metadata.name}"

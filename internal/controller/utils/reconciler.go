@@ -161,6 +161,14 @@ func (pr *PlanResult) GetToDelete() []client.Object {
 	return pr.toDelete
 }
 
+// RequestRequeueAfter asks the controller to reconcile after duration, keeping
+// the smallest non-zero request already present in the plan.
+func (pr *PlanResult) RequestRequeueAfter(duration time.Duration) {
+	if duration > 0 && (pr.RequeueAfter == 0 || duration < pr.RequeueAfter) {
+		pr.RequeueAfter = duration
+	}
+}
+
 // Merge appends every object queued in `other` into this plan. RequeueAfter
 // adopts the smaller non-zero of the two values so the controller wakes up
 // as soon as either contributing pipeline asks to.
@@ -173,9 +181,7 @@ func (pr *PlanResult) Merge(other PlanResult) {
 	pr.toApplyWithoutOwnerRef = append(pr.toApplyWithoutOwnerRef, other.toApplyWithoutOwnerRef...)
 	pr.toApplyWithForce = append(pr.toApplyWithForce, other.toApplyWithForce...)
 	pr.toDelete = append(pr.toDelete, other.toDelete...)
-	if other.RequeueAfter > 0 && (pr.RequeueAfter == 0 || other.RequeueAfter < pr.RequeueAfter) {
-		pr.RequeueAfter = other.RequeueAfter
-	}
+	pr.RequestRequeueAfter(other.RequeueAfter)
 }
 
 // StateEngineDecision contains the state engine's analysis and reconciliation directives.

@@ -1,145 +1,170 @@
 # Scale-from-zero cluster prerequisites
 
-AIM Engine's scale-from-zero feature needs one cluster-wide OpenTelemetry
-collector that turns the kgateway data-plane request counter into the
-activation signal KEDA uses to wake a service from zero pods.
+AIM Engine uses a gateway-side request counter to wake an `AIMService` from
+zero replicas. An Envoy Gateway installation needs:
 
-**It ships with AIM Engine by default** — in `dist/install.yaml` (via
-`make build-installer`) and the Helm chart
-(`scaleFromZero.gatewayMetricsCollector.enable`, on by default), deployed
-into the release namespace. To manage it out-of-band instead, set that
-value to `false` and apply the manifest here directly (see below).
+1. One shared `EnvoyExtensionPolicy` on each Gateway used by AIM Engine.
+2. A source-side delta OTLP metrics sink on the Gateway's platform-owned
+   `EnvoyProxy`.
+3. One OpenTelemetry Collector that receives those deltas and forwards the
+   activation counters to keda-otel-add-on.
 
-## What this directory contains
+The policy runs before Envoy returns a zero-endpoint `503`, so the request that
+wakes a service is counted even when no backend pod is available. Each
+HTTPRoute has a distinct metric.
+
+For the recommended Helm-managed installation, follow
+[Optional Envoy Gateway scale-from-zero](https://github.com/amd-enterprise-ai/aim-engine/blob/main/docs/docs/admin/envoy-gateway-scale-from-zero.md).
+This README documents the manifests in this directory and the distinction
+between Helm-managed and externally managed collectors.
+
+## Files
 
 | File | Purpose |
 |---|---|
-| `kgateway-metrics-collector.yaml` | The collector. Scrapes Envoy admin metrics from each kgateway data-plane pod and forwards the gateway-rate counter to keda-otel-scaler — the only activation signal available while a `spec.minReplicas: 0` service sits at zero pods. Source of truth: `config/default` pulls in this exact manifest, so the installer and chart ship it. |
-| `kustomization.yaml` | Kustomize base that pulls the manifest into `config/default`. |
+| `envoy-gateway-route-metrics.yaml` | Shared Gateway-scoped metrics policy. |
+| `envoy-gateway-metrics-collector.yaml` | Standalone, RBAC-free Envoy OTLP receiver for external management. |
+| `kgateway-metrics-collector.yaml` | Standalone collector for an externally managed [kgateway installation](https://github.com/amd-enterprise-ai/aim-engine/blob/main/docs/docs/admin/kgateway-setup.md). |
+| `kustomization.yaml` | Convenience bundle for explicitly installing the standalone Envoy collector. |
 
-## Other prerequisites (NOT in this directory)
+## Requirements
 
-These are installed via their own upstream methods; we just note them
-for completeness so a fresh cluster can be brought up end-to-end:
+- Envoy Gateway v1.8+ / Envoy Proxy v1.38+ (`handle:stats()` is required).
+- KEDA 2.18+ and keda-otel-add-on.
+- OpenTelemetry Operator.
 
-- **KEDA** (>= 2.18) — the operator that owns the `ScaledObject` →
-  HPA conversion that drives the 0↔1 transition. Install per
-  [KEDA's docs](https://keda.sh/docs/latest/deploy/).
-- **keda-otel-add-on** — the gRPC scaler service that consumes both
-  the gateway-rate metric (this manifest's output) and the in-pod
-  vLLM metrics, exposing them to KEDA over the `external` trigger
-  protocol. Install per the
-  [kedify/otel-add-on README](https://github.com/kedify/otel-add-on).
-  Defaults assume it runs in the `keda` namespace serving
-  `keda-otel-scaler.keda.svc:4318` (gRPC scaler) and `:4317` (OTLP
-  receiver).
-- **OpenTelemetry Operator** — reconciles the
-  `OpenTelemetryCollector` CR in `kgateway-metrics-collector.yaml`
-  into a Deployment + Service.
-- **kgateway** with at least one `Gateway` whose data-plane pods are
-  labeled `gateway.networking.k8s.io/gateway-name=<name>`. The
-  default selector value is `kserve-ingress-gateway`; edit the
-  manifest if your cluster differs.
+Allow the Envoy proxy pods to reach the collector Service on TCP 4317 and the
+collector to reach keda-otel-add-on when the cluster enforces NetworkPolicies.
+The Envoy collector does not need Kubernetes API discovery access.
 
-## Install
+Envoy Gateway v1.8's `Strict` Lua validator does not yet model Envoy 1.38's
+`handle:stats()` API. Configure the Gateway's `EnvoyProxy` with both the Lua
+setting and an OTLP sink that calculates deltas at the source:
 
-### Default: shipped with AIM Engine
+```yaml
+spec:
+  luaValidation: InsecureSyntax
+  telemetry:
+    metrics:
+      sinks:
+        - type: OpenTelemetry
+          openTelemetry:
+            host: <collector-service>.<collector-namespace>.svc.cluster.local
+            port: 4317
+            reportCountersAsDeltas: true
+```
 
-For a standard install the collector is already deployed — nothing to apply
-here. Tune it via Helm values:
+For a Helm-managed collector installed as release `aim-engine` in `aim-system`,
+use
+`aim-engine-envoy-gateway-metrics-collector.aim-system.svc.cluster.local`.
+For the standalone manifest defaults, use
+`envoy-gateway-metrics-collector.keda.svc.cluster.local`.
+
+Restrict `EnvoyExtensionPolicy` write access to platform administrators. A
+route-level policy can override the Gateway-level policy.
+
+## Helm-managed collector (recommended)
+
+When `scaleFromZero.gatewayProvider=envoyGateway`, the AIM Engine Helm chart can
+manage prerequisite 3 (the collector). It never modifies prerequisites 1 or 2
+because they belong to the platform-owned Gateway. Install the policy and
+configure its `EnvoyProxy` independently for every Gateway used by AIMServices.
+
+For Envoy Gateway, edit the target Gateway name and namespace in
+`envoy-gateway-route-metrics.yaml`, then apply the policy:
+
+```bash
+kubectl apply -f config/prereqs/scale-from-zero/envoy-gateway-route-metrics.yaml
+```
+
+The AIM Engine Helm chart selects the controller metric contract and bundled
+collector from one provider value. Gateway activation is disabled by default:
 
 ```yaml
 scaleFromZero:
+  gatewayProvider: none
   gatewayMetricsCollector:
-    enable: true                 # set false to manage it standalone (below)
-    gatewayName: kserve-ingress-gateway
-    otlpEndpoint: keda-otel-scaler.keda.svc:4317
+    management: helm
 ```
 
-### Standalone (out-of-band) install
+With this default, Helm renders no collector and AIMServices that request
+`minReplicas: 0` report `ConfigValid=False`. To enable Envoy Gateway activation,
+set `gatewayProvider: envoyGateway`; the existing `management: helm` default
+then renders its collector.
 
-For clusters that manage this infrastructure separately, disable the
-chart copy (`scaleFromZero.gatewayMetricsCollector.enable=false`) and
-apply the manifest directly:
+Use `gatewayProvider: kgateway` to render the kgateway collector instead; see
+[kgateway setup](../../../docs/docs/admin/kgateway-setup.md) for its Gateway
+configuration.
+
+For another gateway implementation, use `gatewayProvider: custom` with
+`gatewayMetricsCollector.management: external`. The external collector must
+forward delta metrics to keda-otel-add-on, and a default, named, or service-level
+RuntimeConfig must provide
+`scaleFromZero.activationMetricQueryTemplate`.
+
+## Externally managed collector
+
+Use external management only when platform infrastructure, rather than the AIM
+Engine Helm release, owns the collector. Select the provider but disable Helm
+ownership:
+
+```yaml
+scaleFromZero:
+  gatewayProvider: envoyGateway
+  gatewayMetricsCollector:
+    management: external
+```
+
+Edit the standalone manifest's namespace and destination OTLP endpoint, update
+the `EnvoyProxy` sink host to match that namespace, then apply it:
 
 ```bash
-kubectl apply -f config/prereqs/scale-from-zero/kgateway-metrics-collector.yaml
+kubectl apply -f config/prereqs/scale-from-zero/envoy-gateway-metrics-collector.yaml
+kubectl -n keda rollout status deploy/envoy-gateway-metrics-collector
 ```
 
-Wait for the collector to become Ready:
-
-```bash
-kubectl -n keda rollout status deploy/kgateway-metrics-collector --timeout=120s
-```
-
-## Customize for your cluster
-
-When **chart-managed**, set the values under
-`scaleFromZero.gatewayMetricsCollector` (namespace follows the release;
-`gatewayName` and `otlpEndpoint` map to the two cluster-specific knobs
-below).
-
-When applying the **standalone** manifest, the defaults match the
-kaiwo-tw-1 baseline; three values commonly need to change for other
-clusters, each flagged inline with an `EDIT FOR YOUR CLUSTER` comment:
-
-1. **Namespace** (`keda`) — wherever your keda-otel-add-on lives.
-2. **Gateway label selector** (`kserve-ingress-gateway`) — the value
-   of the `gateway.networking.k8s.io/gateway-name` label on your
-   kgateway data-plane pods.
-3. **OTLP exporter endpoint** — must point at your keda-otel-scaler's
-   OTLP gRPC port (default `:4317`).
-
-Edit in place and re-apply; the collector reconciles within a few
-seconds.
+Exactly one collector management mode should be used. Do not apply a
+standalone collector while Helm management is enabled.
 
 ## Verify
 
-After apply, send a single request through any HTTPRoute backed by a
-scale-to-zero AIMService and tail the collector's debug exporter:
+Confirm that the policy is accepted:
 
 ```bash
-kubectl logs -n keda deploy/kgateway-metrics-collector --tail=20
+kubectl get envoyextensionpolicy -n <gateway-namespace> \
+  route-activation-metrics -o yaml
 ```
 
-You should see one (and only one) datapoint per kgateway pod per
-second, with attributes
-`envoy_cluster_name=kube_<ns>_<svc>_<port>`,
-`namespace=<ns>`, `deployment=<svc>`. Values arrive as **per-scrape
-deltas** (typically 0, with a spike of 1+ on the scrape that
-captures a real request) rather than the raw cumulative counter —
-the `cumulativetodelta` processor converts the series at the
-collector boundary so the keda-otel-add-on scaler never sees a
-counter reset. This matters when the Envoy upstream cluster for
-the predictor restarts (predictor cycle, kgateway pod restart,
-zero-endpoint eviction): without the delta conversion the scaler's
-sliding-window `rate` aggregation would report a *negative* value
-across the reset and would fail activation for one window.
+For the Helm-managed collector, inspect resources in the AIM Engine release
+namespace (normally `aim-system`):
 
-Series with non-`kube_` cluster names (e.g. `admin_port_cluster`)
-should NOT appear — the `filter/exclude_envoy_internal` processor
-drops them at the collector boundary so the keda-otel-scaler's
-metric store stays free of noise.
+```bash
+kubectl get opentelemetrycollector \
+  aim-engine-envoy-gateway-metrics \
+  -n aim-system
+kubectl rollout status \
+  deploy/aim-engine-envoy-gateway-metrics-collector \
+  -n aim-system \
+  --timeout=180s
+kubectl logs \
+  deploy/aim-engine-envoy-gateway-metrics-collector \
+  -n aim-system \
+  --tail=50
+```
 
-To keep scrape volume bounded as the cluster grows, the Prometheus
-receiver filters at the Envoy admin endpoint itself
-(`/stats/prometheus?filter=upstream_rq_completed&usedonly=`) instead
-of pulling the full stats page (~10k lines/pod) and discarding it in
-the collector. Envoy's `filter` regex matches the *internal* stat
-name (`cluster.<name>.external.upstream_rq_completed`), not the
-Prometheus-rendered name, so the broad `upstream_rq_completed`
-substring is used and the `filter/metrics` processor keeps the exact
-`envoy_cluster_external_upstream_rq_completed` series; `usedonly`
-drops counters that have never been incremented.
+For the standalone manifest defaults, inspect the externally managed collector
+in `keda`:
 
-## When to manage it yourself
+```bash
+kubectl get opentelemetrycollector envoy-gateway-metrics -n keda
+kubectl rollout status deploy/envoy-gateway-metrics-collector \
+  -n keda \
+  --timeout=180s
+kubectl logs deploy/envoy-gateway-metrics-collector \
+  -n keda \
+  --tail=50
+```
 
-The collector is a cluster-wide singleton. Prefer the standalone path
-(`enable=false` + the manifest here) when:
-
-- A platform team owns cluster infra (kgateway, KEDA, OTel Operator) on a
-  separate lifecycle from the controller.
-- You run multiple AIM Engine installs on one cluster — the chart's
-  cluster-scoped collector RBAC is singleton-named and would collide.
-- The OpenTelemetry Operator CRDs aren't present at install time, so the
-  chart's `OpenTelemetryCollector` would fail to apply.
+After sending a request through an AIM Engine HTTPRoute, the selected
+collector's logs should contain an
+`envoy_http_lua_aim_activation_requests_*` metric for the route.

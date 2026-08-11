@@ -44,25 +44,12 @@ Install KEDA and the OpenTelemetry integration:
 - [KEDA](https://keda.sh/) v2.18+
 - [OpenTelemetry Operator](https://github.com/open-telemetry/opentelemetry-operator)
 - KEDA OpenTelemetry scaler (`keda-otel-scaler`)
-- **`kgateway-metrics-collector`** — cluster-singleton OpenTelemetryCollector
-  that scrapes the kgateway data plane and forwards the gateway-rate counter
-  to `keda-otel-scaler`. Required for any service configured with
-  `minReplicas: 0`; without it, KEDA's activation trigger has no metric series
-  and the predictor will never scale up from zero. Keep this collector running
-  at all times — it is the sole activation path for idle services, so while it
-  is down no `minReplicas: 0` service can wake from zero. This collector ships
-  with the AIM Engine Helm chart and is enabled by default
-  (`scaleFromZero.gatewayMetricsCollector.enable=true`), so a standard install
-  already includes it. To manage it out-of-band instead, apply it from this repo:
+- For Envoy Gateway, one shared activation metrics policy per Gateway
+- A non-`none` `scaleFromZero.gatewayProvider`. For built-in providers, the
+  matching collector is installed by the AIM Engine chart by default.
 
-  ```bash
-  kubectl apply -f https://raw.githubusercontent.com/amd-enterprise-ai/aim-engine/main/config/prereqs/scale-from-zero/kgateway-metrics-collector.yaml
-  kubectl -n keda rollout status deploy/kgateway-metrics-collector --timeout=120s
-  ```
-
-  Or, from a clone, `make install-scale-from-zero-prereq`. See
-  [installation](../getting-started/installation.md#2-install-the-operator)
-  for customization knobs (gateway label, keda namespace).
+See [Optional Envoy Gateway scale-from-zero](../admin/envoy-gateway-scale-from-zero.md)
+for provider, Gateway policy, and collector configuration.
 
 ### Basic Autoscaling
 
@@ -108,13 +95,16 @@ AIM Engine automatically:
 Set `minReplicas: 0` to let KEDA idle the predictor down to zero replicas when no
 traffic is observed and bring it back up on the next request. Note: without `autoScaling.metrics`, the service activates from 0 -> 1 but will not scale from 1 -> N.
 
+The Helm chart defaults `scaleFromZero.gatewayProvider` to `none`; select a
+built-in or custom provider before creating scale-from-zero services.
+
 :::{admonition} Routing must be enabled for scale-to-zero
 :class: warning
 
 `minReplicas: 0` **requires routing to be enabled** on the service
 (`spec.routing.enabled: true`, or a cluster-wide default via
 `runtimeConfig.routing.enabled`). The 0->1 activation trigger queries
-gateway-side Envoy metrics that only exist once an `HTTPRoute` is wired up,
+gateway-side metrics associated with an `HTTPRoute`,
 so with routing disabled the service can never wake from zero. AIM Engine
 rejects this combination at validation time: the AIMService reports
 `ConfigValid=False` with reason
@@ -137,16 +127,11 @@ spec:
   routing: # can also be injected by the runtime config
     enabled: true
     gatewayRef:
-      name: inference-gateway
-      namespace: kgateway-system
+      name: <gateway-name>
+      namespace: <gateway-namespace>
     pathTemplate: "/{.metadata.namespace}/{.metadata.name}"
 ```
 
-:::{admonition} The first request seeds the activation metric
-:class: warning
-
-On a fresh cluster the gateway activation series (`envoy_cluster_external_upstream_rq_completed`) does not exist until a request has passed through kgateway, so the **first** `minReplicas: 0` service reports `Ready=False reason=TriggerError` and stays at its initial replica instead of idling to zero. Send a single request (even a cold-start `503` counts) to seed the metric — afterwards scale-to-zero works normally for that service and later ones inherit the now-known metric.
-:::
 Notes:
 
 - Routing (`spec.routing.enabled`, or a cluster-wide
@@ -154,12 +139,8 @@ Notes:
   service with routing disabled fails validation with `ConfigValid=False` /
   `RoutingRequiredForScaleToZero` — it is never created rather than idling into a
   state it can never wake from.
-- The `kgateway-metrics-collector` cluster prereq from
-  [Prerequisites](#prerequisites) **must** be installed for `minReplicas: 0` to
-  ever activate from a cold predictor. Without it, KEDA's activation trigger
-  has no metric series, the ScaledObject reports `Ready=False reason=TriggerError`,
-  and the AIMService stalls with the HPA showing `desiredReplicas=0`
-  (the int32 zero value, not a real decision).
+- The Gateway metrics policy and collector from [Prerequisites](#prerequisites)
+  must be running before a service can wake from zero replicas.
 - `maxReplicas` must still be set to at least `1` so the service can scale back up.
 - The first request after the pod has been scaled to zero pays the full cold-start
   cost (image pull, model load, accelerator allocation). For large LLMs this can be
@@ -174,6 +155,46 @@ Notes:
 - KEDA decides scale-to-zero based on the configured trigger (the default load-based
   trigger, or your custom `autoScaling.metrics`). The metric you scale on must
   legitimately reach `0` on idle, otherwise the pod will not be scaled down.
+
+### Custom Gateway Activation Metrics
+
+For another gateway implementation, install an external collector and configure
+the chart without a bundled provider collector:
+
+```bash
+helm upgrade aim-engine oci://docker.io/amdenterpriseai/aim-engine-chart \
+  --namespace aim-system \
+  --reuse-values \
+  --set scaleFromZero.gatewayProvider=custom \
+  --set scaleFromZero.gatewayMetricsCollector.management=external
+```
+
+Provide the activation query through the default RuntimeConfig to apply it to
+all AIMServices that do not select another `runtimeConfigName`:
+
+```yaml
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMClusterRuntimeConfig
+metadata:
+  name: default
+spec:
+  scaleFromZero:
+    activationMetricQueryTemplate: >-
+      sum(custom_gateway_requests{namespace="${namespace}",route="${httpRouteName}"})
+```
+
+Supported placeholders are `${namespace}`, `${serviceName}`,
+`${httpRouteName}`, and `${predictorDeployment}`. A query set directly under an
+AIMService's `spec.scaleFromZero` takes precedence over namespace and cluster
+RuntimeConfigs. A named RuntimeConfig can provide a different query to selected
+services through `spec.runtimeConfigName`.
+
+The external pipeline must forward delta metrics, not cumulative counter
+totals, to keda-otel-add-on. AIM Engine keeps the activation trigger's `targetValue` and
+`operationOverTime=avg` fixed so a single gateway request produces the 0 → 1
+activation signal. Missing queries for the `custom` provider and unsupported
+placeholders report `ConfigValid=False` with reason
+`ActivationMetricQueryInvalid`.
 
 ### Custom Metrics
 

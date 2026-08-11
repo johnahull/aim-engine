@@ -719,6 +719,20 @@ func (s *AIMServiceStatus) GetAIMStatus() constants.AIMStatus {
 // +kubebuilder:validation:Enum=Pending;Starting;Running;Failed;Degraded
 type AIMServiceStatusEnum string
 
+// Condition types for AIMService that are not component-health rollups.
+const (
+	// AIMServiceConditionActivationMetricAvailable reports whether the HPA
+	// has the expected activation-plus-user-metric shape and reports KEDA's
+	// exact s0 zero-to-one activation metric in currentMetrics. It applies only
+	// when scale-to-zero routing and the provider-neutral activation query are
+	// valid. It is informational only: the type deliberately omits the
+	// component "Ready" suffix so it never participates in the Ready rollup and
+	// never alters scaling behaviour. AIM Engine reports the signal; acting on
+	// it (fixing the collector or gateway policy, alerting) is the cluster
+	// administrator's call.
+	AIMServiceConditionActivationMetricAvailable = "ActivationMetricAvailable"
+)
+
 // Condition reasons for AIMService
 const (
 	// Model Resolution
@@ -755,16 +769,34 @@ const (
 	AIMServiceReasonScaledToZero = "ScaledToZero"
 	// AIMServiceReasonRoutingRequired indicates an invalid scale-to-zero
 	// configuration: minReplicas=0 with routing disabled. The 0->1 activation
-	// trigger queries gateway-side Envoy metrics that only exist once an
-	// HTTPRoute is wired up, so without routing the service idles to zero and
-	// can never wake. Drives ConfigValid=False.
+	// trigger queries gateway-side metrics associated with the service's
+	// HTTPRoute, so without routing the service idles to zero and can never
+	// wake. Drives ConfigValid=False.
 	AIMServiceReasonRoutingRequired = "RoutingRequiredForScaleToZero"
+	// AIMServiceReasonActivationMetricQueryInvalid indicates that the
+	// scale-from-zero activation query cannot be resolved from the selected
+	// provider, RuntimeConfig, and service override. Drives ConfigValid=False.
+	AIMServiceReasonActivationMetricQueryInvalid = "ActivationMetricQueryInvalid"
 	// AIMServiceReasonAutoscalingRequiresMetrics indicates autoscaling was
 	// configured (minReplicas/maxReplicas/autoScaling) but no scaling trigger
 	// resolves: the controller stamps autoscalerClass=external yet KEDA only
 	// manages replicas when a ScaledObject with at least one trigger exists, so
 	// the declared bounds are never enforced. Drives ConfigValid=False.
 	AIMServiceReasonAutoscalingRequiresMetrics = "AutoscalingRequiresMetrics"
+
+	// Scale-from-zero activation signal (ActivationMetricAvailable).
+	// AIMServiceReasonActivationMetricAvailable indicates the HPA reports the
+	// exact s0 zero-to-one activation metric, so its query is readable.
+	AIMServiceReasonActivationMetricAvailable = "MetricAvailable"
+	// AIMServiceReasonAwaitingActivationMetric indicates the HPA has not
+	// reported the exact s0 zero-to-one activation metric yet, but is still
+	// within the grace period that covers HPA creation and transient collector
+	// restarts.
+	AIMServiceReasonAwaitingActivationMetric = "AwaitingActivationMetric"
+	// AIMServiceReasonActivationMetricUnavailable indicates the HPA has not
+	// reported the exact s0 zero-to-one activation metric for longer than the
+	// grace period, so the service may not wake after scaling to zero.
+	AIMServiceReasonActivationMetricUnavailable = "ActivationMetricUnavailable"
 
 	// Routing
 	AIMServiceReasonPathTemplateInvalid = "PathTemplateInvalid"

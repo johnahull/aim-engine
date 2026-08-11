@@ -21,43 +21,28 @@ releases:
       - crds:
           enabled: true
 
-  - name: kgateway-crd
-    namespace: kgateway-system
-    chart: oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
-    version: v2.1.2
+  # Envoy Gateway provides the Gateway API data plane and activation metrics.
+  - name: envoy-gateway
+    namespace: envoy-gateway-system
+    chart: oci://docker.io/envoyproxy/gateway-helm
+    version: v1.8.2
     createNamespace: true
     wait: true
     timeout: 600
-    hooks:
-      - events: ["presync"]
-        showlogs: true
-        command: kubectl
-        args:
-          - apply
-          - --server-side
-          - -f
-          - https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
-
-  - name: kgateway
-    namespace: kgateway-system
-    chart: oci://cr.kgateway.dev/kgateway-dev/charts/kgateway
-    version: v2.1.2
-    createNamespace: false
-    wait: false
-    disableValidation: true
-    timeout: 600
-    needs:
-      - kgateway-system/kgateway-crd
-      - cert-manager/cert-manager
     values:
-      - agentgateway:
-          enabled: true
+      - config:
+          envoyGateway:
+            extensionApis:
+              disableLua: false
     hooks:
+      # Apply Gateway resources after their CRDs are installed. Server-side
+      # admission still validates resources when client validation is disabled.
       - events: ["postsync"]
         showlogs: true
         command: kubectl
         args:
           - apply
+          - --validate=false
           - -f
           - gateway.yaml
 

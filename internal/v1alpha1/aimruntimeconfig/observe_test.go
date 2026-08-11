@@ -440,6 +440,46 @@ func TestFetchRuntimeConfig_RoutingMerge(t *testing.T) {
 	}
 }
 
+func TestFetchRuntimeConfig_ActivationMetricQueryNamespaceOverridesCluster(t *testing.T) {
+	clusterConfig := &aimv1alpha1.AIMClusterRuntimeConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		Spec: aimv1alpha1.AIMClusterRuntimeConfigSpec{
+			AIMRuntimeConfigCommon: aimv1alpha1.AIMRuntimeConfigCommon{
+				AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+					ScaleFromZero: &aimv1alpha1.AIMScaleFromZeroConfig{
+						ActivationMetricQueryTemplate: "cluster_query",
+					},
+				},
+			},
+		},
+	}
+	namespaceConfig := &aimv1alpha1.AIMRuntimeConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "test-ns"},
+		Spec: aimv1alpha1.AIMRuntimeConfigSpec{
+			AIMRuntimeConfigCommon: aimv1alpha1.AIMRuntimeConfigCommon{
+				AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+					ScaleFromZero: &aimv1alpha1.AIMScaleFromZeroConfig{
+						ActivationMetricQueryTemplate: "namespace_query",
+					},
+				},
+			},
+		},
+	}
+
+	result := FetchMergedRuntimeConfig(
+		context.Background(),
+		newFakeClient(clusterConfig, namespaceConfig),
+		"default",
+		"test-ns",
+	)
+	if result.Value == nil || result.Value.ScaleFromZero == nil {
+		t.Fatal("expected merged scale-from-zero config")
+	}
+	if got := result.Value.ScaleFromZero.ActivationMetricQueryTemplate; got != "namespace_query" {
+		t.Errorf("activation metric query=%q, want namespace override", got)
+	}
+}
+
 func TestFetchRuntimeConfig_ModelConfig(t *testing.T) {
 	clusterConfig := &aimv1alpha1.AIMClusterRuntimeConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},

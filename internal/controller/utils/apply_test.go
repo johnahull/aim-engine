@@ -24,6 +24,7 @@ package controllerutils
 
 import (
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -253,6 +254,18 @@ func TestPlanResult_MergeCarriesForceBucket(t *testing.T) {
 
 	if got := len(base.GetToApplyWithForce()); got != 2 {
 		t.Fatalf("merged force bucket length = %d, want 2", got)
+	}
+}
+
+func TestPlanResultRequestRequeueAfterKeepsSmallestNonZero(t *testing.T) {
+	plan := PlanResult{}
+	plan.RequestRequeueAfter(3 * time.Minute)
+	plan.RequestRequeueAfter(0)
+	plan.RequestRequeueAfter(5 * time.Second)
+	plan.RequestRequeueAfter(time.Minute)
+
+	if plan.RequeueAfter != 5*time.Second {
+		t.Errorf("RequeueAfter=%s, want %s", plan.RequeueAfter, 5*time.Second)
 	}
 }
 

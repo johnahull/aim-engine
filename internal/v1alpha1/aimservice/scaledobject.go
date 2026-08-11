@@ -52,9 +52,19 @@ var kedaScaledObjectGVK = schema.GroupVersionKind{
 	Kind:    "ScaledObject",
 }
 
-// gatewayActivationMetricName is the Envoy counter the cluster-level OTel
-// collector scrapes and forwards to the scaler. JOINED INVARIANT with the
-// collector's `filter/metrics` include list -- change them together.
+// Envoy Gateway's shared Lua extension emits one counter per HTTPRoute. The
+// Prometheus stats sink prepends envoy_http_lua_ and converts punctuation to
+// underscores. The Lua script hex-escapes every non-alphanumeric identity byte
+// before that normalization, and length prefixes preserve component boundaries.
+// The OTel collector forwards these counters unchanged, so the controller can
+// query the exact name without per-route Lua or collector-side label parsing.
+//
+// JOINED INVARIANT with the gateway Lua script and both collector manifests --
+// change them together (see TestGatewayActivationInvariant).
+const envoyGatewayActivationMetricPrefix = "envoy_http_lua_aim_activation_requests_"
+
+// gatewayActivationMetricName is retained for the legacy kgateway collector,
+// which emits one deployment-labeled metric rather than route-specific names.
 const gatewayActivationMetricName = "envoy_cluster_external_upstream_rq_completed"
 
 // Scale-to-zero polling and cooldown defaults. KEDA platform defaults
@@ -113,6 +123,7 @@ func planScaledObject(
 	ctx context.Context,
 	service *aimv1alpha1.AIMService,
 	effectiveResources *corev1.ResourceRequirements,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
 ) client.Object {
 	logger := log.FromContext(ctx).WithName("planScaledObject")
 
@@ -134,10 +145,19 @@ func planScaledObject(
 	predictorName := isvcName + constants.PredictorServiceSuffix
 	minReplicas, maxReplicas := resolveReplicaBounds(service)
 	scaleToZero := minReplicas == 0
+	activationQuery, activationRequired, activationErr := resolveScaleToZeroActivationMetric(service, runtimeConfig)
+	if activationRequired && activationErr != nil {
+		logger.Error(activationErr,
+			"cannot build gateway activation metric query; skipping ScaledObject",
+			"service", service.Name,
+			"namespace", service.Namespace,
+		)
+		return nil
+	}
 
 	triggers := make([]interface{}, 0, 2)
 	if scaleToZero {
-		triggers = append(triggers, buildGatewayActivationTrigger(service.Namespace, predictorName))
+		triggers = append(triggers, buildGatewayActivationTrigger(activationQuery))
 	}
 	for _, m := range collectUserMetrics(service) {
 		if t := buildUserMetricTrigger(m, service.Namespace, predictorName); t != nil {
@@ -326,27 +346,212 @@ func collectUserMetrics(service *aimv1alpha1.AIMService) []aimv1alpha1.AIMServic
 	return service.Spec.AutoScaling.Metrics
 }
 
+// resolvedUserMetricTriggerCount reports how many user-declared metrics produce
+// KEDA triggers. Activation status uses this to distinguish the reconciled HPA
+// shape from a stale user-only HPA during scale-to-zero configuration changes.
+func resolvedUserMetricTriggerCount(service *aimv1alpha1.AIMService, predictorName string) int {
+	count := 0
+	for _, metric := range collectUserMetrics(service) {
+		if buildUserMetricTrigger(metric, service.Namespace, predictorName) != nil {
+			count++
+		}
+	}
+	return count
+}
+
+// resolveScaleToZeroActivationMetric is the single source of truth for whether
+// a zero-to-one activation metric is required and whether its provider-neutral
+// query can be built. Provider selection remains encapsulated in
+// gatewayActivationMetricQuery.
+func resolveScaleToZeroActivationMetric(
+	service *aimv1alpha1.AIMService,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+) (query string, required bool, err error) {
+	if !isScaleToZero(service) {
+		return "", false, nil
+	}
+	isvcName, err := GenerateInferenceServiceName(service.Name, service.Namespace)
+	if err != nil {
+		return "", true, err
+	}
+	query, err = gatewayActivationMetricQuery(
+		service,
+		isvcName+constants.PredictorServiceSuffix,
+		runtimeConfig,
+	)
+	return query, true, err
+}
+
 // buildGatewayActivationTrigger constructs the synthetic KEDA trigger that
-// flips activation from 0->1 on a single request. The {namespace,deployment}
-// label selector is required: the keda-otel-add-on scaler does not
-// auto-inject scope and without it the trigger sums all series under the
-// metric name (including Envoy admin probes).
+// flips activation from 0->1 on a single request. Query resolution is kept
+// separate so an invalid activation query cannot leave a user metric in the
+// first trigger slot and make KEDA's s0 identity ambiguous.
 //
 // targetValue and operationOverTime are compiled-in constants, not knobs: the
 // trigger is activation-only (targetValue is a neutralizing ceiling) and
-// operationOverTime is a JOINED INVARIANT with the collector's
-// `cumulativetodelta` pipeline -- it must stay `avg` (see the constants and
-// TestGatewayActivationInvariant). Only scalerAddress is operator-tunable.
-func buildGatewayActivationTrigger(namespace, predictorName string) map[string]interface{} {
+// operationOverTime is a JOINED INVARIANT with the selected gateway pipeline:
+// Envoy Gateway pushes source-side deltas, while kgateway currently converts
+// cumulative counters in its collector. It must stay `avg` (see the constants
+// and TestGatewayActivationInvariant). The query may come from a service or
+// RuntimeConfig, while scalerAddress remains an install-time setting.
+func buildGatewayActivationTrigger(query string) map[string]interface{} {
 	return map[string]interface{}{
 		"type": "external",
 		"metadata": map[string]interface{}{
 			"scalerAddress":     kedaOTelScalerAddress(),
-			"metricQuery":       scopedMetricQuery(gatewayActivationMetricName, namespace, predictorName),
+			"metricQuery":       query,
 			"targetValue":       constants.DefaultGatewayActivationTargetValue,
 			"operationOverTime": constants.DefaultGatewayActivationOperationOverTime,
 		},
 	}
+}
+
+// gatewayActivationScope returns the gateway metric scheme the activation
+// trigger must use. Gateway activation is disabled unless the operator
+// installation explicitly selects a provider. The Helm chart maps
+// gatewayProvider to this internal value so the controller and
+// provider-specific collector use the same metric contract.
+func gatewayActivationScope() string {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(constants.EnvAIMGatewayActivationScope))); v {
+	case constants.GatewayActivationScopeHTTPRoute:
+		return constants.GatewayActivationScopeHTTPRoute
+	case constants.GatewayActivationScopeDeployment:
+		return constants.GatewayActivationScopeDeployment
+	case constants.GatewayActivationScopeCustom:
+		return constants.GatewayActivationScopeCustom
+	case constants.GatewayActivationScopeNone:
+		return constants.GatewayActivationScopeNone
+	default:
+		return constants.GatewayActivationScopeNone
+	}
+}
+
+// gatewayActivationMetricQuery resolves a service override, then a merged
+// RuntimeConfig default, before falling back to the provider-derived query.
+func gatewayActivationMetricQuery(
+	service *aimv1alpha1.AIMService,
+	predictorName string,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+) (string, error) {
+	scope := gatewayActivationScope()
+	if scope == constants.GatewayActivationScopeNone {
+		return "", fmt.Errorf(
+			"gatewayProvider=none disables scale-from-zero activation; " +
+				"select envoyGateway, kgateway, or custom",
+		)
+	}
+
+	if queryTemplate := activationMetricQueryTemplate(service, runtimeConfig); queryTemplate != "" {
+		return renderActivationMetricQueryTemplate(service, predictorName, queryTemplate)
+	}
+
+	switch scope {
+	case constants.GatewayActivationScopeDeployment:
+		// Legacy kgateway: the collector names the upstream cluster
+		// kube_<ns>_<svc>_<port> and labels the series by the predictor
+		// Deployment, identical to the user-metric scoping.
+		return scopedMetricQuery(gatewayActivationMetricName, service.Namespace, predictorName), nil
+	case constants.GatewayActivationScopeCustom:
+		return "", fmt.Errorf(
+			"gatewayProvider=custom requires spec.scaleFromZero.activationMetricQueryTemplate " +
+				"on the AIMService or its RuntimeConfig",
+		)
+	}
+
+	// Envoy Gateway: one gateway-wide Lua extension derives the
+	// matched HTTPRoute from streamInfo().routeName() and increments a
+	// route-specific counter. Query that exact metric; no per-service script or
+	// collector-side label extraction is needed.
+	routeName, err := GenerateHTTPRouteName(service.Name, service.Namespace)
+	if err != nil {
+		return "", fmt.Errorf("derive HTTPRoute name for activation query: %w", err)
+	}
+	return fmt.Sprintf("sum(%s)", envoyGatewayActivationMetricName(service.Namespace, routeName)), nil
+}
+
+func activationMetricQueryTemplate(
+	service *aimv1alpha1.AIMService,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+) string {
+	if service.Spec.ScaleFromZero != nil &&
+		strings.TrimSpace(service.Spec.ScaleFromZero.ActivationMetricQueryTemplate) != "" {
+		return service.Spec.ScaleFromZero.ActivationMetricQueryTemplate
+	}
+	if runtimeConfig != nil && runtimeConfig.ScaleFromZero != nil {
+		return runtimeConfig.ScaleFromZero.ActivationMetricQueryTemplate
+	}
+	return ""
+}
+
+func renderActivationMetricQueryTemplate(
+	service *aimv1alpha1.AIMService,
+	predictorName string,
+	queryTemplate string,
+) (string, error) {
+	query := strings.TrimSpace(queryTemplate)
+	if query == "" {
+		return "", fmt.Errorf("activationMetricQueryTemplate must not be empty")
+	}
+
+	routeName := ""
+	if strings.Contains(query, "${httpRouteName}") {
+		var err error
+		routeName, err = GenerateHTTPRouteName(service.Name, service.Namespace)
+		if err != nil {
+			return "", fmt.Errorf("derive HTTPRoute name for activation query template: %w", err)
+		}
+	}
+
+	query = strings.NewReplacer(
+		"${namespace}", service.Namespace,
+		"${serviceName}", service.Name,
+		"${httpRouteName}", routeName,
+		"${predictorDeployment}", predictorName,
+	).Replace(query)
+
+	if start := strings.Index(query, "${"); start >= 0 {
+		placeholder := query[start:]
+		if end := strings.IndexByte(placeholder, '}'); end >= 0 {
+			placeholder = placeholder[:end+1]
+		}
+		return "", fmt.Errorf("activationMetricQueryTemplate contains unsupported placeholder %q", placeholder)
+	}
+
+	return query, nil
+}
+
+// envoyGatewayActivationMetricName mirrors the gateway-wide Lua extension's
+// stat naming and Envoy's Prometheus normalization.
+func envoyGatewayActivationMetricName(namespace, routeName string) string {
+	return fmt.Sprintf(
+		"%sn%d_%s_r%d_%s",
+		envoyGatewayActivationMetricPrefix,
+		len(namespace),
+		prometheusMetricToken(namespace),
+		len(routeName),
+		prometheusMetricToken(routeName),
+	)
+}
+
+// prometheusMetricToken matches the Lua script's byte-wise escaping. Every
+// non-alphanumeric byte (including underscore) is encoded as _xHH. This is
+// injective even when Envoy later normalizes stat punctuation to underscores:
+// Kubernetes resource names cannot contain an unescaped underscore.
+func prometheusMetricToken(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "_x%02x", c)
+		}
+	}
+	return b.String()
 }
 
 // buildUserMetricTrigger translates one AIMServiceMetricsSpec into an
@@ -388,7 +593,8 @@ func buildUserMetricTrigger(metric aimv1alpha1.AIMServiceMetricsSpec, namespace,
 
 // scopedMetricQuery wraps a bare metric name in a keda-otel-add-on
 // PromQL-shaped query scoped to a specific Deployment's series:
-// `sum(<expr>{namespace="<ns>",deployment="<dep>"})`.
+// `sum(<expr>{namespace="<ns>",deployment="<dep>"})`. Used for user 1->N
+// metrics (in-pod vLLM stats carry the deployment label).
 func scopedMetricQuery(metricExpr, namespace, predictorName string) string {
 	return fmt.Sprintf(`sum(%s{namespace="%s",deployment="%s"})`, metricExpr, namespace, predictorName)
 }

@@ -1,6 +1,10 @@
 # Runtime Configuration
 
-Runtime configurations provide storage defaults, routing parameters, environment variables, and label-propagation rules that apply to AIM workloads. They're optional — workloads run without them — but most production deployments set at least a cluster-scoped `default`.
+Runtime configurations provide storage defaults, routing parameters,
+scale-from-zero activation queries, environment variables, and
+label-propagation rules that apply to AIM workloads. They're optional —
+workloads run without them — but most production deployments set at least a
+cluster-scoped `default`.
 
 ## Resources
 
@@ -195,6 +199,37 @@ spec:
 ```
 
 Rendered path: `/custom/qwen-chat` — the runtime config template is ignored.
+
+## Scale-from-zero activation query
+
+`spec.scaleFromZero.activationMetricQueryTemplate` overrides the metric query
+used by the synthetic KEDA trigger that wakes a service from zero replicas. A
+cluster-scoped config named `default` supplies the query to every AIMService
+that does not select a different `runtimeConfigName`:
+
+```yaml
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMClusterRuntimeConfig
+metadata:
+  name: default
+spec:
+  scaleFromZero:
+    activationMetricQueryTemplate: >-
+      sum(gateway_requests{namespace="${namespace}",route="${httpRouteName}"})
+```
+
+Resolution follows the normal RuntimeConfig hierarchy:
+
+```
+AIMService.spec.scaleFromZero  >  namespace AIMRuntimeConfig  >  cluster AIMClusterRuntimeConfig  >  provider default
+```
+
+The available placeholders are `${namespace}`, `${serviceName}`,
+`${httpRouteName}`, and `${predictorDeployment}`. Unknown placeholders make the
+AIMService configuration invalid. The external collector must expose metrics
+with the query's expected names and labels and must emit delta values rather
+than cumulative counter totals, because the activation trigger uses a fixed
+`operationOverTime=avg`.
 
 ## Environment variable overrides
 

@@ -245,6 +245,128 @@ func TestScaleToZeroRoutingComponentHealth(t *testing.T) {
 	}
 }
 
+func TestScaleToZeroActivationMetricComponentHealth(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeCustom)
+
+	validRuntimeConfig := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			ScaleFromZero: &aimv1alpha1.AIMScaleFromZeroConfig{
+				ActivationMetricQueryTemplate: `sum(custom_requests{namespace="${namespace}"})`,
+			},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		minReplicas   int32
+		routing       bool
+		serviceQuery  string
+		runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon
+		wantFailed    bool
+	}{
+		{
+			name:          "custom provider accepts RuntimeConfig query",
+			minReplicas:   0,
+			routing:       true,
+			runtimeConfig: validRuntimeConfig,
+		},
+		{
+			name:         "custom provider accepts service query",
+			minReplicas:  0,
+			routing:      true,
+			serviceQuery: `sum(service_requests{service="${serviceName}"})`,
+		},
+		{
+			name:        "custom provider requires a query",
+			minReplicas: 0,
+			routing:     true,
+			wantFailed:  true,
+		},
+		{
+			name:          "unknown placeholder is invalid",
+			minReplicas:   0,
+			routing:       true,
+			serviceQuery:  `sum(custom_requests{route="${unknown}"})`,
+			runtimeConfig: validRuntimeConfig,
+			wantFailed:    true,
+		},
+		{
+			name:        "routing validation takes precedence",
+			minReplicas: 0,
+			routing:     false,
+		},
+		{
+			name:        "warm service does not require activation query",
+			minReplicas: 1,
+			routing:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewService("svc").WithModelImage("test-image:v1").Build()
+			svc.Spec.MinReplicas = ptr.To(tt.minReplicas)
+			svc.Spec.Routing = &aimv1alpha1.AIMRuntimeRoutingConfig{Enabled: ptr.To(tt.routing)}
+			if tt.serviceQuery != "" {
+				svc.Spec.ScaleFromZero = &aimv1alpha1.AIMScaleFromZeroConfig{
+					ActivationMetricQueryTemplate: tt.serviceQuery,
+				}
+			}
+
+			got := ScaleToZeroActivationMetricComponentHealth(svc, tt.runtimeConfig)
+			if !tt.wantFailed {
+				if got.Component != "" {
+					t.Fatalf("expected no component health, got %+v", got)
+				}
+				return
+			}
+			if got.Component != ComponentScaleToZeroConfig {
+				t.Errorf("Component=%q, want %q", got.Component, ComponentScaleToZeroConfig)
+			}
+			if got.Reason != aimv1alpha1.AIMServiceReasonActivationMetricQueryInvalid {
+				t.Errorf(
+					"Reason=%q, want %q",
+					got.Reason,
+					aimv1alpha1.AIMServiceReasonActivationMetricQueryInvalid,
+				)
+			}
+			if len(got.Errors) != 1 {
+				t.Fatalf("expected exactly one error, got %d", len(got.Errors))
+			}
+			if cat := controllerutils.CategorizeError(got.Errors[0]).Category(); cat != controllerutils.ErrorCategoryInvalidSpec {
+				t.Errorf("error category=%v, want InvalidSpec", cat)
+			}
+		})
+	}
+}
+
+func TestScaleToZeroActivationMetricComponentHealth_NoneProvider(t *testing.T) {
+	t.Setenv(constants.EnvAIMGatewayActivationScope, constants.GatewayActivationScopeNone)
+
+	svc := NewService("svc").WithModelImage("test-image:v1").Build()
+	svc.Spec.MinReplicas = ptr.To(int32(0))
+	svc.Spec.Routing = &aimv1alpha1.AIMRuntimeRoutingConfig{Enabled: ptr.To(true)}
+	runtimeConfig := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			ScaleFromZero: &aimv1alpha1.AIMScaleFromZeroConfig{
+				ActivationMetricQueryTemplate: "custom_query",
+			},
+		},
+	}
+
+	got := ScaleToZeroActivationMetricComponentHealth(svc, runtimeConfig)
+	if got.Component != ComponentScaleToZeroConfig {
+		t.Errorf("Component=%q, want %q", got.Component, ComponentScaleToZeroConfig)
+	}
+	if got.Reason != aimv1alpha1.AIMServiceReasonActivationMetricQueryInvalid {
+		t.Errorf(
+			"Reason=%q, want %q",
+			got.Reason,
+			aimv1alpha1.AIMServiceReasonActivationMetricQueryInvalid,
+		)
+	}
+}
+
 func TestAutoscalingTriggerComponentHealth(t *testing.T) {
 	withMetric := &aimv1alpha1.AIMServiceAutoScaling{
 		Metrics: []aimv1alpha1.AIMServiceMetricsSpec{{}},

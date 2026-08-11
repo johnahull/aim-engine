@@ -86,23 +86,38 @@ func helmString(t *testing.T, values map[string]interface{}, path ...string) str
 	return s
 }
 
+func assertContainsAll(t *testing.T, subject, body string, needles ...string) {
+	t.Helper()
+	for _, needle := range needles {
+		if !strings.Contains(body, needle) {
+			t.Errorf("%s is missing %q", subject, needle)
+		}
+	}
+}
+
+func assertContainsNone(t *testing.T, subject, body string, forbidden ...string) {
+	t.Helper()
+	for _, needle := range forbidden {
+		if strings.Contains(body, needle) {
+			t.Errorf("%s must not contain %q", subject, needle)
+		}
+	}
+}
+
 // TestGatewayActivationInvariant pins the scale-from-zero activation invariant
-// across every place it is independently expressed, so the Helm path and the
-// kustomize/build-installer path cannot silently disagree:
+// across every place it is independently expressed:
 //
-//   - controller compiled-in constant (internal/constants)
-//   - the OTel collector      (config/prereqs/.../kgateway-metrics-collector.yaml
-//     kustomize prereq + config/helm/templates/scale-from-zero-collector.yaml)
-//   - the collector scrape interval (config/helm/values.yaml + kustomize prereq)
+//   - controller metric naming (internal/v1alpha1/aimservice/scaledobject.go)
+//   - the standalone and Helm-managed OTel collectors
+//   - the Gateway-scoped Lua policies (bootstrap and standalone)
+//   - the development EnvoyProxy source-side delta sink
+//   - the kgateway collector scrape interval
 //
-// The dangerous coupling is operationOverTime=avg <-> the collector's
-// cumulativetodelta processor at a 1s scrape: avg of per-scrape deltas == req/s
-// and is reset-safe, whereas `rate` over raw cumulatives goes negative on Envoy
-// counter resets. operationOverTime (and targetValue) are compiled-in controller
-// constants -- deliberately not Helm/env knobs -- because `avg` is the only
-// correct value; this test is the guard that keeps the constant aligned with the
-// collector pipeline. A drift in any one of these breaks activation silently, so
-// we fail the build instead.
+// Envoy Gateway must calculate deltas at the source so collector restarts cannot
+// replay a proxy's cumulative history. kgateway still uses a one-second
+// Prometheus scrape and cumulative-to-delta conversion until it gains an
+// equivalent source-side sink. A drift in either provider pipeline can break
+// activation silently, so we fail the build instead.
 func TestGatewayActivationInvariant(t *testing.T) {
 	root := repoRoot(t)
 
@@ -111,35 +126,138 @@ func TestGatewayActivationInvariant(t *testing.T) {
 		t.Fatalf("parse values.yaml: %v", err)
 	}
 
-	// The compiled-in aggregation is the single source of truth and must be
-	// `avg` to stay reset-safe against the collector's cumulativetodelta output.
+	// The trigger is activation-only. Its target must remain unreachable during
+	// a normal export interval so even a five-second Envoy delta cannot drive
+	// 1->N scaling.
+	if target := constants.DefaultGatewayActivationTargetValue; target != "1000000000" {
+		t.Errorf("activation targetValue=%q is not the pinned neutralizing ceiling", target)
+	}
+
+	// Both provider pipelines deliver delta values to the scaler.
 	if op := constants.DefaultGatewayActivationOperationOverTime; op != "avg" {
-		t.Errorf("operationOverTime=%q breaks the cumulativetodelta coupling; it must be %q", op, "avg")
+		t.Errorf("operationOverTime=%q breaks the gateway delta contract; it must be %q", op, "avg")
 	}
 
-	// The scrape interval is the time base that makes avg-of-deltas == req/s.
+	if got := helmString(t, values, "scaleFromZero", "gatewayProvider"); got != "none" {
+		t.Errorf("gatewayProvider=%q; expected the default provider to be %q", got, "none")
+	}
+	if got := helmString(t, values, "scaleFromZero", "gatewayMetricsCollector", "management"); got != "helm" {
+		t.Errorf("gatewayMetricsCollector.management=%q; expected default ownership %q", got, "helm")
+	}
+	if base := readRepoFile(t, root, "config", "default", "kustomization.yaml"); strings.Contains(base, "../prereqs/scale-from-zero") {
+		t.Error("config/default must not bundle a gateway-specific scale-from-zero collector")
+	}
+
+	// scrapeInterval is now kgateway-only; its cumulative-to-delta pipeline
+	// retains the one-second time base.
 	if got := helmString(t, values, "scaleFromZero", "gatewayMetricsCollector", "scrapeInterval"); got != "1s" {
-		t.Errorf("scrapeInterval=%q breaks the avg-of-deltas-at-1s assumption; expected %q", got, "1s")
+		t.Errorf("kgateway scrapeInterval=%q; expected %q", got, "1s")
 	}
 
-	collectors := map[string]string{
-		"kustomize prereq": readRepoFile(t, root, "config", "prereqs", "scale-from-zero", "kgateway-metrics-collector.yaml"),
-		"helm template":    readRepoFile(t, root, "config", "helm", "templates", "scale-from-zero-collector.yaml"),
-	}
-	for name, body := range collectors {
-		if !strings.Contains(body, "cumulativetodelta") {
-			t.Errorf("%s collector is missing the cumulativetodelta processor that operationOverTime=avg depends on", name)
-		}
-		// The controller queries this exact metric name; the collector must
-		// export it (see gatewayActivationMetricName in scaledobject.go).
-		if !strings.Contains(body, gatewayActivationMetricName) {
-			t.Errorf("%s collector does not reference the activation metric %q the controller queries", name, gatewayActivationMetricName)
-		}
+	envoyCollector := readRepoFile(
+		t, root, "config", "prereqs", "scale-from-zero", "envoy-gateway-metrics-collector.yaml",
+	)
+	assertContainsAll(t, "standalone Envoy collector", envoyCollector,
+		"automountServiceAccountToken: false",
+		"otlp:",
+		"endpoint: 0.0.0.0:4317",
+		`^http\.lua\.aim_activation_requests\..*`,
+		"transform/metric-name",
+		"replace_pattern(metric.name",
+		envoyGatewayActivationMetricPrefix,
+		"receivers: [otlp]",
+	)
+	assertContainsNone(t, "standalone Envoy collector", envoyCollector,
+		"kind: ClusterRole",
+		"kubernetes_sd_configs:",
+		"cumulativetodelta:",
+		"receivers: [prometheus]",
+	)
+
+	helmCollector := readRepoFile(t, root, "config", "helm", "templates", "scale-from-zero-collector.yaml")
+	assertContainsAll(t, "Helm collector provider selection", helmCollector,
+		`(ne $scope "none")`,
+		"gatewayProvider=kgateway",
+		"gatewayProvider=custom",
+		"management=external",
+		"automountServiceAccountToken: false",
+		"receivers: [otlp]",
+		"transform/metric-name",
+		envoyGatewayActivationMetricPrefix,
+		"envoy_cluster_external_upstream_rq_completed",
+		"transform/cluster_labels",
+		"cumulativetodelta",
+		"replicas must be 1 for kgateway",
+	)
+	kgatewayCollector := readRepoFile(
+		t, root, "config", "prereqs", "scale-from-zero", "kgateway-metrics-collector.yaml",
+	)
+	assertContainsAll(t, "standalone kgateway collector", kgatewayCollector,
+		"envoy_cluster_external_upstream_rq_completed",
+		"cumulativetodelta",
+		"initial_value: keep",
+	)
+
+	// The standalone kgateway collector carries a literal scrape interval (no
+	// Helm templating); it must match the time base above.
+	if !strings.Contains(kgatewayCollector, "scrape_interval: 1s") {
+		t.Error("standalone kgateway collector does not scrape at 1s")
 	}
 
-	// The kustomize prereq carries a literal scrape interval (no Helm
-	// templating); it must match the time base above.
-	if prereq := collectors["kustomize prereq"]; !strings.Contains(prereq, "scrape_interval: 1s") {
-		t.Error("kustomize prereq collector does not scrape at 1s; breaks the avg-of-deltas-at-1s assumption")
+	policies := map[string]string{
+		"bootstrap":  readRepoFile(t, root, "hack", "dependencies", "gateway.yaml"),
+		"standalone": readRepoFile(t, root, "config", "prereqs", "scale-from-zero", "envoy-gateway-route-metrics.yaml"),
 	}
+	for name, body := range policies {
+		assertContainsAll(t, name+" gateway policy", body,
+			"kind: EnvoyExtensionPolicy",
+			"request_handle:streamInfo():routeName()",
+			"request_handle:stats():counter(metric_name):inc()",
+			`string.format("_x%02x", string.byte(character))`,
+			"aim_activation_requests.n",
+		)
+	}
+	if !strings.Contains(policies["bootstrap"], "luaValidation: InsecureSyntax") {
+		t.Error("bootstrap EnvoyProxy must permit Envoy 1.38's Lua stats API")
+	}
+	assertContainsAll(t, "bootstrap EnvoyProxy delta sink", policies["bootstrap"],
+		"type: OpenTelemetry",
+		"host: envoy-gateway-metrics-collector.keda.svc.cluster.local",
+		"port: 4317",
+		"reportCountersAsDeltas: true",
+	)
+
+	helmE2E := readRepoFile(t, root, ".github", "workflows", "test-e2e.yml")
+	assertContainsAll(t, "Helm E2E EnvoyProxy sink setup", helmE2E,
+		"Point Envoy Gateway at the Helm-managed OTLP collector",
+		"aim-engine-envoy-gateway-metrics-collector.aim-system.svc.cluster.local",
+		"hack/configure-envoy-collector-sink.sh",
+		"@.port==4317",
+	)
+	releaseE2E := readRepoFile(t, root, ".github", "workflows", "compile-release.yaml")
+	assertContainsAll(t, "release E2E EnvoyProxy sink setup", releaseE2E,
+		"Point Envoy Gateway at the Helm-managed OTLP collector",
+		"aim-engine-envoy-gateway-metrics-collector.aim-system.svc.cluster.local",
+		"hack/configure-envoy-collector-sink.sh",
+		"@.port==4317",
+	)
+	sinkHelper := readRepoFile(t, root, "hack", "configure-envoy-collector-sink.sh")
+	assertContainsAll(t, "EnvoyProxy sink helper", sinkHelper,
+		"COLLECTOR_HOST",
+		"reportCountersAsDeltas: true",
+		"PROXY_UID_BEFORE",
+		"PROXY_UID_AFTER",
+	)
+
+	restartRegression := readRepoFile(
+		t, root, "tests", "e2e", "aimservice", "common", "scale-from-zero", "chainsaw-test.yaml",
+	)
+	assertContainsAll(t, "collector-restart regression test", restartRegression,
+		"Restart the Envoy activation collector without waking the workload",
+		"kubectl rollout restart",
+		"PROXY_UID_BEFORE",
+		"PROXY_UID_AFTER",
+		"for _ in $(seq 1 30)",
+		"collector restart falsely woke",
+	)
 }

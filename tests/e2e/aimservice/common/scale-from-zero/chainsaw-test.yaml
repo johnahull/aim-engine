@@ -19,29 +19,26 @@
 # are expected to retry (the OpenAI SDKs do so by default).
 #
 # Step ordering matters and is deliberate (see below):
-#   reach Running -> WARM-UP request (serve 200 + seed gateway series)
+#   reach Running -> WARM-UP request (serve 200, bring deployment to >=1)
 #       -> KEDA idles deployment to 0 -> COLD activation request -> 0->1.
 #
 # Why a warm-up request BEFORE asserting idle-to-zero:
 #   The gateway activation trigger queries
-#   `envoy_cluster_external_upstream_rq_completed{namespace,deployment}`.
-#   Envoy does NOT emit that counter for a predictor's upstream cluster
-#   until at least one request has *completed* against it -- so on a fresh
-#   service the series simply does not exist, the keda-otel-add-on scaler
-#   returns "not found", and KEDA reports TriggerError and HOLDS the
-#   deployment at its current replica count (it will not idle on a metric
-#   *error*). The warm-up request creates the series (and proves the
-#   service serves). Only then can the trigger resolve to 0 and let KEDA
-#   idle the deployment. The earlier KServe-spun replica therefore is NOT
-#   reliably short-lived before this point; do not assert on a running pod.
+#   `envoy_http_lua_aim_activation_requests_*` -- a per-HTTPRoute counter
+#   emitted by one gateway-wide Lua extension. Envoy converts it to a
+#   source-side delta and pushes it to the scale-from-zero OTel collector. The
+#   filter runs before Envoy's zero-endpoint direct-response 503, so the cold
+#   request fires 0->1. The warm-up request's job is
+#   (a) prove the service serves a 200 and (b) drive the deployment to >=1
+#   (asserted next) so the following idle assertion observes a genuine 1->0
+#   rather than a stale 0/0. The earlier KServe-spun replica is NOT reliably
+#   short-lived before this point; do not assert on a running pod.
 #
 # Why the idle step gets a generous timeout:
-#   keda-otel-add-on retains each series for METRIC_STORE_RETENTION_SECONDS
-#   (120s by default) and the trigger uses operationOverTime=avg, so the
-#   warm-up request's delta stays in the averaging window (keeping the
-#   trigger "active") for ~retention seconds before decaying to 0. Idle is
-#   therefore dominated by ~120s (retention) + cooldownPeriod(30s), NOT by
-#   cooldown alone. Measured idle latency on kind is ~150s; we allow 300s.
+#   Quiet Envoy flushes omit an unchanged route counter. The last positive point
+#   must age out of keda-otel-add-on's metric store before KEDA applies its
+#   cooldown and HPA reconciliation delays, so the test keeps a generous 300s
+#   budget.
 #
 # Routing is a hard prerequisite for scale-from-zero (the activation
 # trigger needs the gateway-side Envoy series). The sibling `autoscaling`
@@ -120,11 +117,11 @@ spec:
     - name: Verify AIM Engine authored the KEDA ScaledObject with activation trigger
       description: |
         Under scale-from-zero the controller adds two triggers: the
-        gateway-rate activation trigger (envoy_cluster_external_upstream_rq_completed,
+        gateway activation trigger (envoy_http_lua_aim_activation_requests_*,
         0->1 on any request) and the user vllm:num_requests_running metric
-        (1->N under load). Both metricQuery strings are scoped with
-        {namespace,deployment} labels by the controller; we match by
-        substring to stay robust to the hash-derived predictor name.
+        (1->N under load). The gateway trigger uses a route-specific encoded
+        metric name; the user metric is scoped {namespace,deployment}. We match
+        by substring to stay robust to hash-derived names.
         Selecting by aim.eai.amd.com/service label avoids depending on the
         hashed ScaledObject name itself. cooldownPeriod is the
         service-level override (30s) so KEDA idles within the chainsaw
@@ -146,7 +143,7 @@ spec:
                 cooldownPeriod: 30
                 pollingInterval: 5
                 (length(triggers) >= `2`): true
-                (length(triggers[?contains(metadata.metricQuery, 'envoy_cluster_external_upstream_rq_completed')]) >= `1`): true
+                (length(triggers[?contains(metadata.metricQuery, 'envoy_http_lua_aim_activation_requests_')]) >= `1`): true
                 (length(triggers[?contains(metadata.metricQuery, 'vllm:num_requests_running')]) >= `1`): true
 
     - name: Verify HTTPRoute is created for routing
@@ -214,15 +211,14 @@ spec:
     - name: Warm up and seed the gateway activation metric
       description: |
         Send a real request through kserve-ingress-gateway -> HTTPRoute ->
-        predictor BEFORE asserting idle-to-zero. This is the linchpin of a
-        robust test: it (1) proves the service serves a 200, and (2) creates
-        the `envoy_cluster_external_upstream_rq_completed{namespace,deployment}`
-        series in Envoy/keda-otel-scaler. Until this series exists the
-        gateway trigger returns "not found", KEDA reports TriggerError, and
-        the deployment will NOT idle (it holds at the current replica
-        count). validate-http.sh retries for the full deadline, so this
+        predictor BEFORE asserting idle-to-zero. This (1) proves the service
+        serves a 200, and (2) drives the predictor Deployment to >=1 (asserted
+        in the next step) so the following idle assertion observes a genuine
+        1->0 rather than a stale 0/0. It also increments the route counter;
+        Envoy exports only the source-side delta.
+        validate-http.sh retries for the full deadline, so this
         step is robust whether the predictor is already warm (served
-        immediately) or KEDA has it cold (request drives 0->1 first).
+        immediately) or KEDA has it cold (early 503s drive 0->1 first).
       try:
         - script:
             timeout: 360s
@@ -291,10 +287,12 @@ spec:
 
     - name: Wait for KEDA to idle the deployment to zero
       description: |
-        With the gateway series now seeded (warm-up step) and the user
-        vllm:num_requests_running metric reporting 0 (aim-dummy /metrics),
-        both triggers resolve as inactive and KEDA idles the Deployment to
-        0. The AIMService status mirrors the live HPA via
+        With no traffic, Envoy omits the unchanged gateway counter until its
+        last positive point expires from the scaler's metric store. The user
+        vllm:num_requests_running metric reports 0 (aim-dummy /metrics), so both
+        triggers eventually resolve as inactive and KEDA idles the Deployment
+        to 0. The AIMService status
+        mirrors the live HPA via
         status.runtime.currentReplicas / desiredReplicas, and getHPAHealth
         treats ScalingActive=False as the healthy idle state -- status stays
         Running. minReplicas reflects spec intent (0) via the
@@ -302,10 +300,8 @@ spec:
         lockstep with currentReplicas.
       try:
         - assert:
-            # Idle latency is dominated by the keda-otel-add-on retention
-            # window (METRIC_STORE_RETENTION_SECONDS=120, avg-over-window)
-            # plus cooldownPeriod(30s), NOT cooldown alone. Measured ~150s
-            # on kind; 300s absorbs a busy KEDA / slower scrape pipeline.
+            # 300s absorbs KEDA cooldown, HPA reconciliation, and a busy
+            # gateway metrics pipeline.
             timeout: 300s
             resource:
               apiVersion: aim.eai.amd.com/v1alpha1
@@ -333,14 +329,110 @@ spec:
             apiVersion: v1
             kind: Pod
 
+    - name: Verify the predictor workload reached zero
+      try:
+        - assert:
+            timeout: 300s
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: test-scale-from-zero-service
+                  component: predictor
+              status:
+                (replicas || `0`): 0
+                (readyReplicas || `0`): 0
+
+    - name: Restart the Envoy activation collector without waking the workload
+      description: |
+        A direct-OTLP collector is stateless for activation counters. Restarting
+        it while the proxy survives must not replay the proxy's cumulative
+        history as new traffic. Continuously checking the target catches a
+        short false wake that an eventual-only zero assertion could miss.
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TEST_NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+
+              CANDIDATES=$(kubectl get deployment --all-namespaces -o json \
+                | jq -r '.items[]
+                    | select(
+                        .metadata.name == "envoy-gateway-metrics-collector"
+                        or .metadata.name == "aim-engine-envoy-gateway-metrics-collector"
+                      )
+                    | [.metadata.namespace, .metadata.name]
+                    | @tsv')
+              COUNT=$(printf '%s\n' "$CANDIDATES" \
+                | awk 'NF { count++ } END { print count + 0 }')
+              if [ "$COUNT" -ne 1 ]; then
+                echo "ERROR: expected exactly one Envoy activation collector, got $COUNT" >&2
+                printf '%s\n' "$CANDIDATES" >&2
+                exit 1
+              fi
+              COLLECTOR_NAMESPACE=$(printf '%s\n' "$CANDIDATES" | awk 'NR == 1 { print $1 }')
+              COLLECTOR_NAME=$(printf '%s\n' "$CANDIDATES" | awk 'NR == 1 { print $2 }')
+
+              TARGET=$(kubectl get deployment -n "$TEST_NAMESPACE" \
+                -l 'aim.eai.amd.com/service=test-scale-from-zero-service,component=predictor' \
+                -o jsonpath='{.items[0].metadata.name}')
+              if [ -z "$TARGET" ]; then
+                echo "ERROR: predictor Deployment not found" >&2
+                exit 1
+              fi
+
+              PROXY_UID_BEFORE=$(kubectl get pod -n envoy-gateway-system \
+                -l 'app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway' \
+                -o jsonpath='{.items[0].metadata.uid}')
+              kubectl rollout restart deployment/"$COLLECTOR_NAME" \
+                -n "$COLLECTOR_NAMESPACE"
+              kubectl rollout status deployment/"$COLLECTOR_NAME" \
+                -n "$COLLECTOR_NAMESPACE" \
+                --timeout=120s
+              PROXY_UID_AFTER=$(kubectl get pod -n envoy-gateway-system \
+                -l 'app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway' \
+                -o jsonpath='{.items[0].metadata.uid}')
+              if [ "$PROXY_UID_BEFORE" != "$PROXY_UID_AFTER" ]; then
+                echo "ERROR: proxy changed during collector-only restart" >&2
+                exit 1
+              fi
+
+              for _ in $(seq 1 30); do
+                REPLICAS=$(kubectl get deployment "$TARGET" \
+                  -n "$TEST_NAMESPACE" -o jsonpath='{.spec.replicas}')
+                READY=$(kubectl get deployment "$TARGET" \
+                  -n "$TEST_NAMESPACE" -o jsonpath='{.status.readyReplicas}')
+                READY=${READY:-0}
+                if [ "$REPLICAS" != "0" ] || [ "$READY" != "0" ]; then
+                  echo "ERROR: collector restart falsely woke $TARGET: replicas=$REPLICAS ready=$READY" >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+      catch:
+        - describe:
+            apiVersion: apps/v1
+            kind: Deployment
+        - describe:
+            apiVersion: keda.sh/v1alpha1
+            kind: ScaledObject
+        - describe:
+            apiVersion: autoscaling/v2
+            kind: HorizontalPodAutoscaler
+
     - name: Trigger 0->1 activation by hitting the HTTPRoute via the gateway
       description: |
         Sends a real request through kserve-ingress-gateway -> HTTPRoute
-        -> predictor service. The first attempts will be served by Envoy
-        as 502/503 because there's no upstream replica; each completed
-        request increments envoy_cluster_external_upstream_rq_completed,
-        which is the activation series queried by the controller-owned
-        ScaledObject. AIM Engine does not retry these on the gateway --
+        -> predictor service. The first attempts are answered by Envoy as
+        a direct-response 503 because there's no upstream replica; each
+        request is still counted by the gateway-wide Lua filter into the
+        route-specific envoy_http_lua_aim_activation_requests_* series
+        queried by the controller-owned ScaledObject. AIM Engine does not
+        retry these on the gateway --
         the client is expected to. The shared validate-http.sh script's
         long-running retry loop plays that client role here, retrying the
         cold-start 5xx burst until the call returns 200 once KEDA has

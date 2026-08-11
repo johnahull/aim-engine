@@ -4,8 +4,11 @@
 set -euo pipefail
 
 # Configuration (can be overridden via environment)
-NS="${HTTP_NS:-kgateway-system}"
-SVC="${HTTP_SVC:-kserve-ingress-gateway}"
+NS="${HTTP_NS:-envoy-gateway-system}"
+# GATEWAY is the Gateway resource name. Envoy Gateway provisions the data-plane
+# Service under a hashed name (envoy-<ns>-<gateway>-<hash>), so the real Service
+# is resolved by Envoy Gateway's owning-gateway labels below.
+GATEWAY="${HTTP_GATEWAY:-${HTTP_SVC:-kserve-ingress-gateway}}"
 SVC_PORT="${HTTP_PORT:-80}"
 BASE_PATH="${HTTP_BASE_PATH:-/integration/test/v1}"  # contains /models and /chat/completions
 TIMEOUT="${HTTP_TIMEOUT:-60}"
@@ -24,6 +27,22 @@ fi
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 2; }; }
 need kubectl; need curl; need jq
+
+# Resolve the Envoy Gateway data-plane Service that fronts $GATEWAY. Allow an
+# explicit HTTP_SVC override to win (e.g. a non-Envoy-Gateway setup); otherwise
+# look it up by the owning-gateway labels Envoy Gateway stamps on the Service.
+SVC="${HTTP_SVC:-}"
+if [[ -z "$SVC" || "$SVC" == "$GATEWAY" ]]; then
+  RESOLVED_SVC="$(kubectl get svc -n "$NS" \
+    -l "gateway.envoyproxy.io/owning-gateway-name=${GATEWAY},gateway.envoyproxy.io/owning-gateway-namespace=${NS}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [[ -n "$RESOLVED_SVC" ]]; then
+    SVC="$RESOLVED_SVC"
+  else
+    SVC="$GATEWAY"
+  fi
+fi
+echo "Routing via Service ${NS}/${SVC} (Gateway ${GATEWAY})"
 
 start_proxy() {
   for p in 8001 8002 8003 8004 8005; do

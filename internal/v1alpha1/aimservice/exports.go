@@ -25,6 +25,7 @@ package aimservice
 import (
 	"context"
 	"fmt"
+	"time"
 
 	servingv1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -77,6 +78,38 @@ func HPAComponentHealth(
 	isvcReady bool,
 ) controllerutils.ComponentHealth {
 	return hpaComponentHealth(service, hpa, podCount, isvcReady)
+}
+
+// SetActivationMetricCondition publishes the informational
+// ActivationMetricAvailable condition for a valid scale-from-zero service by
+// matching KEDA's exact s0 zero-to-one metric between the expected HPA shape,
+// spec, and currentMetrics, or removes it when activation does not apply.
+// Reporting only: the condition type omits the component "Ready" suffix so it
+// never participates in the Ready rollup and never changes scaling behaviour.
+// Shared between the template and profile pipelines so both report the
+// activation signal identically across gateway providers.
+func SetActivationMetricCondition(
+	cm *controllerutils.ConditionManager,
+	service *aimv1alpha1.AIMService,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+	hpa controllerutils.FetchResult[*autoscalingv2.HorizontalPodAutoscaler],
+	podCount int,
+) {
+	setActivationMetricCondition(cm, service, runtimeConfig, hpa, podCount)
+}
+
+// ActivationMetricRequeueAfter returns the remaining grace period while the
+// scale-from-zero activation metric is awaiting readable HPA evidence. Shared
+// by both AIMService pipelines so the Unknown-to-False deadline is enforced
+// even when no watched resource changes.
+func ActivationMetricRequeueAfter(
+	service *aimv1alpha1.AIMService,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+	hpa controllerutils.FetchResult[*autoscalingv2.HorizontalPodAutoscaler],
+	podCount int,
+	now time.Time,
+) time.Duration {
+	return activationMetricRequeueAfter(service, runtimeConfig, hpa, podCount, now)
 }
 
 // InferenceServicePodsComponentHealth returns the InferenceServicePods
@@ -231,8 +264,9 @@ func PlanScaledObject(
 	ctx context.Context,
 	service *aimv1alpha1.AIMService,
 	effectiveResources *corev1.ResourceRequirements,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
 ) client.Object {
-	return planScaledObject(ctx, service, effectiveResources)
+	return planScaledObject(ctx, service, effectiveResources, runtimeConfig)
 }
 
 // HTTPRouteComponentHealth translates an HTTPRoute fetch result into a
@@ -405,12 +439,11 @@ func AutoscalingTriggerComponentHealth(
 }
 
 // ScaleToZeroRoutingComponentHealth validates the scale-from-zero prerequisite
-// that routing be enabled. The 0->1 activation trigger scrapes the gateway's
-// Envoy counter (envoy_cluster_external_upstream_rq_completed), whose series
-// only exists once traffic flows through the gateway via an HTTPRoute. With
-// routing disabled a minReplicas=0 service idles to zero and can never wake, so
-// the combination is surfaced as ConfigValid=False (blocking apply) instead of
-// silently sleeping forever.
+// that routing be enabled. The 0->1 activation trigger reads a gateway metric
+// associated with the service's HTTPRoute. With routing disabled a
+// minReplicas=0 service idles to zero and can never wake, so the combination is
+// surfaced as ConfigValid=False (blocking apply) instead of silently sleeping
+// forever.
 //
 // Returns a zero ComponentHealth (Component == "") when the configuration is
 // valid, so callers can skip appending it. Shared between the template
@@ -425,7 +458,7 @@ func ScaleToZeroRoutingComponentHealth(
 	}
 
 	message := "Scale-from-zero (minReplicas=0) requires routing to be enabled: " +
-		"the 0->1 activation trigger queries gateway-side Envoy metrics that only " +
+		"the 0->1 activation trigger queries gateway-side metrics that only " +
 		"exist once an HTTPRoute is wired up, so with routing disabled the service " +
 		"can never wake from zero. Enable routing (spec.routing.enabled or " +
 		"runtimeConfig.routing.enabled) or set minReplicas>=1."
@@ -441,6 +474,47 @@ func ScaleToZeroRoutingComponentHealth(
 				aimv1alpha1.AIMServiceReasonRoutingRequired,
 				message,
 				nil,
+			),
+		},
+	}
+}
+
+// ScaleToZeroActivationMetricComponentHealth validates that the activation
+// metric query can be resolved from the service override, merged RuntimeConfig,
+// or selected built-in provider. It is silent when scale-to-zero does not
+// apply, when routing validation should take precedence, or when the query is
+// valid.
+func ScaleToZeroActivationMetricComponentHealth(
+	service *aimv1alpha1.AIMService,
+	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
+) controllerutils.ComponentHealth {
+	if !isScaleToZero(service) || !isRoutingEnabled(service, runtimeConfig) {
+		return controllerutils.ComponentHealth{}
+	}
+
+	_, _, err := resolveScaleToZeroActivationMetric(service, runtimeConfig)
+	if err == nil {
+		return controllerutils.ComponentHealth{}
+	}
+
+	message := fmt.Sprintf(
+		"Scale-from-zero activation metric query is invalid: %v. "+
+			"Select a built-in gateway provider, or select custom and set "+
+			"spec.scaleFromZero.activationMetricQueryTemplate on the AIMService "+
+			"or its RuntimeConfig.",
+		err,
+	)
+	return controllerutils.ComponentHealth{
+		Component:      ComponentScaleToZeroConfig,
+		State:          constants.AIMStatusFailed,
+		Reason:         aimv1alpha1.AIMServiceReasonActivationMetricQueryInvalid,
+		Message:        message,
+		DependencyType: controllerutils.DependencyTypeUpstream,
+		Errors: []error{
+			controllerutils.NewInvalidSpecError(
+				aimv1alpha1.AIMServiceReasonActivationMetricQueryInvalid,
+				message,
+				err,
 			),
 		},
 	}

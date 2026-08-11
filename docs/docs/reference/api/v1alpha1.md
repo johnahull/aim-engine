@@ -496,6 +496,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
+| `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `model` _[AIMModelConfig](#aimmodelconfig)_ | Model controls model creation and discovery defaults.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifact` _[AIMArtifactConfig](#aimartifactconfig)_ | Artifact controls artifact-level defaults such as eviction policy.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
@@ -1362,6 +1363,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
+| `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `model` _[AIMModelConfig](#aimmodelconfig)_ | Model controls model creation and discovery defaults.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifact` _[AIMArtifactConfig](#aimartifactconfig)_ | Artifact controls artifact-level defaults such as eviction policy.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
@@ -1423,6 +1425,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
+| `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `model` _[AIMModelConfig](#aimmodelconfig)_ | Model controls model creation and discovery defaults.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifact` _[AIMArtifactConfig](#aimartifactconfig)_ | Artifact controls artifact-level defaults such as eviction policy.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
@@ -1497,6 +1500,27 @@ _Appears in:_
 | `pathTemplate` _string_ | PathTemplate defines the HTTP path template for routes, evaluated using JSONPath expressions.<br />The template is rendered against the AIMService object to generate unique paths.<br />Example templates:<br />- `/\{.metadata.namespace\}/\{.metadata.name\}` - namespace and service name<br />- `/\{.metadata.namespace\}/\{.metadata.labels['team']\}/inference` - with label<br />- `/models/\{.metadata.name\}` - based on service name<br />The template must:<br />- Use valid JSONPath expressions wrapped in \{...\}<br />- Reference fields that exist on the service<br />- Produce a path ≤ 200 characters after rendering<br />- Result in valid URL path segments (lowercase, RFC 1123 compliant)<br />If evaluation fails, the service enters Degraded state with PathTemplateInvalid reason.<br />Individual services can override this template via spec.routing.pathTemplate. |  | Optional: \{\} <br /> |
 | `requestTimeout` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#duration-v1-meta)_ | RequestTimeout defines the HTTP request timeout for routes.<br />This sets the maximum duration for a request to complete before timing out.<br />The timeout applies to the entire request/response cycle.<br />If not specified, no timeout is set on the route.<br />Individual services can override this value via spec.routing.requestTimeout. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations defines default annotations to add to all HTTPRoute resources.<br />Services can add additional annotations or override these via spec.routing.annotations.<br />When both are specified, service annotations take precedence for conflicting keys.<br />Common use cases include ingress controller settings, rate limiting, monitoring labels,<br />and security policies that should apply to all services using this config. |  | Optional: \{\} <br /> |
+
+
+#### AIMScaleFromZeroConfig
+
+
+
+AIMScaleFromZeroConfig configures the gateway activation metric used to wake
+a service from zero replicas.
+
+
+
+_Appears in:_
+- [AIMClusterRuntimeConfigSpec](#aimclusterruntimeconfigspec)
+- [AIMRuntimeConfigCommon](#aimruntimeconfigcommon)
+- [AIMRuntimeConfigSpec](#aimruntimeconfigspec)
+- [AIMServiceRuntimeConfig](#aimserviceruntimeconfig)
+- [AIMServiceSpec](#aimservicespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `activationMetricQueryTemplate` _string_ | ActivationMetricQueryTemplate overrides the provider-derived KEDA<br />OpenTelemetry metric query. The controller expands these placeholders:<br />$\{namespace\}, $\{serviceName\}, $\{httpRouteName\}, and<br />$\{predictorDeployment\}. Unknown placeholders make the service<br />configuration invalid.<br />A value set directly on AIMService takes precedence over namespace and<br />cluster RuntimeConfig values. |  | MaxLength: 4096 <br />MinLength: 1 <br />Optional: \{\} <br /> |
 
 
 #### AIMService
@@ -1906,6 +1930,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
+| `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 
 
@@ -1965,6 +1990,7 @@ _Appears in:_
 | `runtimeConfigName` _string_ | Name is the name of the runtime config to use for this resource. If a runtime config with this name exists both<br />as a namespace and a cluster runtime config, the values are merged together, the namespace config taking priority<br />over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster<br />runtime config with the name `default` is used, if it exists. |  | Optional: \{\} <br /> |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
+| `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources overrides the container resource requirements for this service.<br />When specified, these values take precedence over the template and image defaults. |  | Optional: \{\} <br /> |
 | `overrides` _[AIMServiceOverrides](#aimserviceoverrides)_ | Overrides allows overriding specific template parameters for this service.<br />When specified, these values take precedence over the template values. |  | Optional: \{\} <br /> |

@@ -46,7 +46,10 @@ TLS certificate. The test target builds `aim-dummy` once, pushes every fixture
 tag through a temporary localhost port-forward, and kind-loads the exact
 in-cluster references used by workload pods. The operator trusts the private CA
 through `hack/kind/operator-values.yaml`; normal public certificate roots remain
-available.
+available. Those values also select the Envoy Gateway activation contract with
+external collector management, reusing the single standalone collector and
+Gateway policy installed by `make kind-create`. The development `EnvoyProxy`
+pushes source-side counter deltas to that collector over OTLP.
 
 The Zot service name is only resolvable inside the cluster. Run this target
 against an operator installed in Kind, rather than an operator started on the

@@ -167,6 +167,12 @@ func (obs ServiceObservation) GetComponentHealth(ctx context.Context, clientset 
 	if cfg := v1alpha1service.ScaleToZeroRoutingComponentHealth(obs.service, obs.mergedRuntimeConfig.Value); cfg.Component != "" {
 		health = append(health, cfg)
 	}
+	if cfg := v1alpha1service.ScaleToZeroActivationMetricComponentHealth(
+		obs.service,
+		obs.mergedRuntimeConfig.Value,
+	); cfg.Component != "" {
+		health = append(health, cfg)
+	}
 
 	// Routing on a multi-listener gateway requires a hostname pin; otherwise
 	// the route attaches to every listener and can bypass authentication.
@@ -678,6 +684,15 @@ func (r *ProfileServiceReconciler) PlanResources(
 	service := obs.service
 
 	planResult := controllerutils.PlanResult{}
+	if requeueAfter := v1alpha1service.ActivationMetricRequeueAfter(
+		service,
+		obs.mergedRuntimeConfig.Value,
+		obs.hpa,
+		podItemCount(obs.inferenceServicePods),
+		time.Now(),
+	); requeueAfter > 0 {
+		planResult.RequestRequeueAfter(requeueAfter)
+	}
 
 	if obs.configErr != nil {
 		logger.V(1).Info("Config error, skipping resource planning", "err", obs.configErr.Error())
@@ -810,9 +825,7 @@ func (r *ProfileServiceReconciler) PlanResources(
 			// Preserve the current mount while the next PVC generation is unknown
 			// or its service subtree has not finished synchronizing.
 			logger.V(1).Info("Adapter disk binding not mountable yet; preserving running ISVC adapter wiring")
-			if planResult.RequeueAfter == 0 {
-				planResult.RequeueAfter = 5 * time.Second
-			}
+			planResult.RequestRequeueAfter(5 * time.Second)
 		default:
 			if service.Spec.AdaptersEnabled() {
 				aimadapter.AddVolumeMount(isvc, service, obs.adapterState.AdapterDiskPVC)
@@ -833,7 +846,7 @@ func (r *ProfileServiceReconciler) PlanResources(
 	// profile is Ready, in which case PlanScaledObject falls back to its flat
 	// cooldown default and the next reconcile re-plans idempotently.
 	effectiveResources := resolveEffectiveResourcesFromProfile(service, obs.resolvedProfileSpec, obs.resolvedProfileStatus)
-	if so := v1alpha1service.PlanScaledObject(ctx, service, effectiveResources); so != nil {
+	if so := v1alpha1service.PlanScaledObject(ctx, service, effectiveResources, obs.mergedRuntimeConfig.Value); so != nil {
 		planResult.Apply(so)
 	}
 
@@ -893,9 +906,19 @@ func serviceOwnsConfigMap(configMap *corev1.ConfigMap, service *aimv1alpha1.AIMS
 // stable.
 func (r *ProfileServiceReconciler) DecorateStatus(
 	status *aimv1alpha1.AIMServiceStatus,
-	_ *controllerutils.ConditionManager,
+	cm *controllerutils.ConditionManager,
 	obs ServiceObservation,
 ) {
+	// Report-only: whether KEDA can read the scale-from-zero activation
+	// trigger. Shared with v1alpha1; never gates readiness.
+	v1alpha1service.SetActivationMetricCondition(
+		cm,
+		obs.service,
+		obs.mergedRuntimeConfig.Value,
+		obs.hpa,
+		podItemCount(obs.inferenceServicePods),
+	)
+
 	if obs.profileName != "" && obs.resolvedProfileStatus != nil &&
 		obs.resolvedProfileStatus.Status == constants.AIMStatusReady {
 		status.ResolvedProfile = &aimv1alpha1.AIMResolvedReference{

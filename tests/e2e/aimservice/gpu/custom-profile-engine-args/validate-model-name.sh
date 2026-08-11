@@ -7,8 +7,10 @@
 #   customProfile.engineArgs -> ConfigMap YAML -> volume mount -> AIM runtime -> vLLM CLI -> API
 set -euo pipefail
 
-NS="${HTTP_NS:-kgateway-system}"
-SVC="${HTTP_SVC:-kserve-ingress-gateway}"
+NS="${HTTP_NS:-envoy-gateway-system}"
+# Gateway resource name; the Envoy Gateway data-plane Service is hashed
+# (envoy-<ns>-<gateway>-<hash>) and resolved by label below.
+GATEWAY="${HTTP_GATEWAY:-${HTTP_SVC:-kserve-ingress-gateway}}"
 SVC_PORT="${HTTP_PORT:-80}"
 BASE_PATH="${HTTP_BASE_PATH:?must be set}"
 EXPECTED_MAX_MODEL_LEN="${EXPECTED_MAX_MODEL_LEN:?must be set}"
@@ -16,6 +18,15 @@ TIMEOUT="${HTTP_TIMEOUT:-60}"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 2; }; }
 need kubectl; need curl; need jq
+
+# Resolve the Envoy Gateway data-plane Service fronting $GATEWAY (see note above).
+SVC="${HTTP_SVC:-}"
+if [[ -z "$SVC" || "$SVC" == "$GATEWAY" ]]; then
+  RESOLVED_SVC="$(kubectl get svc -n "$NS" \
+    -l "gateway.envoyproxy.io/owning-gateway-name=${GATEWAY},gateway.envoyproxy.io/owning-gateway-namespace=${NS}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  SVC="${RESOLVED_SVC:-$GATEWAY}"
+fi
 
 start_proxy() {
   for p in 8001 8002 8003 8004 8005; do

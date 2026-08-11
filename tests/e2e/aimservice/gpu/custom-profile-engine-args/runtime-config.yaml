@@ -7,6 +7,6 @@ spec:
     enabled: true
     gatewayRef:
       name: kserve-ingress-gateway
-      namespace: kgateway-system
+      namespace: envoy-gateway-system
     pathTemplate: "/integration/gpu-cp-engine-args/{.metadata.namespace}/{.metadata.name}"
     requestTimeout: "180s"

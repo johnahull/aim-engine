@@ -18,7 +18,7 @@ Controller manager configuration
 | `manager.args` | Controller command-line arguments | `["--leader-elect"]` |
 | `manager.runtimeProjectionMode` | Eager runtime projection mode for the profile reconcilers, rendered as the operator's --runtime-projection-mode arg. Exhaustive projects one runtime per projectable profile. Reduced projects one model-slug primary runtime per model that native KServe references by name. Both runs the two together. Every projected runtime keeps autoSelect off (all share one model format, so autoSelect would collide across models). The lazy InferenceService-watch projection is always on and is not governed by this value. See the runtime-projection ADR (docs/adr). | `Exhaustive` |
 | `manager.artifactDownloaderImage` | Override the artifact-downloader image the operator spawns for model download and size-check Jobs. Empty uses the public mirror image baked into the operator binary at build time. Set this to install from a private downloader mirror instead. Per-resource (spec.modelDownloadImage) and runtime-config overrides still take precedence over this install-time default. | `` |
-| `manager.env` | Additional environment variables for the controller | `[]` |
+| `manager.env` | Additional environment variables for the controller. Variables managed by dedicated chart values cannot be overridden here. | `[]` |
 | `manager.extraVolumeMounts` | Additional volume mounts for the controller | `[]` |
 | `manager.extraVolumes` | Additional volumes for the controller pod | `[]` |
 | `manager.podSecurityContext.runAsNonRoot` | Require non-root user | `true` |
@@ -93,18 +93,19 @@ Cluster-wide AIMClusterModelSource for automatic model discovery. Creates an AIM
 
 ## scaleFromZero
 
-Controller-side tuning for scale-from-zero. The feature itself is always on; these knobs adjust how the controller authors KEDA cluster-wide activation collector ships with the chart. See `docs/docs/guides/scaling-and-autoscaling.md` for the full design.
+Configure scale-from-zero triggers and the gateway-specific activation collector.
 
 | Parameter | Description | Default |
 |-----------|-------------|----------|
-| `scaleFromZero.scalerAddress` | gRPC endpoint of the keda-otel-add-on scaler. Used for both gateway-rate activation metrics and in-pod vLLM metrics. Default matches a stock keda-otel-add-on install in the `keda` namespace. | `keda-otel-scaler.keda.svc:4318` |
-| `scaleFromZero.cooldownSecondsPerGiMemory` | Seconds-per-GiB multiplier in the cooldown heuristic  cooldownPeriod = clamp(300 + memGiB * cooldownSecondsPerGiMemory, 300, 1200)  The default (5) budgets for ~1.6 GB/s warm-cache throughput plus faster (NVMe/hugepages) -> 2-3; slower (NFS/network PVC) -> 8-12; CPU-only inference -> 0 to disable the memory contribution. Per-service `spec.autoScaling.cooldownPeriod` always wins. | `5` |
-| `scaleFromZero.gatewayMetricsCollector` | Cluster-singleton OpenTelemetry collector that scrapes kgateway data-plane Envoy stats and forwards the gateway request-rate counter to keda-otel-scaler. This is the only activation signal an AIMService with scale-from-zero to ever wake a service back up. Deployed into the release namespace. Requires the OpenTelemetry Operator CRDs on the cluster. |  |
-| `scaleFromZero.gatewayMetricsCollector.enable` | Ship and manage the gateway-metrics collector with the chart. Disable if you install it out-of-band (see `config/prereqs/scale-from-zero/`) or the OpenTelemetry Operator is not present, in which case `helm install` would fail on the OpenTelemetryCollector CR. | `true` |
-| `scaleFromZero.gatewayMetricsCollector.otlpEndpoint` | OTLP gRPC endpoint of the keda-otel-add-on receiver the collector pushes the gateway-rate metric to. Must resolve from the collector's (release) namespace. | `keda-otel-scaler.keda.svc:4317` |
-| `scaleFromZero.gatewayMetricsCollector.gatewayName` | Value of the `gateway.networking.k8s.io/gateway-name` label on your kgateway data-plane pods; selects which gateways are scraped. | `kserve-ingress-gateway` |
-| `scaleFromZero.gatewayMetricsCollector.scrapeInterval` | Collector scrape interval. Keep well below the controller's scaler pollingInterval so a single request between polls stays visible. | `1s` |
-| `scaleFromZero.gatewayMetricsCollector.replicas` | Number of collector replicas | `1` |
+| `scaleFromZero.scalerAddress` | gRPC endpoint written to KEDA external metric triggers | `keda-otel-scaler.keda.svc:4318` |
+| `scaleFromZero.cooldownSecondsPerGiMemory` | Seconds per GiB added to the default cooldown period  cooldownPeriod = clamp(300 + memGiB * cooldownSecondsPerGiMemory, 300, 1200)  Per-service `spec.autoScaling.cooldownPeriod` always wins. | `5` |
+| `scaleFromZero.gatewayProvider` | Gateway implementation that supplies scale-from-zero activation metrics. Supported values are "none", "envoyGateway", "kgateway", and "custom". The default "none" installs no collector and makes minReplicas=0 invalid until a provider is selected. Known providers select both the controller's default metric contract and the collector rendered by Helm. "custom" requires external collector management and an activationMetricQueryTemplate on a service or its RuntimeConfig. | `none` |
+| `scaleFromZero.gatewayMetricsCollector` | OpenTelemetry collector that forwards gateway activation metrics to keda-otel-scaler. Envoy Gateway's EnvoyExtensionPolicy and source-side delta OTLP sink are managed separately on the platform-owned Gateway. |  |
+| `scaleFromZero.gatewayMetricsCollector.management` | Collector ownership. Use "helm" to render the collector selected by gatewayProvider, or "external" when platform infrastructure manages it. | `helm` |
+| `scaleFromZero.gatewayMetricsCollector.otlpEndpoint` | OTLP gRPC endpoint for keda-otel-add-on | `keda-otel-scaler.keda.svc:4317` |
+| `scaleFromZero.gatewayMetricsCollector.scrapeInterval` | Metrics scrape interval used only by the kgateway collector. Envoy Gateway pushes source-side deltas over OTLP instead of being scraped. | `1s` |
+| `scaleFromZero.gatewayMetricsCollector.replicas` | Number of collector replicas. Envoy Gateway can use multiple OTLP receivers for availability. Keep this at 1 for kgateway because its Prometheus receivers would scrape and export the same series repeatedly. | `1` |
+| `scaleFromZero.gatewayMetricsCollector.kgateway.gatewayName` | Value of the gateway.networking.k8s.io/gateway-name label on the kgateway proxy pods. Used only when gatewayProvider is "kgateway". | `kserve-ingress-gateway` |
 | `scaleFromZero.gatewayMetricsCollector.resources` | Resource requests/limits for the collector pod |  |
 
 ## acceleratorDetector

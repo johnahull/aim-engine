@@ -36,6 +36,59 @@ helm upgrade aim-engine oci://docker.io/amdenterpriseai/aim-engine-chart \
   --values my-values.yaml
 ```
 
+### Scale-from-zero Helm value migration
+
+The gateway provider now selects both the controller metric contract and the
+matching collector. Replace legacy values before upgrading:
+
+- The new default is `scaleFromZero.gatewayProvider=none`. Set a provider
+  explicitly before upgrading any installation with `minReplicas: 0`
+  AIMServices.
+- `scaleFromZero.gatewayActivationScope=httproute` becomes
+  `scaleFromZero.gatewayProvider=envoyGateway`.
+  Selecting this provider manages the collector only; install the
+  Gateway-targeted `EnvoyExtensionPolicy` and configure the `EnvoyProxy`
+  source-side delta OTLP sink independently for every Gateway used by
+  AIMServices. Follow the
+  [optional Envoy scale-from-zero guide](envoy-gateway-scale-from-zero.md).
+- `scaleFromZero.gatewayActivationScope=deployment` becomes
+  `scaleFromZero.gatewayProvider=kgateway`.
+- `scaleFromZero.gatewayMetricsCollector.enable=true|false` becomes
+  `scaleFromZero.gatewayMetricsCollector.management=helm|external`.
+- `scaleFromZero.gatewayMetricsCollector.gatewayName` moves to
+  `scaleFromZero.gatewayMetricsCollector.kgateway.gatewayName`.
+
+Changing an existing installation from the kgateway provider to Envoy Gateway
+also changes routing and metric identity. Follow
+[Migrate from kgateway to Envoy Gateway](migrating-kgateway-to-envoy-gateway.md)
+rather than treating it as only a Helm value rename.
+
+The chart rejects legacy keys rather than silently selecting the wrong
+collector. When a release has stored those keys, upgrade with a migrated values
+file and `--reset-values` instead of `--reuse-values`.
+
+Existing Envoy Gateway installations must coordinate the collector and
+platform-owned `EnvoyProxy` change. To avoid losing a cold activation request
+during the handoff:
+
+1. Temporarily set affected AIMServices to `minReplicas >= 1`.
+2. Upgrade or replace the collector so its OTLP receiver Service is Ready.
+3. Add the `reportCountersAsDeltas: true` OTLP sink to each relevant
+   `EnvoyProxy`.
+4. Verify that normalized activation metrics reach keda-otel-add-on.
+5. Restore the intended `minReplicas: 0` settings.
+
+Helm removes its obsolete pod-discovery ClusterRole and binding automatically.
+For the standalone collector, remove the legacy resources after applying the
+new manifest:
+
+```bash
+kubectl delete clusterrole envoy-gateway-metrics-collector \
+  --ignore-not-found
+kubectl delete clusterrolebinding envoy-gateway-metrics-collector \
+  --ignore-not-found
+```
+
 ### 3. Verify
 
 ```bash

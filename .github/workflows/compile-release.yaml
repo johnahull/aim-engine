@@ -130,8 +130,8 @@ jobs:
             CHART_IMAGE_TAG=${VERSION} \
             TAG=${VERSION}
 
-      - name: Validate chart with helm template
-        run: helm template aim-engine ./dist/chart > /dev/null
+      - name: Validate gateway provider render matrix
+        run: ./hack/verify-helm-gateway-providers.sh ./dist/chart
 
       - name: Lint Helm chart
         run: helm lint ./dist/chart
@@ -289,17 +289,38 @@ jobs:
           ```
 
           ```bash
-          # 2a. Install operator via Helm OCI (recommended)
+          # 2a. Install operator via Helm OCI (recommended).
           helm install aim-engine __CHART_OCI_REPO__/aim-engine-chart \
             --version __CHART_VERSION__ \
             --namespace aim-system --create-namespace
           ```
 
           ```bash
-          # 2b. Or install from GitHub Releases tarball
+          # 2b. Or install from GitHub Releases tarball.
           curl -L https://github.com/__GITHUB_REPOSITORY__/releases/download/__VERSION__/aim-engine-chart-__CHART_VERSION__.tgz -o aim-engine.tgz
           helm install aim-engine aim-engine.tgz --namespace aim-system --create-namespace
           ```
+
+          Gateway activation is disabled by default. Neither installation path
+          selects a Gateway implementation or installs a gateway extension.
+
+          ### Optional Envoy Gateway scale-from-zero
+
+          The platform administrator installs Envoy Gateway and this
+          Gateway-targeted policy independently. Edit its Gateway namespace/name,
+          apply it, then deliberately enable the Helm-managed Envoy collector:
+
+          ```bash
+          curl -LO https://github.com/__GITHUB_REPOSITORY__/releases/download/__VERSION__/envoy-gateway-route-metrics.yaml
+          kubectl apply -f envoy-gateway-route-metrics.yaml
+          helm upgrade aim-engine __CHART_OCI_REPO__/aim-engine-chart \
+            --version __CHART_VERSION__ \
+            --namespace aim-system \
+            --set scaleFromZero.gatewayProvider=envoyGateway
+          ```
+
+          See the [version-matched Envoy scale-from-zero setup guide](https://github.com/__GITHUB_REPOSITORY__/blob/__VERSION__/docs/docs/admin/envoy-gateway-scale-from-zero.md)
+          for platform setup, target customization, and verification.
 
           ### Docker Images
           - Operator: `__CHART_IMAGE_REPO__:__VERSION__`
@@ -322,6 +343,9 @@ jobs:
             dist/crds.yaml
             dist/${{ env.CHART_NAME }}-${{ env.CHART_VERSION }}.tgz
             dist/aim-engine-crds-chart-${{ env.CHART_VERSION }}.tgz
+            config/prereqs/scale-from-zero/envoy-gateway-route-metrics.yaml
+            config/prereqs/scale-from-zero/envoy-gateway-metrics-collector.yaml
+            config/prereqs/scale-from-zero/kgateway-metrics-collector.yaml
           token: '${{ secrets.GITHUB_TOKEN }}'
           draft: true
           prerelease: true
@@ -347,6 +371,15 @@ jobs:
           mkdir -p crd
           cp dist/crds.yaml crd/crds.yaml
           git add crd/crds.yaml
+
+          # Add version-matched scale-from-zero policies and standalone collectors.
+          mkdir -p prereqs/scale-from-zero
+          cp config/prereqs/scale-from-zero/README.md prereqs/scale-from-zero/
+          cp config/prereqs/scale-from-zero/*.yaml prereqs/scale-from-zero/
+          sed -i \
+            's#config/prereqs/scale-from-zero/#prereqs/scale-from-zero/#g' \
+            prereqs/scale-from-zero/README.md
+          git add prereqs/scale-from-zero/
 
           # Build the README in two pieces: an optional silogen-only block
           # explaining the pre-promotion override, followed by the standard
@@ -413,6 +446,27 @@ jobs:
           # 2b. Or install from this branch
           helm install aim-engine ./chart --namespace aim-system --create-namespace
           ```
+
+          Gateway activation is disabled by default. The base install does not
+          select a Gateway implementation or install a gateway extension.
+
+          ### Optional Envoy Gateway scale-from-zero
+
+          Install Envoy Gateway and its Gateway-targeted policy as platform
+          infrastructure. Edit the policy target, apply it, then deliberately
+          enable the matching Helm-managed collector:
+
+          ```bash
+          curl -LO https://raw.githubusercontent.com/__GITHUB_REPOSITORY__/artifacts/prereqs/scale-from-zero/envoy-gateway-route-metrics.yaml
+          kubectl apply -f envoy-gateway-route-metrics.yaml
+          helm upgrade aim-engine __CHART_OCI_REPO__/aim-engine-chart \
+            --version __CHART_VERSION__ \
+            --namespace aim-system \
+            --set scaleFromZero.gatewayProvider=envoyGateway
+          ```
+
+          See the [Envoy scale-from-zero setup guide](prereqs/scale-from-zero/README.md)
+          for target customization, verification, and security guidance.
 
           Or clone this branch:
 
@@ -563,6 +617,15 @@ jobs:
             sleep 15
           done
 
+      - name: Verify Envoy Gateway platform integration
+        run: |
+          mise exec -- make verify-gateway
+          kubectl wait \
+            --for=jsonpath='{.status.ancestors[0].conditions[?(@.type=="Accepted")].status}'=True \
+            envoyextensionpolicy/route-activation-metrics \
+            --namespace envoy-gateway-system \
+            --timeout=180s
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -667,22 +730,31 @@ jobs:
             --version ${CHART_VERSION} \
             --namespace aim-system \
             --set acceleratorDetector.enable=false \
+            --set scaleFromZero.gatewayProvider=envoyGateway \
+            --set scaleFromZero.gatewayMetricsCollector.management=helm \
             ${HELM_SET_ARGS}
 
       - name: Wait for operator to be ready
         run: kubectl wait --for=condition=Available --timeout=120s deployment/aim-engine-controller-manager -n aim-system
 
       - name: Wait for scale-from-zero collector to be ready
-        # The collector now ships with the chart (replaces the old
-        # install-scale-from-zero-prereq step). Wait for the OTel Operator to
-        # reconcile it before chainsaw scale-from-zero tests.
+        # This integration lane deliberately opts into Envoy Gateway and the
+        # Helm-managed collector. Wait for the OTel Operator to reconcile it
+        # before chainsaw scale-from-zero tests.
         run: |
           set -euo pipefail
-          COLLECTOR_DEPLOY=aim-engine-kgateway-metrics-collector
+          COLLECTOR_DEPLOY=aim-engine-envoy-gateway-metrics-collector
           for i in $(seq 1 24); do
             if kubectl -n aim-system get deploy "${COLLECTOR_DEPLOY}" >/dev/null 2>&1; then
               kubectl -n aim-system rollout status "deploy/${COLLECTOR_DEPLOY}" --timeout=120s
-              exit 0
+              RECEIVER_PORT="$(
+                kubectl -n aim-system get service "${COLLECTOR_DEPLOY}" \
+                  -o jsonpath='{.spec.ports[?(@.port==4317)].port}' 2>/dev/null || true
+              )"
+              if [ "${RECEIVER_PORT}" = "4317" ]; then
+                exit 0
+              fi
+              echo "Waiting for ${COLLECTOR_DEPLOY} Service port 4317..."
             fi
             echo "Waiting for OTel Operator to create ${COLLECTOR_DEPLOY} ($i/24)..."
             sleep 5
@@ -690,6 +762,11 @@ jobs:
           echo "scale-from-zero collector deployment never appeared" >&2
           kubectl -n aim-system get opentelemetrycollectors,deploy 2>&1 || true
           exit 1
+
+      - name: Point Envoy Gateway at the Helm-managed OTLP collector
+        run: >
+          COLLECTOR_HOST=aim-engine-envoy-gateway-metrics-collector.aim-system.svc.cluster.local
+          bash hack/configure-envoy-collector-sink.sh
 
       - name: Verify operator reconciles (status subresource smoke)
         run: |

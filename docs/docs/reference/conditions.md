@@ -47,6 +47,7 @@ Whether the resource's spec is valid and all referenced resources exist.
 | `True` | `ConfigurationValid` | Configuration is valid |
 | `False` | `InvalidSpec` | Configuration validation failed |
 | `False` | `RoutingRequiredForScaleToZero` | `minReplicas: 0` is set but routing is not enabled. See [ScaleToZeroConfig](#scaletozeroconfig). |
+| `False` | `ActivationMetricQueryInvalid` | The scale-from-zero activation metric query cannot be resolved. See [ScaleToZeroConfig](#scaletozeroconfig). |
 | `False` | `AutoscalingRequiresMetrics` | Autoscaling is configured but no scaling trigger resolves. See [AutoscalingConfig](#autoscalingconfig). |
 | `False` | `ReferenceNotFound` | A referenced resource does not exist |
 
@@ -139,13 +140,34 @@ Set only when `spec.minReplicas` / `spec.maxReplicas` are configured.
 | `False` | `HPANotFound` | Waiting for KEDA to create HPA |
 | `False` | `WaitingForMetrics` | InferenceService not ready yet; metrics unavailable |
 
+### ActivationMetricAvailable
+
+Reports whether the HPA has read KEDA's zero-to-one activation trigger. AIM Engine first verifies that scale-to-zero routing and the selected gateway provider's activation query are valid. It then checks that the HPA spec contains the expected number of external metrics—one activation trigger plus every resolved user scaling trigger—before resolving the exact `s0-*` metric and requiring the same name with a current value in `HPA.status.currentMetrics`. This prevents a stale user-only HPA from being mistaken for activation evidence during configuration changes. A reported value of zero is valid evidence that the query is readable.
+
+The aggregate HPA `ScalingActive` condition is diagnostic context only because any `s1-*` or later user metric can make it `True`. When `s0-*` is unavailable, the condition message lists any other external metrics that the HPA did report, but those metrics do not affect the activation verdict.
+
+This condition is **informational only** — unlike the `*Ready` conditions it is deliberately excluded from the `Ready` rollup, so it never changes the service's status or its scaling behaviour. AIM Engine reports the signal; acting on it is the cluster administrator's call.
+
+Set only when **all** of the following hold: `spec.minReplicas: 0`, routing is enabled, the provider-neutral activation query resolves, the KEDA-managed HPA is observable, and the predictor is currently running at least one replica. Invalid routing or activation-query configuration is reported by `ScaleToZeroConfig` instead, avoiding duplicate or misleading conditions. The running-replica constraint makes runtime availability unambiguous — KEDA normally retains replicas when a trigger cannot be evaluated. At zero replicas an absent series can be the gateway counter's normal lazy resting state, so the condition is removed rather than reported.
+
+| Status | Reason | Description |
+|---|---|---|
+| `True` | `MetricAvailable` | The HPA reported the exact `s0-*` zero-to-one metric in `currentMetrics`; the activation query is readable |
+| `Unknown` | `AwaitingActivationMetric` | Waiting for the HPA to report that exact metric, within the grace period covering HPA creation and transient collector restarts |
+| `False` | `ActivationMetricUnavailable` | The HPA has not reported that exact metric for longer than the grace period; the service may not wake after scaling to zero. Emits a warning event. |
+
+When `ActivationMetricUnavailable` is reported, compare the HPA's `s0-*` spec metric with its `currentMetrics` entries, then verify the selected gateway provider's activation counter and scale-from-zero collector path. For Envoy Gateway, also verify that the Lua `EnvoyExtensionPolicy` is accepted and that the gateway has served at least one request for this service's `HTTPRoute` (the counter is created lazily on first request). See [Optional Envoy Gateway scale-from-zero](../admin/envoy-gateway-scale-from-zero.md) for policy installation and verification.
+
 ### ScaleToZeroConfig
 
-Validates the scale-from-zero prerequisite that routing be enabled. Reported only when `spec.minReplicas: 0` is set **and** routing is disabled (neither `spec.routing.enabled` nor a cluster-wide `runtimeConfig.routing.enabled` default is on). The 0->1 activation trigger scrapes gateway-side Envoy metrics that only exist once an `HTTPRoute` is created, so a routing-less scale-to-zero service could never wake — AIM Engine therefore rejects the spec instead of creating it.
+Validates that routing is enabled when `spec.minReplicas: 0` is set. The
+scale-from-zero trigger depends on a gateway metric associated with an
+`HTTPRoute`; without routing, the service could not wake from zero replicas.
 
 | Status | Reason | Description |
 |---|---|---|
 | `False` | `RoutingRequiredForScaleToZero` | `minReplicas: 0` with routing disabled. Drives `ConfigValid=False` (`InvalidSpec` category) and emits an `InvalidSpec` event. Fix by enabling routing (`spec.routing.enabled: true` or `runtimeConfig.routing.enabled`) or setting `minReplicas >= 1`. |
+| `False` | `ActivationMetricQueryInvalid` | Gateway activation is disabled with `gatewayProvider=none`, the selected custom provider has no `scaleFromZero.activationMetricQueryTemplate`, the template contains an unsupported placeholder, or its resource names cannot be derived. Drives `ConfigValid=False` and prevents creation of a scale-to-zero configuration that cannot wake. |
 
 When valid, this check is silent — no condition or component-health entry is emitted.
 
