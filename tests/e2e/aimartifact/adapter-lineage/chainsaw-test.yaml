@@ -3,11 +3,13 @@
 # AIMArtifact adapter lineage + adapter-disk provisioning
 #
 # Exercises the artifact-controller adapter branch end-to-end in kind:
-# 1. A type=model artifact with spec.adapterDisk provisions a second RWX PVC
+# 1. A logical type=adapter artifact is independently Ready before any
+#    compatible model artifact exists and has no parent owner/reference.
+# 2. A type=model artifact with spec.adapterDisk provisions a second RWX PVC
 #    (the shared adapter disk) and records it in status.adapterPersistentVolumeClaim.
-# 2. A type=adapter artifact pointing at that model validates its lineage and
+# 3. An exact-binding type=adapter artifact pointing at that model validates its lineage and
 #    reaches Ready (no cache PVC, no download Job created for the adapter itself).
-# 3. An adapter whose parent model lacks an adapterDisk does NOT become Ready.
+# 4. An adapter whose parent model lacks an adapterDisk does NOT become Ready.
 #
 # Model downloads are simulated (AIM_DEBUG_SIMULATE_HF_DOWNLOAD) so no real
 # network is required. The adapter disk PVC binds via the kind `nfs` RWX
@@ -21,6 +23,42 @@ spec:
   timeouts:
     assert: 120s
   steps:
+    - name: Create a logical adapter before any compatible base exists
+      try:
+        - apply:
+            file: adapter-logical.yaml
+
+    - name: Assert the logical adapter is independently Ready
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: adapter-lineage-logical
+              status:
+                status: Ready
+                adapterPath: adapter-lineage-logical
+
+    - name: Assert the logical adapter has no concrete parent lifecycle
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              owner=$(kubectl get aimartifact -n "$NAMESPACE" adapter-lineage-logical \
+                -o jsonpath='{.metadata.ownerReferences}')
+              parent=$(kubectl get aimartifact -n "$NAMESPACE" adapter-lineage-logical \
+                -o jsonpath='{.status.resolvedParent.name}')
+              if [ -n "$owner" ] || [ -n "$parent" ]; then
+                echo "ERROR: logical adapter acquired concrete parent lifecycle: owner=$owner parent=$parent"
+                exit 1
+              fi
+              echo "OK: logical adapter is parent-independent"
+
     - name: Create base model artifact with an adapter disk
       try:
         - apply:

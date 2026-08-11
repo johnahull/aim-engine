@@ -173,8 +173,8 @@ func newWatchTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// newWatchTestClient is a fake client with all four AIMService field
-// indexes registered so the watch mappers can exercise their lookup paths.
+// newWatchTestClient is a fake client with the AIMService and AIMArtifact field
+// indexes used by the watch mappers.
 func newWatchTestClient(t *testing.T, scheme *runtime.Scheme, objs ...client.Object) client.Client {
 	t.Helper()
 	return fakeclient.NewClientBuilder().
@@ -209,6 +209,33 @@ func newWatchTestClient(t *testing.T, scheme *runtime.Scheme, objs ...client.Obj
 				return nil
 			}
 			return []string{svc.Spec.Profile.Selector.AimId}
+		}).
+		WithIndex(&aimv1alpha1.AIMService{}, aimv1alpha1.AIMServiceAdapterArtifactIndexKey, func(obj client.Object) []string {
+			svc, ok := obj.(*aimv1alpha1.AIMService)
+			if !ok {
+				return nil
+			}
+			names := make([]string, 0, len(svc.Spec.Adapters))
+			for _, adapter := range svc.Spec.Adapters {
+				if adapter.Name != "" {
+					names = append(names, adapter.Name)
+				}
+			}
+			return names
+		}).
+		WithIndex(&aimv1alpha1.AIMArtifact{}, aimv1alpha1.ArtifactParentIndexKey, func(obj client.Object) []string {
+			artifact, ok := obj.(*aimv1alpha1.AIMArtifact)
+			if !ok || artifact.Spec.ParentArtifact == "" {
+				return nil
+			}
+			return []string{artifact.Spec.ParentArtifact}
+		}).
+		WithIndex(&aimv1alpha1.AIMArtifact{}, aimv1alpha1.ArtifactCompatibleModelIDIndexKey, func(obj client.Object) []string {
+			artifact, ok := obj.(*aimv1alpha1.AIMArtifact)
+			if !ok {
+				return nil
+			}
+			return artifact.Spec.CompatibleWith
 		}).
 		Build()
 }
@@ -384,5 +411,85 @@ func TestFindServicesForModel_FansOutByShortcutAndSelector(t *testing.T) {
 	}
 	if _, ok := got["svc-unrelated"]; ok {
 		t.Errorf("unrelated service must not be enqueued")
+	}
+}
+
+func TestFindServicesForAdapterArtifact_FansOutByExactAndLogicalCompatibility(t *testing.T) {
+	scheme := newWatchTestScheme(t)
+
+	serviceFor := func(name, adapterName, namespace string) *aimv1alpha1.AIMService {
+		return &aimv1alpha1.AIMService{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: aimv1alpha1.AIMServiceSpec{
+				Adapters: []aimv1alpha1.AIMServiceAdapterReference{{
+					Name: adapterName,
+					Kind: aimv1alpha1.AdapterKindAIMArtifact,
+				}},
+			},
+		}
+	}
+
+	exact := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "exact-adapter", Namespace: "ns"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			Type:           aimv1alpha1.ArtifactTypeAdapter,
+			ParentArtifact: "base-artifact",
+		},
+	}
+	logical := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "logical-adapter", Namespace: "ns"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			Type:           aimv1alpha1.ArtifactTypeAdapter,
+			CompatibleWith: []string{"org/other", "org/base"},
+		},
+	}
+	unrelated := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "unrelated-adapter", Namespace: "ns"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			Type:           aimv1alpha1.ArtifactTypeAdapter,
+			CompatibleWith: []string{"org/unrelated"},
+		},
+	}
+
+	c := newWatchTestClient(
+		t,
+		scheme,
+		exact,
+		logical,
+		unrelated,
+		serviceFor("svc-exact", exact.Name, "ns"),
+		serviceFor("svc-logical", logical.Name, "ns"),
+		serviceFor("svc-unrelated", unrelated.Name, "ns"),
+		serviceFor("svc-other-namespace", logical.Name, "other"),
+	)
+
+	model := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "base-artifact", Namespace: "ns"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			Type:    aimv1alpha1.ArtifactTypeModel,
+			ModelID: "org/base",
+		},
+	}
+	requests := findServicesForAdapterArtifact(c)(context.Background(), model)
+	got := map[types.NamespacedName]struct{}{}
+	for _, request := range requests {
+		got[request.NamespacedName] = struct{}{}
+	}
+
+	for _, want := range []types.NamespacedName{
+		{Namespace: "ns", Name: "svc-exact"},
+		{Namespace: "ns", Name: "svc-logical"},
+	} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("missing enqueue for %s", want)
+		}
+	}
+	for _, notWanted := range []types.NamespacedName{
+		{Namespace: "ns", Name: "svc-unrelated"},
+		{Namespace: "other", Name: "svc-other-namespace"},
+	} {
+		if _, ok := got[notWanted]; ok {
+			t.Errorf("unexpected enqueue for %s", notWanted)
+		}
 	}
 }

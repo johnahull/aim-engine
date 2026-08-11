@@ -558,8 +558,8 @@ func (r *AIMArtifactReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Clientset:      r.Clientset,
 	}
 
-	// Index adapter artifacts by their parent reference so a parent change can
-	// enqueue its adapters.
+	// Index exact-binding adapter artifacts by their parent reference so a
+	// parent change can enqueue its adapters.
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&aimv1alpha1.AIMArtifact{},
@@ -570,6 +570,24 @@ func (r *AIMArtifactReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return nil
 			}
 			return []string{a.Spec.ParentArtifact}
+		},
+	); err != nil {
+		return err
+	}
+
+	// Index logical adapters by every compatible canonical model ID. The
+	// AIMService watch graph uses this to fan a model artifact's adapter-disk
+	// changes out to services that reference compatible adapters.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&aimv1alpha1.AIMArtifact{},
+		aimv1alpha1.ArtifactCompatibleModelIDIndexKey,
+		func(obj client.Object) []string {
+			a, ok := obj.(*aimv1alpha1.AIMArtifact)
+			if !ok || a.Spec.Type != aimv1alpha1.ArtifactTypeAdapter || len(a.Spec.CompatibleWith) == 0 {
+				return nil
+			}
+			return a.Spec.CompatibleWith
 		},
 	); err != nil {
 		return err

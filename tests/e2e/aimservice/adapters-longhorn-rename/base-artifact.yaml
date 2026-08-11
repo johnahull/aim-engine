@@ -7,6 +7,7 @@ metadata:
   name: lh-adapters-base
 spec:
   type: model
+  modelId: test-org/base-weights
   sourceUri: hf://test-org/base-weights
   size: 10Mi
   adapterDisk:

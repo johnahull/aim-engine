@@ -176,6 +176,38 @@ func TestGetAdapterComponentHealth(t *testing.T) {
 	}
 }
 
+func TestLogicalAdapterHealthDoesNotRequirePresentBase(t *testing.T) {
+	adapter := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "logical-adapter", Namespace: "default"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			Type:           aimv1alpha1.ArtifactTypeAdapter,
+			CompatibleWith: []string{"org/base", "org/alternate"},
+		},
+	}
+	obs := ArtifactObservation{
+		ArtifactFetchResult: ArtifactFetchResult{artifact: adapter},
+		adapterPath:         adapter.Name,
+	}
+
+	health := obs.getAdapterComponentHealth()
+	h := findHealth(health, "AdapterCompatibility")
+	if h == nil {
+		t.Fatal("expected an AdapterCompatibility component health entry")
+	}
+	if h.State != constants.AIMStatusReady {
+		t.Errorf("AdapterCompatibility state = %q, want Ready", h.State)
+	}
+	if obs.parentArtifact != nil {
+		t.Error("logical adapter must not resolve a concrete parent artifact")
+	}
+
+	status := &aimv1alpha1.AIMArtifactStatus{}
+	decorateAdapterStatus(status, nil, obs)
+	if status.ResolvedParent != nil || status.ParentModelID != "" {
+		t.Errorf("logical adapter must not record concrete parent lineage, got %+v", status)
+	}
+}
+
 func TestComposeAdapterStateSetsLineage(t *testing.T) {
 	parent := &aimv1alpha1.AIMArtifact{
 		ObjectMeta: metav1.ObjectMeta{Name: "parent"},

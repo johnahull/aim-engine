@@ -59,7 +59,7 @@ watcher), inline self-healing (`sourceUri` on the service), engine-reported
 | Object | Role |
 |--------|------|
 | `AIMArtifact` `type: model` with `adapterDisk` | The base model. Provisions **two** PVCs: the model cache PVC and a shared `ReadWriteMany` adapter disk. |
-| `AIMArtifact` `type: adapter` | A LoRA adapter bound to a parent model via `spec.parentArtifact`. Defines `sourceUri`, `modelId`, and optional `rank`. |
+| `AIMArtifact` `type: adapter` | A LoRA adapter using either logical compatibility (`spec.compatibleWith` model IDs) or an exact legacy binding (`spec.parentArtifact`). Defines `sourceUri`, its own `modelId`, and optional `rank`. |
 | `AIMService` `spec.adapters[]` | The list of adapters this service serves. Editable after creation; entries are pure references with unique `(kind, name)` pairs. |
 
 ### Storage layout
@@ -86,31 +86,40 @@ Because the controller never mounts the PVC, a fast, AIMService-owned
 `<service-uid>/` (so the read-only `subPath` mount binds — the aim-runtime
 errors on startup if its mounted `subPath` is missing) and prunes any adapter
 directory no longer in `spec.adapters`. The InferenceService is gated only on
-the subtree existing — not on downloads. The Job's name encodes the declared
-set and `status.adapterSubtreeSyncKey` records the last synced set, so editing
-`spec.adapters` re-runs the sync (to prune removed adapters) without re-run
-loops. Staging Jobs run asynchronously and the runtime hot-loads each adapter
-as it lands. The controller sets `AIM_ADAPTER_SOURCE` to the mount path so the
-image finds the subtree.
+the subtree existing — not on downloads. The Job's name encodes both the
+declared set and resolved adapter-disk PVC, and
+`status.adapterSubtreeSyncKey` records the last synced binding. Editing
+`spec.adapters` re-runs the sync to prune removed adapters; replacing a base
+artifact with a new UID-derived adapter PVC re-runs the sync and staging on the
+new disk. Staging Jobs run asynchronously and the runtime hot-loads each
+adapter as it lands. The controller sets `AIM_ADAPTER_SOURCE` to the mount path
+so the image finds the subtree.
 
 ## MVP bootstrap contract
 
 Because `AIMProfileCache → adapterDisk` propagation is deferred, the operator
 must satisfy the following before a service can serve adapters:
 
-1. **Pre-create the parent model artifact with `adapterDisk`.** A service that
-   declares adapters against a parent without an adapter disk is gated with
+1. **Pre-create the base model artifact with `modelId` and `adapterDisk`.** A
+   service that declares adapters against a base without an adapter disk is gated with
    `ParentLacksAdapterDisk`.
 2. **Use `Shared` caching and an exact `sourceUri` match.** The service resolves
    its parent base model by matching the resolved base model id against the
    cache's resolved artifacts — the `AIMProfileCache` on the profile pipeline,
    the `AIMTemplateCache` on the template pipeline. `Dedicated` caching mints a
    per-service parent and is not supported with adapters.
-3. **First model source wins.** Adapters bind to a single base model. If the
-   resolved profile or template carries more than one model source, the first is
-   targeted deterministically.
-4. **Each adapter's `parentArtifact` must equal the resolved base model.** A
-   mismatch is reported as a configuration error.
+3. **Use a single model source.** Adapters bind to one resolved base model.
+   Profiles or templates with multiple model sources are rejected as ambiguous.
+4. **Choose exactly one compatibility mode per adapter.**
+   `compatibleWith` is the recommended logical mode: the resolved base
+   artifact's canonical `modelId` must appear in the list. `parentArtifact` is
+   the exact legacy mode and must equal the resolved base artifact's Kubernetes
+   name. A mismatch is reported as a configuration error.
+
+A logical adapter is valid and `Ready` even when no compatible base currently
+exists. It has no parent owner reference and survives deletion or replacement
+of compatible base artifacts. Compatibility is evaluated only when an
+`AIMService` resolves a concrete base.
 
 ## Worked example
 
@@ -128,7 +137,7 @@ spec:
   adapterDisk:
     size: 50Gi
 ---
-# 2. A shared, pre-authored adapter bound to the parent.
+# 2. A shared, pre-authored adapter logically compatible with the model.
 apiVersion: aim.eai.amd.com/v1alpha1
 kind: AIMArtifact
 metadata:
@@ -136,7 +145,8 @@ metadata:
 spec:
   type: adapter
   modelId: acme/cs-tone-v3
-  parentArtifact: gemma-3-27b-it-cache
+  compatibleWith:
+    - google/gemma-3-27b-it
   sourceUri: s3://eai-artifacts/adapters/cs-tone-v3/
   rank: 16
 ---
@@ -178,9 +188,11 @@ spec:
 ## Lifecycle and status
 
 The InferenceService is gated until the base model is `Ready` **and** the
-per-service adapter subtree exists (the subtree-sync Job has succeeded).
-Adapters then stage asynchronously and the runtime loads them as they land —
-downloads never hold back serving. The service exposes a single aggregate
+per-service adapter subtree exists (the subtree-sync Job has succeeded). The
+service checks each logical adapter's `compatibleWith` list against the
+resolved base artifact's `modelId`; exact adapters are checked against the
+resolved artifact name. Compatible adapters then stage asynchronously and the
+runtime loads them as they land — downloads never hold back serving. The service exposes a single aggregate
 `Adapters` condition (rather than one condition per adapter) and per-adapter
 disk-side states under `status.adapters[]`. Once the subtree exists the
 `Adapters` condition is `Ready` even while individual adapters are still
@@ -200,7 +212,7 @@ status:
 |--------|---------|
 | `ParentLacksAdapterDisk` | The resolved base model has no adapter disk yet (`Progressing`). |
 | `AdapterSubtreeProvisioning` | The per-service subtree is being created; the ISVC is gated on this (`Progressing`). |
-| `AdapterConfigInvalid` | Multiple model sources, a parent mismatch, a duplicate adapter path, or a non-adapter artifact was referenced (`Failed`, blocks the ISVC). |
+| `AdapterConfigInvalid` | Multiple model sources, an incompatible model ID, an exact-parent mismatch, a duplicate adapter path, or a non-adapter artifact was referenced (`Failed`, blocks the ISVC). |
 | `AdaptersStaging` | The subtree is ready and serving; one or more adapters are still downloading asynchronously (`Ready`). |
 | `AdaptersStaged` | All declared adapters are staged (`Ready`). |
 
@@ -208,6 +220,10 @@ status:
 
 Adapter subtrees are not Kubernetes objects, so owner-reference garbage
 collection cannot reclaim them. Cleanup is two-tier, split by ownership:
+
+- **Adapter descriptor lifecycle** — logical adapters have no base-model owner
+  and persist independently. Exact `parentArtifact` adapters retain the legacy
+  owner reference and are cascade-deleted with that concrete parent artifact.
 
 - **Per-adapter unload (service alive)** — the AIMService-owned **subtree-sync**
   Job prunes adapter directories no longer in `spec.adapters`. It is owned by the

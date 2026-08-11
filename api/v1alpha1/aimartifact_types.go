@@ -42,6 +42,11 @@ const (
 	// ArtifactParentIndexKey is the field index key for AIMArtifact.Spec.ParentArtifact.
 	// Used to enqueue adapter artifacts when their parent model artifact changes.
 	ArtifactParentIndexKey = ".spec.parentArtifact"
+
+	// ArtifactCompatibleModelIDIndexKey is the field index key for
+	// AIMArtifact.Spec.CompatibleWith. Used to enqueue services when a model
+	// artifact matching a logical adapter compatibility declaration changes.
+	ArtifactCompatibleModelIDIndexKey = ".spec.compatibleWith"
 )
 
 // AIMArtifactType discriminates a model artifact from a LoRA adapter artifact.
@@ -145,8 +150,8 @@ type AIMAdapterDisk struct {
 type AIMArtifactSpec struct {
 	// Type discriminates a base model artifact (`model`) from a LoRA adapter
 	// definition (`adapter`). Defaults to `model`; immutable after creation.
-	// Adapter artifacts require parentArtifact and modelId, and do not get their
-	// own cache PVC.
+	// Adapter artifacts require modelId and exactly one of parentArtifact or
+	// compatibleWith, and do not get their own cache PVC.
 	// +optional
 	// +kubebuilder:default=model
 	Type AIMArtifactType `json:"type,omitempty"`
@@ -160,13 +165,26 @@ type AIMArtifactSpec struct {
 	// +kubebuilder:validation:Pattern=`^(hf|s3)://[^ \t\r\n]+$`
 	SourceURI string `json:"sourceUri"`
 
-	// ParentArtifact names the base model AIMArtifact (type=model) this adapter is
-	// compatible with. Required and only allowed when type=adapter; immutable.
-	// The adapter is owned by (cascade-deleted with) the parent. Compatibility is
-	// keyed on the parent's modelId.
+	// ParentArtifact names the exact base model AIMArtifact (type=model) this
+	// adapter is bound to. It is an alternative to compatibleWith, is only
+	// allowed when type=adapter, and is immutable. The adapter is owned by
+	// (cascade-deleted with) the named parent.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="parentArtifact is immutable"
 	ParentArtifact string `json:"parentArtifact,omitempty"`
+
+	// CompatibleWith lists canonical base model IDs this adapter can be mounted
+	// with. It is an alternative to parentArtifact: compatibility is checked
+	// against the concrete base artifact resolved by each consuming AIMService.
+	// The adapter remains independent of the lifecycle and current availability
+	// of compatible model artifacts.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="compatibleWith is immutable"
+	CompatibleWith []string `json:"compatibleWith,omitempty"`
 
 	// Rank is the LoRA rank of the adapter. Optional; only meaningful when type=adapter.
 	// +optional
@@ -408,9 +426,10 @@ func (s *AIMArtifactStatus) GetAIMStatus() constants.AIMStatus {
 // +kubebuilder:printcolumn:name="Attempt",type=string,JSONPath=`.status.download.attempt`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.type) || !oldSelf.hasValue() || !has(oldSelf.value().spec.type) || self.spec.type == oldSelf.value().spec.type",message="spec.type is immutable",optionalOldSelf=true
-// +kubebuilder:validation:XValidation:rule="!has(self.spec.type) || self.spec.type != 'adapter' || has(self.spec.parentArtifact)",message="spec.parentArtifact is required when spec.type is adapter"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.type) || self.spec.type != 'adapter' || ((has(self.spec.parentArtifact) && !has(self.spec.compatibleWith)) || (!has(self.spec.parentArtifact) && has(self.spec.compatibleWith)))",message="exactly one of spec.parentArtifact or spec.compatibleWith is required when spec.type is adapter"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.type) || self.spec.type != 'adapter' || (has(self.spec.modelId) && size(self.spec.modelId) > 0)",message="spec.modelId is required when spec.type is adapter"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.parentArtifact) || (has(self.spec.type) && self.spec.type == 'adapter')",message="spec.parentArtifact is only allowed when spec.type is adapter"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.compatibleWith) || (has(self.spec.type) && self.spec.type == 'adapter')",message="spec.compatibleWith is only allowed when spec.type is adapter"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.adapterDisk) || !has(self.spec.type) || self.spec.type == 'model'",message="spec.adapterDisk is only allowed when spec.type is model"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.rank) || (has(self.spec.type) && self.spec.type == 'adapter')",message="spec.rank is only allowed when spec.type is adapter"
 

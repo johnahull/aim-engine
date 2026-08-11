@@ -4,11 +4,11 @@
 #
 # Validates the artifact-root CEL rules introduced for LoRA adapter support:
 # - spec.type is immutable
-# - spec.parentArtifact is required iff spec.type == adapter
+# - exactly one of spec.parentArtifact or spec.compatibleWith is required for adapters
 # - spec.modelId is required when spec.type == adapter
 # - spec.adapterDisk is only allowed on model artifacts
 # - spec.rank is only allowed on adapter artifacts
-# - spec.parentArtifact / spec.sourceUri immutability
+# - compatibility mode fields / spec.sourceUri immutability
 #
 # No special infrastructure required (admission-time validation only).
 #
@@ -23,7 +23,7 @@ spec:
   steps:
     # --- Rejection cases ---
 
-    - name: Reject adapter without parentArtifact
+    - name: Reject adapter without a compatibility mode
       try:
         - apply:
             expect:
@@ -36,6 +36,25 @@ spec:
                 name: cel-adapter-no-parent
               spec:
                 type: adapter
+                modelId: org/adapter
+                sourceUri: hf://org/adapter
+
+    - name: Reject adapter with both compatibility modes
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: cel-adapter-both-modes
+              spec:
+                type: adapter
+                parentArtifact: some-base
+                compatibleWith:
+                  - org/base
                 modelId: org/adapter
                 sourceUri: hf://org/adapter
 
@@ -70,6 +89,60 @@ spec:
                 type: model
                 parentArtifact: some-base
                 sourceUri: hf://org/model
+
+    - name: Reject model that sets compatibleWith
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: cel-model-with-compatibility
+              spec:
+                type: model
+                compatibleWith:
+                  - org/base
+                sourceUri: hf://org/model
+
+    - name: Reject logical adapter with invalid model ID
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: cel-adapter-invalid-compatible-id
+              spec:
+                type: adapter
+                compatibleWith:
+                  - not-a-canonical-model-id
+                modelId: org/adapter
+                sourceUri: hf://org/adapter
+
+    - name: Reject logical adapter with duplicate model IDs
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: cel-adapter-duplicate-compatible-id
+              spec:
+                type: adapter
+                compatibleWith:
+                  - org/base
+                  - org/base
+                modelId: org/adapter
+                sourceUri: hf://org/adapter
 
     - name: Reject adapter that sets adapterDisk
       try:
@@ -150,6 +223,29 @@ spec:
               metadata:
                 name: cel-adapter-valid
 
+    - name: Accept logical adapter without a present base artifact
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: cel-adapter-logical
+              spec:
+                type: adapter
+                compatibleWith:
+                  - org/base
+                  - org/alternate
+                modelId: org/logical-adapter
+                sourceUri: hf://org/logical-adapter
+                rank: 8
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: cel-adapter-logical
+
     # --- Immutability cases ---
 
     - name: Reject changing spec.type after creation
@@ -175,3 +271,15 @@ spec:
                 exit 1
               fi
               echo "OK: spec.parentArtifact is immutable"
+
+    - name: Reject changing spec.compatibleWith after creation
+      try:
+        - script:
+            content: |
+              set -eu
+              if kubectl patch aimartifact -n "$NAMESPACE" cel-adapter-logical \
+                  --type merge -p '{"spec":{"compatibleWith":["org/replacement"]}}' 2>/dev/null; then
+                echo "ERROR: spec.compatibleWith mutation was accepted"
+                exit 1
+              fi
+              echo "OK: spec.compatibleWith is immutable"

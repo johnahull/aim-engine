@@ -4,7 +4,8 @@ metadata:
   name: lh-adapters-lora
 spec:
   type: adapter
-  parentArtifact: lh-adapters-base
+  compatibleWith:
+    - test-org/base-weights
   modelId: test-org/lora
   sourceUri: hf://test-org/lora
   rank: 16

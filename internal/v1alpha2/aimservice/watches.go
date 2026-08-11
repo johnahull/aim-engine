@@ -445,7 +445,7 @@ func findServicesForClusterModel(c client.Client) handler.MapFunc {
 
 // adapterArtifactRelevantChangePredicate fires on adapter/model artifact events
 // that can change a service's adapter staging or gating: type, overall status,
-// adapterPath, and the model's adapterPersistentVolumeClaim.
+// adapterPath, canonical modelId, and the model's adapterPersistentVolumeClaim.
 func adapterArtifactRelevantChangePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc:  func(_ event.CreateEvent) bool { return true },
@@ -462,6 +462,7 @@ func adapterArtifactRelevantChangePredicate() predicate.Predicate {
 				return false
 			}
 			return oldA.Status.Status != newA.Status.Status ||
+				oldA.Spec.ModelID != newA.Spec.ModelID ||
 				oldA.Status.AdapterPath != newA.Status.AdapterPath ||
 				oldA.Status.AdapterPersistentVolumeClaim != newA.Status.AdapterPersistentVolumeClaim
 		},
@@ -469,10 +470,11 @@ func adapterArtifactRelevantChangePredicate() predicate.Predicate {
 }
 
 // findServicesForAdapterArtifact fans an AIMArtifact event back to the services
-// that serve it. For adapter artifacts, services referencing the adapter by name
-// are enqueued directly. For model artifacts (potential parents), the change is
-// hopped through the parent index to find adapters, then to their services, so a
-// parent gaining its adapter disk re-triggers staging.
+// that serve it. For adapter artifacts, services referencing the adapter by
+// name are enqueued directly. For model artifacts, the change is hopped through
+// both the exact parent-name index and logical compatible-model-ID index, then
+// to services, so a model gaining or replacing its adapter disk re-triggers
+// staging in either compatibility mode.
 func findServicesForAdapterArtifact(c client.Client) handler.MapFunc {
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
 		artifact, ok := obj.(*aimv1alpha1.AIMArtifact)
@@ -485,8 +487,7 @@ func findServicesForAdapterArtifact(c client.Client) handler.MapFunc {
 		case aimv1alpha1.ArtifactTypeAdapter:
 			collectServicesByField(ctx, c, requests, aimv1alpha1.AIMServiceAdapterArtifactIndexKey, artifact.Name, artifact.Namespace)
 		default:
-			// Model artifact: find adapters whose parent is this model, then the
-			// services that reference those adapters.
+			// Exact-binding adapters whose parent is this concrete artifact.
 			var adapters aimv1alpha1.AIMArtifactList
 			if err := c.List(ctx, &adapters,
 				client.InNamespace(artifact.Namespace),
@@ -498,6 +499,23 @@ func findServicesForAdapterArtifact(c client.Client) handler.MapFunc {
 			}
 			for i := range adapters.Items {
 				collectServicesByField(ctx, c, requests, aimv1alpha1.AIMServiceAdapterArtifactIndexKey, adapters.Items[i].Name, artifact.Namespace)
+			}
+
+			// Logical adapters compatible with this canonical model ID. A model
+			// artifact name is deliberately not involved in this lookup.
+			if artifact.Spec.ModelID != "" {
+				adapters = aimv1alpha1.AIMArtifactList{}
+				if err := c.List(ctx, &adapters,
+					client.InNamespace(artifact.Namespace),
+					client.MatchingFields{aimv1alpha1.ArtifactCompatibleModelIDIndexKey: artifact.Spec.ModelID},
+				); err != nil {
+					log.FromContext(ctx).Error(err, "failed to list adapters compatible with model artifact",
+						"modelId", artifact.Spec.ModelID, "namespace", artifact.Namespace)
+					return requestsFromSet(requests)
+				}
+				for i := range adapters.Items {
+					collectServicesByField(ctx, c, requests, aimv1alpha1.AIMServiceAdapterArtifactIndexKey, adapters.Items[i].Name, artifact.Namespace)
+				}
 			}
 		}
 

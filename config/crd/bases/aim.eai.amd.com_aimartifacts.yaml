@@ -94,6 +94,22 @@ spec:
                       The access mode is fixed at ReadWriteMany by the controller.
                     type: string
                 type: object
+              compatibleWith:
+                description: |-
+                  CompatibleWith lists canonical base model IDs this adapter can be mounted
+                  with. It is an alternative to parentArtifact: compatibility is checked
+                  against the concrete base artifact resolved by each consuming AIMService.
+                  The adapter remains independent of the lifecycle and current availability
+                  of compatible model artifacts.
+                items:
+                  pattern: ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$
+                  type: string
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+                x-kubernetes-validations:
+                - message: compatibleWith is immutable
+                  rule: self == oldSelf
               downloadFilter:
                 description: |-
                   DownloadFilter controls which files are included or excluded when downloading from HuggingFace.
@@ -327,10 +343,11 @@ spec:
                 type: string
               parentArtifact:
                 description: |-
-                  ParentArtifact names the base model AIMArtifact (type=model) this adapter is
-                  compatible with. Required and only allowed when type=adapter; immutable.
-                  The adapter is owned by (cascade-deleted with) the parent. Compatibility is
-                  keyed on the parent's modelId.
+                  ParentArtifact names the exact base model AIMArtifact (type=model) this
+                  adapter is bound to. It is an alternative to compatibleWith, is only
+                  allowed when type=adapter, and is immutable. The adapter is owned by
+                  (cascade-deleted with) the named parent.
+                minLength: 1
                 type: string
                 x-kubernetes-validations:
                 - message: parentArtifact is immutable
@@ -387,8 +404,8 @@ spec:
                 description: |-
                   Type discriminates a base model artifact (`model`) from a LoRA adapter
                   definition (`adapter`). Defaults to `model`; immutable after creation.
-                  Adapter artifacts require parentArtifact and modelId, and do not get their
-                  own cache PVC.
+                  Adapter artifacts require modelId and exactly one of parentArtifact or
+                  compatibleWith, and do not get their own cache PVC.
                 enum:
                 - model
                 - adapter
@@ -635,13 +652,19 @@ spec:
           optionalOldSelf: true
           rule: '!has(self.spec.type) || !oldSelf.hasValue() || !has(oldSelf.value().spec.type)
             || self.spec.type == oldSelf.value().spec.type'
-        - message: spec.parentArtifact is required when spec.type is adapter
-          rule: '!has(self.spec.type) || self.spec.type != ''adapter'' || has(self.spec.parentArtifact)'
+        - message: exactly one of spec.parentArtifact or spec.compatibleWith is required
+            when spec.type is adapter
+          rule: '!has(self.spec.type) || self.spec.type != ''adapter'' || ((has(self.spec.parentArtifact)
+            && !has(self.spec.compatibleWith)) || (!has(self.spec.parentArtifact)
+            && has(self.spec.compatibleWith)))'
         - message: spec.modelId is required when spec.type is adapter
           rule: '!has(self.spec.type) || self.spec.type != ''adapter'' || (has(self.spec.modelId)
             && size(self.spec.modelId) > 0)'
         - message: spec.parentArtifact is only allowed when spec.type is adapter
           rule: '!has(self.spec.parentArtifact) || (has(self.spec.type) && self.spec.type
+            == ''adapter'')'
+        - message: spec.compatibleWith is only allowed when spec.type is adapter
+          rule: '!has(self.spec.compatibleWith) || (has(self.spec.type) && self.spec.type
             == ''adapter'')'
         - message: spec.adapterDisk is only allowed when spec.type is model
           rule: '!has(self.spec.adapterDisk) || !has(self.spec.type) || self.spec.type

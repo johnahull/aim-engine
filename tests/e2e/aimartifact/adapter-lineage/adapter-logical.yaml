@@ -1,0 +1,12 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: adapter-lineage-logical
+spec:
+  type: adapter
+  compatibleWith:
+    - test-org/base-model
+    - test-org/alternate-base
+  modelId: test-org/logical-lora
+  sourceUri: hf://test-org/logical-lora
+  rank: 16

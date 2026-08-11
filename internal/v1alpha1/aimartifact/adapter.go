@@ -60,9 +60,11 @@ func resolveAdapterPath(mc *aimv1alpha1.AIMArtifact) string {
 	return mc.Name
 }
 
-// fetchAdapterState fetches the dependencies of a type=adapter artifact: the merged
-// runtime config and the referenced parent model artifact. Adapters never create a
-// cache PVC or download/check-size jobs.
+// fetchAdapterState fetches the dependencies of a type=adapter artifact: the
+// merged runtime config and, for exact-binding adapters, the referenced parent
+// model artifact. Logical compatibleWith adapters do not resolve or depend on
+// any currently-present model artifact. Adapters never create a cache PVC or
+// download/check-size jobs.
 func (r *ArtifactReconciler) fetchAdapterState(
 	ctx context.Context,
 	c client.Client,
@@ -103,9 +105,12 @@ func composeAdapterState(fetch ArtifactFetchResult) ArtifactObservation {
 }
 
 // getAdapterComponentHealth reports component health for a type=adapter artifact.
-// The adapter becomes Ready once its lineage (parent model + adapter disk) is
-// validated. Source bytes are validated lazily at service-stage time, so a bad
-// source surfaces on the consuming service rather than here (MVP).
+// Exact-binding adapters become Ready once their lineage (parent model +
+// adapter disk) is validated. Logical adapters become Ready once their own
+// configuration is valid; compatibility and storage are checked against the
+// concrete base artifact resolved by each consuming service. Source bytes are
+// validated lazily at service-stage time, so a bad source surfaces on the
+// consuming service rather than here (MVP).
 func (obs ArtifactObservation) getAdapterComponentHealth() []controllerutils.ComponentHealth {
 	health := []controllerutils.ComponentHealth{
 		obs.mergedRuntimeConfig.ToUpstreamComponentHealth("RuntimeConfig", aimruntimeconfig.GetRuntimeConfigHealth),
@@ -122,13 +127,21 @@ func (obs ArtifactObservation) getAdapterComponentHealth() []controllerutils.Com
 	}
 
 	switch {
+	case len(obs.artifact.Spec.CompatibleWith) > 0:
+		health = append(health, controllerutils.ComponentHealth{
+			Component:      "AdapterCompatibility",
+			State:          constants.AIMStatusReady,
+			Reason:         aimv1alpha1.ArtifactReasonAdapterValidated,
+			Message:        "logical adapter compatibility declaration validated",
+			DependencyType: controllerutils.DependencyTypeUpstream,
+		})
 	case obs.parentArtifact == nil:
-		// CEL requires parentArtifact on adapters; defensive only.
+		// CEL requires exactly one compatibility mode on adapters; defensive only.
 		health = append(health, controllerutils.ComponentHealth{
 			Component:      "AdapterParent",
 			State:          constants.AIMStatusFailed,
 			Reason:         aimv1alpha1.ArtifactReasonParentNotFound,
-			Message:        "spec.parentArtifact is required for adapter artifacts",
+			Message:        "exactly one of spec.parentArtifact or spec.compatibleWith is required for adapter artifacts",
 			DependencyType: controllerutils.DependencyTypeUpstream,
 		})
 	case obs.parentArtifact.IsNotFound():
@@ -177,7 +190,9 @@ func (obs ArtifactObservation) getAdapterComponentHealth() []controllerutils.Com
 	return health
 }
 
-// decorateAdapterStatus sets adapter-specific status fields (path, parent lineage).
+// decorateAdapterStatus sets adapter-specific status fields. Exact-binding
+// adapters record parent lineage; logical adapters only record their stable
+// on-disk path.
 func decorateAdapterStatus(
 	status *aimv1alpha1.AIMArtifactStatus,
 	_ *controllerutils.ConditionManager,

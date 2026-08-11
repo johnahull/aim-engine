@@ -5,7 +5,8 @@
 # Validates the AIMService adapter pipeline reaching "staged" in kind:
 # 1. A bootstrapped base model artifact (adapterDisk) provisions the shared
 #    adapter disk PVC.
-# 2. An adapter artifact validates lineage and reaches Ready.
+# 2. A logical adapter artifact independently reaches Ready and declares
+#    compatibility with the base model's canonical modelId.
 # 3. A v1alpha2 AIMService declaring spec.adapters resolves the base model via
 #    the (frozen) profile cache, runs a fast subtree-sync Job to create the
 #    per-service subtree directory (and prune undeclared adapters). This service
@@ -49,7 +50,7 @@ spec:
                 status: Ready
                 (adapterPersistentVolumeClaim != ""): true
 
-    - name: Create the adapter artifact and assert it validates lineage
+    - name: Create the logical adapter artifact and assert it is independently Ready
       try:
         - apply:
             file: adapter-artifact.yaml

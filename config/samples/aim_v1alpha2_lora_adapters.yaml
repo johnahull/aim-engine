@@ -28,7 +28,8 @@ spec:
   adapterDisk:
     size: 50Gi
 ---
-# 2. A shared, pre-authored adapter bound to the parent base model.
+# 2. A shared, pre-authored adapter logically compatible with the canonical
+#    base model ID. It is not owned by this concrete AIMArtifact.
 apiVersion: aim.eai.amd.com/v1alpha1
 kind: AIMArtifact
 metadata:
@@ -39,7 +40,8 @@ metadata:
 spec:
   type: adapter
   modelId: acme/cs-tone-v3
-  parentArtifact: gemma-3-27b-it-cache
+  compatibleWith:
+    - google/gemma-3-27b-it
   sourceUri: s3://eai-artifacts/adapters/cs-tone-v3/
   rank: 16
 ---

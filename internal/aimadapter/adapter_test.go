@@ -23,6 +23,7 @@
 package aimadapter
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -30,14 +31,21 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 )
 
-const testAdapterPVC = "base-adapters-pvc"
+const (
+	testAdapterPVC       = "base-adapters-pvc"
+	testAdapterPVCUID    = "base-adapters-pvc-uid"
+	testOldAdapterPVCUID = "old-uid"
+	testNewAdapterPVCUID = "new-uid"
+)
 
 func succeededJob(name string) *batchv1.Job {
 	return &batchv1.Job{
@@ -54,7 +62,7 @@ func succeededJob(name string) *batchv1.Job {
 // Compose reports SubtreeReady (the ISVC mount gate).
 func withSyncedSubtree(deps Dependencies, svc *aimv1alpha1.AIMService) Dependencies {
 	deps.SubtreeSyncJob = controllerutils.FetchResult[*batchv1.Job]{
-		Value: succeededJob(SubtreeSyncJobName(svc)),
+		Value: succeededJob(SubtreeSyncJobName(svc, deps.AdapterDiskPVC, deps.AdapterDiskPVCUID)),
 	}
 	return deps
 }
@@ -67,6 +75,25 @@ func adapterArtifact(name, parent string) *aimv1alpha1.AIMArtifact {
 			Type:           aimv1alpha1.ArtifactTypeAdapter,
 			ParentArtifact: parent,
 			ModelID:        "org/base",
+			SourceURI:      "hf://org/" + name,
+		},
+		Status: aimv1alpha1.AIMArtifactStatus{
+			Status:      constants.AIMStatusReady,
+			AdapterPath: name,
+		},
+	}
+}
+
+// logicalAdapterArtifact builds a Ready adapter compatible by canonical model
+// ID rather than by a concrete parent artifact name.
+func logicalAdapterArtifact(compatibleWith ...string) *aimv1alpha1.AIMArtifact {
+	const name = "lora-a"
+	return &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			Type:           aimv1alpha1.ArtifactTypeAdapter,
+			CompatibleWith: compatibleWith,
+			ModelID:        "org/" + name,
 			SourceURI:      "hf://org/" + name,
 		},
 		Status: aimv1alpha1.AIMArtifactStatus{
@@ -132,6 +159,10 @@ func depsWith(parent *aimv1alpha1.AIMArtifact, artifacts map[string]*aimv1alpha1
 	if parent != nil {
 		pf := controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]{Value: parent}
 		deps.ParentArtifact = &pf
+		deps.AdapterDiskPVC = parent.Status.AdapterPersistentVolumeClaim
+		if deps.AdapterDiskPVC != "" {
+			deps.AdapterDiskPVCUID = testAdapterPVCUID
+		}
 	}
 	for name, art := range artifacts {
 		deps.AdapterArtifacts[name] = controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]{Value: art}
@@ -168,6 +199,45 @@ func TestComposeParentMismatch(t *testing.T) {
 	st := Compose(svc, deps)
 	if st.ConfigErr == nil {
 		t.Error("expected ParentArtifactMismatch config error")
+	}
+}
+
+func TestComposeLogicalCompatibility(t *testing.T) {
+	tests := []struct {
+		name           string
+		compatibleWith []string
+		wantErr        bool
+	}{
+		{
+			name:           "matching model ID",
+			compatibleWith: []string{"org/base"},
+		},
+		{
+			name:           "any listed model ID may match",
+			compatibleWith: []string{"org/other", "org/base"},
+		},
+		{
+			name:           "incompatible model ID",
+			compatibleWith: []string{"org/other"},
+			wantErr:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := serviceWithAdapters("lora-a")
+			deps := depsWith(modelParent(testAdapterPVC), map[string]*aimv1alpha1.AIMArtifact{
+				"lora-a": logicalAdapterArtifact(tt.compatibleWith...),
+			})
+
+			st := Compose(svc, deps)
+			if (st.ConfigErr != nil) != tt.wantErr {
+				t.Fatalf("ConfigErr = %v, wantErr %v", st.ConfigErr, tt.wantErr)
+			}
+			if !tt.wantErr && st.Adapters[0].BaseModelID != "org/base" {
+				t.Errorf("BaseModelID = %q, want org/base", st.Adapters[0].BaseModelID)
+			}
+		})
 	}
 }
 
@@ -228,7 +298,7 @@ func TestNotMountableWithoutSubtree(t *testing.T) {
 		"lora-a": adapterArtifact("lora-a", "base"),
 	})
 	deps.StagingJobs["lora-a"] = controllerutils.FetchResult[*batchv1.Job]{
-		Value: succeededJob(StagingJobName(svc, "lora-a")),
+		Value: succeededJob(StagingJobName(svc, "lora-a", testAdapterPVC, testAdapterPVCUID)),
 	}
 
 	st := Compose(svc, deps)
@@ -302,7 +372,7 @@ func TestStaticReadyWhenAllStaged(t *testing.T) {
 		svc,
 	)
 	deps.StagingJobs["lora-a"] = controllerutils.FetchResult[*batchv1.Job]{
-		Value: succeededJob(StagingJobName(svc, "lora-a")),
+		Value: succeededJob(StagingJobName(svc, "lora-a", testAdapterPVC, testAdapterPVCUID)),
 	}
 
 	st := Compose(svc, deps)
@@ -388,17 +458,18 @@ func TestHealthStates(t *testing.T) {
 		}
 	})
 	t.Run("subtree not ready is progressing", func(t *testing.T) {
-		h := Health(State{AdapterDiskPVC: "pvc"}, 1)
+		h := Health(State{AdapterDiskPVC: "pvc", AdapterDiskPVCUID: "uid"}, 1)
 		if h.State != constants.AIMStatusProgressing || h.Reason != ReasonSubtreeProvisioning {
 			t.Errorf("got state=%q reason=%q, want Progressing/%s", h.State, h.Reason, ReasonSubtreeProvisioning)
 		}
 	})
 	t.Run("ready while staging once subtree exists", func(t *testing.T) {
 		st := State{
-			AdapterDiskPVC: "pvc",
-			SubtreeReady:   true,
-			Ready:          true,
-			Adapters:       []Observation{{Name: "a", State: aimv1alpha1.AdapterStatePending}},
+			AdapterDiskPVC:    "pvc",
+			AdapterDiskPVCUID: "uid",
+			SubtreeReady:      true,
+			Ready:             true,
+			Adapters:          []Observation{{Name: "a", State: aimv1alpha1.AdapterStatePending}},
 		}
 		h := Health(st, 1)
 		if h.State != constants.AIMStatusReady || h.Reason != ReasonStaging {
@@ -407,11 +478,12 @@ func TestHealthStates(t *testing.T) {
 	})
 	t.Run("ready when all staged", func(t *testing.T) {
 		st := State{
-			AdapterDiskPVC: "pvc",
-			SubtreeReady:   true,
-			AllStaged:      true,
-			Ready:          true,
-			Adapters:       []Observation{{Name: "a", State: aimv1alpha1.AdapterStateDownloaded}},
+			AdapterDiskPVC:    "pvc",
+			AdapterDiskPVCUID: "uid",
+			SubtreeReady:      true,
+			AllStaged:         true,
+			Ready:             true,
+			Adapters:          []Observation{{Name: "a", State: aimv1alpha1.AdapterStateDownloaded}},
 		}
 		h := Health(st, 1)
 		if h.State != constants.AIMStatusReady || h.Reason != ReasonStaged {
@@ -437,9 +509,9 @@ func TestPlanSyncsSubtreeThenStages(t *testing.T) {
 			continue
 		}
 		switch job.Name {
-		case SubtreeSyncJobName(svc):
+		case SubtreeSyncJobName(svc, testAdapterPVC, testAdapterPVCUID):
 			sawSync = true
-		case StagingJobName(svc, "lora-a"):
+		case StagingJobName(svc, "lora-a", testAdapterPVC, testAdapterPVCUID):
 			sawStage = true
 		}
 	}
@@ -459,14 +531,16 @@ func TestPlanSkipsSyncWhenAlreadySynced(t *testing.T) {
 		"lora-a": adapterArtifact("lora-a", "base"),
 	})
 	// Mark the declared set as already synced on status.
-	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(svc)
+	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(svc, testAdapterPVC, testAdapterPVCUID)
+	svc.Status.AdapterDiskPersistentVolumeClaim = testAdapterPVC
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = testAdapterPVCUID
 	st := Compose(svc, deps)
 
 	var plan controllerutils.PlanResult
 	Plan(&plan, svc, deps, st, nil)
 
 	for _, obj := range plan.GetToApply() {
-		if job, ok := obj.(*batchv1.Job); ok && job.Name == SubtreeSyncJobName(svc) {
+		if job, ok := obj.(*batchv1.Job); ok && job.Name == SubtreeSyncJobName(svc, testAdapterPVC, testAdapterPVCUID) {
 			t.Error("Plan must not re-emit the subtree-sync job once the set is recorded as synced")
 		}
 	}
@@ -481,7 +555,9 @@ func TestPlanReSyncsOnAdapterRemoval(t *testing.T) {
 	})
 	// Status reflects a previously-synced set that included a now-removed adapter.
 	twoAdapters := serviceWithAdapters("lora-a", "lora-b")
-	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(twoAdapters)
+	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(twoAdapters, testAdapterPVC, testAdapterPVCUID)
+	svc.Status.AdapterDiskPersistentVolumeClaim = testAdapterPVC
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = testAdapterPVCUID
 	st := Compose(svc, deps)
 
 	var plan controllerutils.PlanResult
@@ -489,7 +565,7 @@ func TestPlanReSyncsOnAdapterRemoval(t *testing.T) {
 
 	var sawSync bool
 	for _, obj := range plan.GetToApply() {
-		if job, ok := obj.(*batchv1.Job); ok && job.Name == SubtreeSyncJobName(svc) {
+		if job, ok := obj.(*batchv1.Job); ok && job.Name == SubtreeSyncJobName(svc, testAdapterPVC, testAdapterPVCUID) {
 			sawSync = true
 		}
 	}
@@ -500,7 +576,7 @@ func TestPlanReSyncsOnAdapterRemoval(t *testing.T) {
 
 func TestBuildSubtreeSyncJobContract(t *testing.T) {
 	svc := serviceWithAdapters("lora-a", "lora-b")
-	job := BuildSubtreeSyncJob(svc, modelParent(testAdapterPVC), testAdapterPVC, nil)
+	job := BuildSubtreeSyncJob(svc, modelParent(testAdapterPVC), testAdapterPVC, testAdapterPVCUID, nil)
 	container := job.Spec.Template.Spec.Containers[0]
 
 	if container.Command[0] != "/adapter-subtree-sync.sh" {
@@ -529,28 +605,149 @@ func TestBuildSubtreeSyncJobContract(t *testing.T) {
 
 func TestStagingJobNameDeterministicAndScoped(t *testing.T) {
 	svc := serviceWithAdapters("lora-a")
-	n1 := StagingJobName(svc, "lora-a")
-	n2 := StagingJobName(svc, "lora-a")
+	n1 := StagingJobName(svc, "lora-a", testAdapterPVC, testAdapterPVCUID)
+	n2 := StagingJobName(svc, "lora-a", testAdapterPVC, testAdapterPVCUID)
 	if n1 != n2 {
 		t.Errorf("staging job name not deterministic: %q != %q", n1, n2)
 	}
-	if StagingJobName(svc, "lora-b") == n1 {
+	if StagingJobName(svc, "lora-b", testAdapterPVC, testAdapterPVCUID) == n1 {
 		t.Error("different adapters must yield different job names")
 	}
 
 	other := serviceWithAdapters("lora-a")
 	other.UID = types.UID("svc-uid-2")
-	if StagingJobName(other, "lora-a") == n1 {
+	if StagingJobName(other, "lora-a", testAdapterPVC, testAdapterPVCUID) == n1 {
 		t.Error("different service UIDs must yield different job names")
+	}
+	if StagingJobName(svc, "lora-a", "replacement-pvc", "replacement-uid") == n1 {
+		t.Error("different adapter-disk PVCs must yield different job names")
+	}
+}
+
+func TestStorageBindingChangesSyncGeneration(t *testing.T) {
+	svc := serviceWithAdapters("lora-a")
+
+	oldKey := desiredAdapterKey(svc, "old-pvc", testOldAdapterPVCUID)
+	newKey := desiredAdapterKey(svc, "new-pvc", testNewAdapterPVCUID)
+	if oldKey == newKey {
+		t.Fatal("different adapter-disk PVCs must produce different desired keys")
+	}
+	if SubtreeSyncJobName(svc, "old-pvc", testOldAdapterPVCUID) ==
+		SubtreeSyncJobName(svc, "new-pvc", testNewAdapterPVCUID) {
+		t.Error("different adapter-disk PVCs must produce different subtree-sync jobs")
+	}
+	if StagingJobName(svc, "lora-a", "old-pvc", testOldAdapterPVCUID) ==
+		StagingJobName(svc, "lora-a", "new-pvc", testNewAdapterPVCUID) {
+		t.Error("different adapter-disk PVCs must produce different staging jobs")
+	}
+
+	svc.Status.AdapterSubtreeSyncKey = oldKey
+	svc.Status.AdapterDiskPersistentVolumeClaim = "old-pvc"
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = testOldAdapterPVCUID
+	deps := depsWith(modelParent("new-pvc"), map[string]*aimv1alpha1.AIMArtifact{
+		"lora-a": logicalAdapterArtifact("org/base"),
+	})
+	deps.AdapterDiskPVCUID = testNewAdapterPVCUID
+	st := Compose(svc, deps)
+	if st.DesiredKey != newKey {
+		t.Errorf("DesiredKey = %q, want new binding key %q", st.DesiredKey, newKey)
+	}
+	if st.SyncedKey != oldKey {
+		t.Errorf("SyncedKey = %q, want old binding key %q", st.SyncedKey, oldKey)
+	}
+	if st.DesiredKey == st.SyncedKey {
+		t.Error("a replacement PVC must require subtree synchronization")
+	}
+	if st.SubtreeReady {
+		t.Error("a sync from the old PVC must not mark the replacement PVC subtree ready")
+	}
+	if !PreserveExistingMount(svc, st) {
+		t.Error("the existing mount must be preserved until the replacement subtree sync succeeds")
+	}
+}
+
+func TestSameNamePVCRecreationChangesStorageGeneration(t *testing.T) {
+	svc := serviceWithAdapters("lora-a")
+
+	oldKey := desiredAdapterKey(svc, testAdapterPVC, testOldAdapterPVCUID)
+	newKey := desiredAdapterKey(svc, testAdapterPVC, testNewAdapterPVCUID)
+	if oldKey == newKey {
+		t.Fatal("same-name PVC recreation must change the desired key")
+	}
+	if SubtreeSyncJobName(svc, testAdapterPVC, testOldAdapterPVCUID) ==
+		SubtreeSyncJobName(svc, testAdapterPVC, testNewAdapterPVCUID) {
+		t.Error("same-name PVC recreation must produce a new subtree-sync job")
+	}
+	if StagingJobName(svc, "lora-a", testAdapterPVC, testOldAdapterPVCUID) ==
+		StagingJobName(svc, "lora-a", testAdapterPVC, testNewAdapterPVCUID) {
+		t.Error("same-name PVC recreation must produce a new staging job")
+	}
+
+	svc.Status.AdapterSubtreeSyncKey = oldKey
+	svc.Status.AdapterDiskPersistentVolumeClaim = testAdapterPVC
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = testOldAdapterPVCUID
+	deps := depsWith(modelParent(testAdapterPVC), map[string]*aimv1alpha1.AIMArtifact{
+		"lora-a": logicalAdapterArtifact("org/base"),
+	})
+	deps.AdapterDiskPVCUID = testNewAdapterPVCUID
+
+	st := Compose(svc, deps)
+	if !st.StorageBindingChanged || st.SubtreeReady {
+		t.Errorf("replacement state = changed:%v ready:%v, want changed and not ready",
+			st.StorageBindingChanged, st.SubtreeReady)
+	}
+}
+
+func TestFetchSelectsJobsForFreshStorageBinding(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register core API: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register batch API: %v", err)
+	}
+	if err := aimv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register AIM API: %v", err)
+	}
+
+	svc := serviceWithAdapters("lora-a")
+	svc.Status.AdapterDiskPersistentVolumeClaim = "old-pvc"
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = testOldAdapterPVCUID
+	parent := modelParent("new-pvc")
+	adapter := logicalAdapterArtifact("org/base")
+	newPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-pvc", Namespace: "default", UID: types.UID(testNewAdapterPVCUID)},
+	}
+	oldStage := succeededJob(StagingJobName(svc, adapter.Name, "old-pvc", testOldAdapterPVCUID))
+	newStage := succeededJob(StagingJobName(svc, adapter.Name, "new-pvc", testNewAdapterPVCUID))
+	oldSync := succeededJob(SubtreeSyncJobName(svc, "old-pvc", testOldAdapterPVCUID))
+	newSync := succeededJob(SubtreeSyncJobName(svc, "new-pvc", testNewAdapterPVCUID))
+
+	c := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(parent, adapter, newPVC, oldStage, newStage, oldSync, newSync).
+		Build()
+
+	deps := Fetch(context.Background(), c, svc, parent.Name)
+	stage := deps.StagingJobs[adapter.Name]
+	if !stage.OK() || stage.Value == nil || stage.Value.Name != newStage.Name {
+		t.Fatalf("Fetch selected staging Job %+v, want %s", stage.Value, newStage.Name)
+	}
+	if !deps.SubtreeSyncJob.OK() || deps.SubtreeSyncJob.Value == nil ||
+		deps.SubtreeSyncJob.Value.Name != newSync.Name {
+		t.Fatalf("Fetch selected subtree-sync Job %+v, want %s", deps.SubtreeSyncJob.Value, newSync.Name)
 	}
 }
 
 func TestBuildStagingJobContract(t *testing.T) {
 	svc := serviceWithAdapters("lora-a")
 	artifact := adapterArtifact("lora-a", "base")
-	ad := Observation{Name: "lora-a", AdapterPath: "lora-a", ModelID: "org/base", SourceURI: "hf://org/lora-a"}
+	ad := Observation{
+		Name: "lora-a", AdapterPath: "lora-a", ModelID: "org/adapter",
+		BaseModelID: "org/base", SourceURI: "hf://org/lora-a",
+	}
 
-	job := BuildStagingJob(svc, artifact, testAdapterPVC, ad, nil)
+	job := BuildStagingJob(svc, artifact, testAdapterPVC, testAdapterPVCUID, ad, nil)
 	container := job.Spec.Template.Spec.Containers[0]
 
 	if container.Command[0] != "/adapter-stage.sh" {
@@ -568,6 +765,9 @@ func TestBuildStagingJobContract(t *testing.T) {
 	}
 	if env["ADAPTER_PATH"] != "lora-a" {
 		t.Errorf("ADAPTER_PATH = %q, want lora-a", env["ADAPTER_PATH"])
+	}
+	if env["ADAPTER_BASE_MODEL_ID"] != "org/base" {
+		t.Errorf("ADAPTER_BASE_MODEL_ID = %q, want org/base", env["ADAPTER_BASE_MODEL_ID"])
 	}
 	if env["ADAPTER_PVC_ROOT"] != constants.AIMAdapterPVCRoot {
 		t.Errorf("ADAPTER_PVC_ROOT = %q, want %q", env["ADAPTER_PVC_ROOT"], constants.AIMAdapterPVCRoot)
@@ -631,7 +831,7 @@ func TestBuildStagingJobUsesTypedAdapterS3Connection(t *testing.T) {
 		},
 	}
 
-	job := BuildStagingJob(svc, artifact, testAdapterPVC, ad, config)
+	job := BuildStagingJob(svc, artifact, testAdapterPVC, testAdapterPVCUID, ad, config)
 	container := job.Spec.Template.Spec.Containers[0]
 	env := envMap(container.Env)
 
@@ -841,7 +1041,7 @@ func TestComposeAdapterModeEmptyProvisionsSubtree(t *testing.T) {
 	Plan(&plan, svc, deps, st, nil)
 	sawSync := false
 	for _, obj := range plan.GetToApply() {
-		if job, ok := obj.(*batchv1.Job); ok && job.Name == SubtreeSyncJobName(svc) {
+		if job, ok := obj.(*batchv1.Job); ok && job.Name == SubtreeSyncJobName(svc, testAdapterPVC, testAdapterPVCUID) {
 			sawSync = true
 		}
 	}
@@ -870,7 +1070,10 @@ func TestComposeMarksRemovedAdapterDeleting(t *testing.T) {
 		statusAdapter("lora-b"),
 	}
 	// Status key still reflects the two-adapter set => prune not yet confirmed.
-	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(serviceWithAdapters("lora-a", "lora-b"))
+	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(
+		serviceWithAdapters("lora-a", "lora-b"), testAdapterPVC, testAdapterPVCUID)
+	svc.Status.AdapterDiskPersistentVolumeClaim = testAdapterPVC
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = testAdapterPVCUID
 	deps := depsWith(modelParent(testAdapterPVC), map[string]*aimv1alpha1.AIMArtifact{
 		"lora-a": adapterArtifact("lora-a", "base"),
 	})
@@ -902,7 +1105,10 @@ func TestComposeDropsRemovedAdapterAfterPrune(t *testing.T) {
 		statusAdapter("lora-a"),
 		statusAdapter("lora-b"),
 	}
-	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(serviceWithAdapters("lora-a", "lora-b"))
+	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(
+		serviceWithAdapters("lora-a", "lora-b"), testAdapterPVC, testAdapterPVCUID)
+	svc.Status.AdapterDiskPersistentVolumeClaim = testAdapterPVC
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = testAdapterPVCUID
 	deps := withSyncedSubtree(
 		depsWith(modelParent(testAdapterPVC), map[string]*aimv1alpha1.AIMArtifact{
 			"lora-a": adapterArtifact("lora-a", "base"),
@@ -923,8 +1129,8 @@ func TestComposeDropsRemovedAdapterAfterPrune(t *testing.T) {
 	if len(status.Adapters) != 1 || status.Adapters[0].Name != "lora-a" {
 		t.Errorf("status must list only lora-a after prune, got %+v", status.Adapters)
 	}
-	if status.AdapterSubtreeSyncKey != desiredAdapterKey(svc) {
-		t.Errorf("synced key = %q, want one-adapter key %q", status.AdapterSubtreeSyncKey, desiredAdapterKey(svc))
+	if status.AdapterSubtreeSyncKey != desiredAdapterKey(svc, testAdapterPVC, testAdapterPVCUID) {
+		t.Errorf("synced key = %q, want one-adapter key %q", status.AdapterSubtreeSyncKey, desiredAdapterKey(svc, testAdapterPVC, testAdapterPVCUID))
 	}
 }
 
@@ -936,7 +1142,10 @@ func TestComposeDropToZeroDeletingThenPruned(t *testing.T) {
 	svc.Status.Adapters = []aimv1alpha1.AIMServiceAdapterStatus{
 		statusAdapter("lora-a"),
 	}
-	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(serviceWithAdapters("lora-a"))
+	svc.Status.AdapterSubtreeSyncKey = desiredAdapterKey(
+		serviceWithAdapters("lora-a"), testAdapterPVC, testAdapterPVCUID)
+	svc.Status.AdapterDiskPersistentVolumeClaim = testAdapterPVC
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = testAdapterPVCUID
 	deps := depsWith(modelParent(testAdapterPVC), nil)
 
 	// Before prune: lora-a shown Deleting; an empty-set prune sync is planned and
@@ -954,9 +1163,9 @@ func TestComposeDropToZeroDeletingThenPruned(t *testing.T) {
 			continue
 		}
 		switch job.Name {
-		case SubtreeSyncJobName(svc):
+		case SubtreeSyncJobName(svc, testAdapterPVC, testAdapterPVCUID):
 			sawSync = true
-		case StagingJobName(svc, "lora-a"):
+		case StagingJobName(svc, "lora-a", testAdapterPVC, testAdapterPVCUID):
 			sawStage = true
 		}
 	}
@@ -984,7 +1193,7 @@ func TestComposeDropToZeroDeletingThenPruned(t *testing.T) {
 	if len(status.Adapters) != 0 {
 		t.Errorf("status adapters must be empty after drop-to-zero prune, got %+v", status.Adapters)
 	}
-	emptyKey := desiredAdapterKey(svc)
+	emptyKey := desiredAdapterKey(svc, testAdapterPVC, testAdapterPVCUID)
 	if emptyKey == "" {
 		t.Fatal("empty-set key must be non-empty to disambiguate from never-synced")
 	}
@@ -999,6 +1208,7 @@ func TestComposeDropToZeroDeletingThenPruned(t *testing.T) {
 func TestComposeStickyAdapterDiskPVC(t *testing.T) {
 	svc := serviceWithAdapters("lora-a")
 	svc.Status.AdapterDiskPersistentVolumeClaim = "sticky-pvc"
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = "sticky-uid"
 	deps := depsWith(modelParent(""), map[string]*aimv1alpha1.AIMArtifact{
 		"lora-a": adapterArtifact("lora-a", "base"),
 	})
@@ -1007,12 +1217,16 @@ func TestComposeStickyAdapterDiskPVC(t *testing.T) {
 	if st.AdapterDiskPVC != "sticky-pvc" {
 		t.Errorf("AdapterDiskPVC = %q, want sticky fallback sticky-pvc", st.AdapterDiskPVC)
 	}
+	if st.AdapterDiskPVCUID != "sticky-uid" {
+		t.Errorf("AdapterDiskPVCUID = %q, want sticky fallback sticky-uid", st.AdapterDiskPVCUID)
+	}
 }
 
 // The freshly resolved parent PVC always wins over the sticky status value.
 func TestComposeFreshPVCWinsOverSticky(t *testing.T) {
 	svc := serviceWithAdapters("lora-a")
 	svc.Status.AdapterDiskPersistentVolumeClaim = "stale-pvc"
+	svc.Status.AdapterDiskPersistentVolumeClaimUID = "stale-uid"
 	deps := depsWith(modelParent("fresh-pvc"), map[string]*aimv1alpha1.AIMArtifact{
 		"lora-a": adapterArtifact("lora-a", "base"),
 	})
@@ -1023,19 +1237,31 @@ func TestComposeFreshPVCWinsOverSticky(t *testing.T) {
 	}
 }
 
-// DecorateStatus persists the resolved PVC and never clears a previously stored
-// value on a transient gap (the sticky source for the fallback above).
+// DecorateStatus advances the persisted binding only after its subtree sync
+// succeeds and never clears the previous mountable generation on a transient gap.
 func TestDecorateStatusPersistsAdapterDiskPVC(t *testing.T) {
 	status := &aimv1alpha1.AIMServiceStatus{}
-	DecorateStatus(status, State{AdapterDiskPVC: "pvc-1"})
+	DecorateStatus(status, State{
+		AdapterDiskPVC:       "pvc-1",
+		AdapterDiskPVCUID:    "uid-1",
+		DesiredKey:           "key-1",
+		CurrentSyncSucceeded: true,
+	})
 	if status.AdapterDiskPersistentVolumeClaim != "pvc-1" {
 		t.Errorf("AdapterDiskPersistentVolumeClaim = %q, want pvc-1", status.AdapterDiskPersistentVolumeClaim)
 	}
+	if status.AdapterDiskPersistentVolumeClaimUID != "uid-1" {
+		t.Errorf("AdapterDiskPersistentVolumeClaimUID = %q, want uid-1",
+			status.AdapterDiskPersistentVolumeClaimUID)
+	}
 
-	// An empty resolution must not clear the previously persisted value.
-	DecorateStatus(status, State{})
+	// An unsynchronized replacement must not advance or clear the binding.
+	DecorateStatus(status, State{AdapterDiskPVC: "pvc-2", AdapterDiskPVCUID: "uid-2"})
 	if status.AdapterDiskPersistentVolumeClaim != "pvc-1" {
 		t.Errorf("sticky PVC must not be cleared on an empty cycle, got %q", status.AdapterDiskPersistentVolumeClaim)
+	}
+	if status.AdapterDiskPersistentVolumeClaimUID != "uid-1" {
+		t.Errorf("sticky PVC UID must remain uid-1, got %q", status.AdapterDiskPersistentVolumeClaimUID)
 	}
 }
 
@@ -1047,10 +1273,16 @@ func TestPreserveExistingMount(t *testing.T) {
 		mode     aimv1alpha1.AIMAdapterMode
 		adapters []string
 		pvc      string
+		pvcUID   string
+		changed  bool
+		synced   bool
 		want     bool
 	}{
 		{name: "enabled but PVC unresolved", adapters: []string{"a"}, pvc: "", want: true},
-		{name: "enabled and PVC resolved", adapters: []string{"a"}, pvc: "pvc", want: false},
+		{name: "enabled but PVC UID unresolved", adapters: []string{"a"}, pvc: "pvc", want: true},
+		{name: "enabled and PVC resolved", adapters: []string{"a"}, pvc: "pvc", pvcUID: "uid", want: false},
+		{name: "replacement sync pending", adapters: []string{"a"}, pvc: "pvc", pvcUID: "new", changed: true, want: true},
+		{name: "replacement sync succeeded", adapters: []string{"a"}, pvc: "pvc", pvcUID: "new", changed: true, synced: true, want: false},
 		{name: "not enabled (static, no adapters)", adapters: nil, pvc: "", want: false},
 		{name: "dynamic at zero adapters, PVC unresolved", mode: aimv1alpha1.AdapterModeDynamic, adapters: nil, pvc: "", want: true},
 	}
@@ -1060,7 +1292,13 @@ func TestPreserveExistingMount(t *testing.T) {
 			if tt.mode != "" {
 				svc.Spec.AdapterMode = tt.mode
 			}
-			if got := PreserveExistingMount(svc, State{AdapterDiskPVC: tt.pvc}); got != tt.want {
+			state := State{
+				AdapterDiskPVC:        tt.pvc,
+				AdapterDiskPVCUID:     tt.pvcUID,
+				StorageBindingChanged: tt.changed,
+				CurrentSyncSucceeded:  tt.synced,
+			}
+			if got := PreserveExistingMount(svc, state); got != tt.want {
 				t.Errorf("PreserveExistingMount() = %v, want %v", got, tt.want)
 			}
 		})

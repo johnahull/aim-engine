@@ -8,10 +8,13 @@
 # Validates that the adapter staging Job performs a real atomic promote on a
 # real RWX filesystem and that the live subtree is isolated under the service's
 # subPath (service UID):
-# 1. Bootstrap base model (adapterDisk on longhorn) + adapter, frozen profile.
+# 1. Bootstrap base model (adapterDisk on longhorn) + logical adapter, frozen profile.
 # 2. Service stages the adapter -> Downloaded.
 # 3. A verifier Pod mounts the adapter disk RW and asserts the promoted dir
 #    exists at <service-uid>/<adapter>/ and the .staging area is cleaned up.
+# 4. Delete and recreate the base artifact with the same Kubernetes name.
+# 5. Verify the logical adapter survives and the service restages it onto the
+#    replacement base's new UID-derived adapter PVC.
 #
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
@@ -146,7 +149,14 @@ spec:
                 -o jsonpath='{.metadata.uid}')
               ADAPTER_PVC=$(kubectl get aimartifact -n "$NAMESPACE" lh-adapters-base \
                 -o jsonpath='{.status.adapterPersistentVolumeClaim}')
-              echo "service uid: $SVC_UID  adapter pvc: $ADAPTER_PVC"
+              SYNC_KEY=$(kubectl get aimservice -n "$NAMESPACE" lh-adapters-service \
+                -o jsonpath='{.status.adapterSubtreeSyncKey}')
+              echo "service uid: $SVC_UID  adapter pvc: $ADAPTER_PVC  sync key: $SYNC_KEY"
+
+              kubectl create configmap lh-adapter-binding-before-recreate -n "$NAMESPACE" \
+                --from-literal=adapterPVC="$ADAPTER_PVC" \
+                --from-literal=syncKey="$SYNC_KEY" \
+                --dry-run=client -o yaml | kubectl apply -f -
 
               cat <<EOF | kubectl apply -n "$NAMESPACE" -f -
               apiVersion: v1
@@ -187,3 +197,134 @@ spec:
               apiVersion: v1
               kind: Pod
               name: lh-adapter-verifier
+
+    - name: Delete and recreate the compatible base artifact
+      try:
+        - script:
+            timeout: 240s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              kubectl delete aimartifact -n "$NAMESPACE" lh-adapters-base --wait=true
+
+              # The logical adapter is independent of the concrete base object's
+              # lifecycle and must survive its deletion.
+              kubectl get aimartifact -n "$NAMESPACE" lh-adapters-lora
+
+              kubectl apply -n "$NAMESPACE" -f base-artifact.yaml
+              kubectl wait --for=jsonpath='{.status.status}'=Ready \
+                aimartifact/lh-adapters-base -n "$NAMESPACE" --timeout=180s
+
+              NEW_CACHE_PVC=$(kubectl get aimartifact -n "$NAMESPACE" lh-adapters-base \
+                -o jsonpath='{.status.persistentVolumeClaim}')
+              PC_NAME=$(kubectl get aimprofilecache -n "$NAMESPACE" \
+                -l aim.eai.amd.com/service=lh-adapters-service \
+                -o jsonpath='{.items[0].metadata.name}')
+
+              # Keep the frozen profile-cache fixture aligned with the
+              # replacement model-cache PVC. Its artifact name remains stable,
+              # while the service resolves the new adapter PVC from AIMArtifact.
+              kubectl patch aimprofilecache "$PC_NAME" -n "$NAMESPACE" \
+                --type=merge --subresource=status \
+                -p "{
+                  \"status\": {
+                    \"artifacts\": {
+                      \"lh-adapters-base\": {
+                        \"name\": \"lh-adapters-base\",
+                        \"model\": \"test-org/base-weights\",
+                        \"status\": \"Ready\",
+                        \"persistentVolumeClaim\": \"$NEW_CACHE_PVC\",
+                        \"mountPoint\": \"/workspace/cache/test-org/base-weights\"
+                      }
+                    }
+                  }
+                }"
+
+    - name: Assert the replacement binding triggers restaging
+      try:
+        - script:
+            timeout: 240s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              OLD_PVC=$(kubectl get configmap lh-adapter-binding-before-recreate -n "$NAMESPACE" \
+                -o jsonpath='{.data.adapterPVC}')
+              OLD_KEY=$(kubectl get configmap lh-adapter-binding-before-recreate -n "$NAMESPACE" \
+                -o jsonpath='{.data.syncKey}')
+
+              for i in $(seq 1 90); do
+                NEW_PVC=$(kubectl get aimartifact -n "$NAMESPACE" lh-adapters-base \
+                  -o jsonpath='{.status.adapterPersistentVolumeClaim}')
+                SERVICE_PVC=$(kubectl get aimservice -n "$NAMESPACE" lh-adapters-service \
+                  -o jsonpath='{.status.adapterDiskPersistentVolumeClaim}')
+                NEW_KEY=$(kubectl get aimservice -n "$NAMESPACE" lh-adapters-service \
+                  -o jsonpath='{.status.adapterSubtreeSyncKey}')
+                STATE=$(kubectl get aimservice -n "$NAMESPACE" lh-adapters-service \
+                  -o jsonpath="{.status.adapters[?(@.name=='lh-adapters-lora')].state}")
+
+                if [ -n "$NEW_PVC" ] && [ "$NEW_PVC" != "$OLD_PVC" ] \
+                    && [ "$SERVICE_PVC" = "$NEW_PVC" ] \
+                    && [ -n "$NEW_KEY" ] && [ "$NEW_KEY" != "$OLD_KEY" ] \
+                    && [ "$STATE" = "Downloaded" ]; then
+                  echo "restaged: pvc $OLD_PVC -> $NEW_PVC, key $OLD_KEY -> $NEW_KEY"
+                  exit 0
+                fi
+                sleep 2
+              done
+
+              echo "ERROR: service did not converge onto replacement adapter PVC"
+              kubectl get aimartifact,aimservice,job -n "$NAMESPACE" -o wide
+              exit 1
+
+    - name: Verify adapter bytes exist on the replacement RWX disk
+      try:
+        - script:
+            timeout: 200s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              SVC_UID=$(kubectl get aimservice -n "$NAMESPACE" lh-adapters-service \
+                -o jsonpath='{.metadata.uid}')
+              ADAPTER_PVC=$(kubectl get aimartifact -n "$NAMESPACE" lh-adapters-base \
+                -o jsonpath='{.status.adapterPersistentVolumeClaim}')
+
+              cat <<EOF | kubectl apply -n "$NAMESPACE" -f -
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: lh-adapter-verifier-recreated
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: verify
+                    image: busybox:1.36
+                    command: ["sh", "-c"]
+                    args:
+                      - |
+                        set -eu
+                        test -f "/disk/${SVC_UID}/lh-adapters-lora/adapter_config.json"
+                        echo "OK: adapter restaged on replacement disk"
+                    volumeMounts:
+                      - name: disk
+                        mountPath: /disk
+                volumes:
+                  - name: disk
+                    persistentVolumeClaim:
+                      claimName: ${ADAPTER_PVC}
+              EOF
+
+              kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
+                pod/lh-adapter-verifier-recreated -n "$NAMESPACE" --timeout=120s
+              kubectl logs -n "$NAMESPACE" lh-adapter-verifier-recreated
+      finally:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Pod
+              name: lh-adapter-verifier-recreated

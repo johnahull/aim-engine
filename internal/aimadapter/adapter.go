@@ -38,6 +38,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,6 +75,7 @@ type Observation struct {
 	SourceURI   string
 	AdapterPath string
 	ModelID     string
+	BaseModelID string
 	Rank        *int32
 	State       aimv1alpha1.AIMAdapterState
 	LastError   string
@@ -91,6 +93,8 @@ type Dependencies struct {
 	StagingJobs           map[string]controllerutils.FetchResult[*batchv1.Job]
 	ParentArtifact        *controllerutils.FetchResult[*aimv1alpha1.AIMArtifact]
 	SubtreeSyncJob        controllerutils.FetchResult[*batchv1.Job]
+	AdapterDiskPVC        string
+	AdapterDiskPVCUID     string
 
 	// ProfileSupportsAdapters reports whether the resolved profile advertises the
 	// LoRA feature. nil means unknown / not gated (e.g. the v1alpha1 pipeline has
@@ -114,12 +118,15 @@ type Dependencies struct {
 // adapters stage asynchronously after the ISVC is up; the runtime picks them up
 // as they land. AllStaged is informational only.
 type State struct {
-	Adapters       []Observation
-	AdapterDiskPVC string
+	Adapters              []Observation
+	AdapterDiskPVC        string
+	AdapterDiskPVCUID     string
+	StorageBindingChanged bool
 
-	// DesiredKey is a hash of the sorted declared adapter set. It is recorded on
-	// status once the subtree-sync Job has reconciled that set, so the controller
-	// can detect add/remove drift and re-run the sync without re-run loops.
+	// DesiredKey is a hash of the adapter-disk PVC and sorted declared adapter
+	// set. It is recorded on status once the subtree-sync Job has reconciled that
+	// binding, so the controller detects both add/remove drift and storage
+	// replacement without re-run loops.
 	DesiredKey string
 	// SyncedKey mirrors status.AdapterSubtreeSyncKey (the last set the sync Job
 	// reconciled). NeedsSync is DesiredKey != SyncedKey.
@@ -164,15 +171,16 @@ func keepAdapterPaths(service *aimv1alpha1.AIMService) []string {
 	return paths
 }
 
-// desiredAdapterKey hashes the sorted declared adapter set. The empty set hashes
-// to a stable, non-empty value (the hash of "") rather than "" so that a synced
-// empty subtree (key == hash of empty) is distinguishable from a never-synced
-// service (status key == ""). That distinction is what lets an adapter-mode
-// service with zero adapters provision and then keep its subtree without the
-// sync Job re-running forever.
-func desiredAdapterKey(service *aimv1alpha1.AIMService) string {
+// desiredAdapterKey hashes the resolved adapter-disk PVC identity and sorted
+// declared adapter set. The PVC UID makes the key a true storage generation:
+// both a new UID-derived claim name and a same-name PVC recreation force a
+// fresh subtree synchronization. The empty set still hashes to a stable,
+// non-empty value so a synced empty subtree remains distinguishable from a
+// never-synced service.
+func desiredAdapterKey(service *aimv1alpha1.AIMService, adapterDiskPVC, adapterDiskPVCUID string) string {
 	paths := keepAdapterPaths(service)
-	sum := sha256.Sum256([]byte(strings.Join(paths, ",")))
+	// NUL separates fields unambiguously because Kubernetes names cannot contain it.
+	sum := sha256.Sum256([]byte(adapterDiskPVC + "\x00" + adapterDiskPVCUID + "\x00" + strings.Join(paths, ",")))
 	return hex.EncodeToString(sum[:])[:12]
 }
 
@@ -194,10 +202,13 @@ func IsActive(service *aimv1alpha1.AIMService) bool {
 	return service.Spec.AdaptersEnabled() || len(service.Status.Adapters) > 0
 }
 
-// Fetch loads each declared adapter artifact, its existing staging Job, and the
-// resolved parent model artifact. parentName is resolved by the caller from its
-// pipeline-specific cache (profile cache for v1alpha2, template cache for
-// v1alpha1) and may be empty when the base model is not yet resolvable.
+// Fetch loads the resolved parent model artifact, then each declared adapter and
+// the Jobs belonging to the current storage binding. parentName is resolved by
+// the caller from its pipeline-specific cache (profile cache for v1alpha2,
+// template cache for v1alpha1) and may be empty when the base model is not yet
+// resolvable. A transient resolution gap uses the PVC persisted on service
+// status so the controller continues observing the previous binding; a newly
+// resolved PVC selects a fresh generation of staging and subtree-sync Jobs.
 func Fetch(
 	ctx context.Context,
 	c client.Client,
@@ -209,6 +220,32 @@ func Fetch(
 		AdapterRuntimeConfigs: make(map[string]controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon], len(service.Spec.Adapters)),
 		StagingJobs:           make(map[string]controllerutils.FetchResult[*batchv1.Job], len(service.Spec.Adapters)),
 	}
+
+	adapterDiskPVC := service.Status.AdapterDiskPersistentVolumeClaim
+	adapterDiskPVCUID := service.Status.AdapterDiskPersistentVolumeClaimUID
+	if parentName != "" {
+		pf := controllerutils.Fetch(ctx, c,
+			client.ObjectKey{Namespace: service.Namespace, Name: parentName},
+			&aimv1alpha1.AIMArtifact{})
+		deps.ParentArtifact = &pf
+		if pf.OK() && pf.Value != nil && pf.Value.Status.AdapterPersistentVolumeClaim != "" {
+			adapterDiskPVC = pf.Value.Status.AdapterPersistentVolumeClaim
+			if adapterDiskPVC != service.Status.AdapterDiskPersistentVolumeClaim {
+				adapterDiskPVCUID = ""
+			}
+		}
+	}
+
+	if adapterDiskPVC != "" {
+		pvcFetch := controllerutils.Fetch(ctx, c,
+			client.ObjectKey{Namespace: service.Namespace, Name: adapterDiskPVC},
+			&corev1.PersistentVolumeClaim{})
+		if pvcFetch.OK() && pvcFetch.Value != nil {
+			adapterDiskPVCUID = string(pvcFetch.Value.UID)
+		}
+	}
+	deps.AdapterDiskPVC = adapterDiskPVC
+	deps.AdapterDiskPVCUID = adapterDiskPVCUID
 
 	for i := range service.Spec.Adapters {
 		ref := service.Spec.Adapters[i]
@@ -227,7 +264,7 @@ func Fetch(
 			)
 		}
 
-		jobName := StagingJobName(service, ref.Name)
+		jobName := StagingJobName(service, ref.Name, adapterDiskPVC, adapterDiskPVCUID)
 		jf := controllerutils.Fetch(ctx, c,
 			client.ObjectKey{Namespace: service.Namespace, Name: jobName},
 			&batchv1.Job{})
@@ -235,15 +272,8 @@ func Fetch(
 	}
 
 	deps.SubtreeSyncJob = controllerutils.Fetch(ctx, c,
-		client.ObjectKey{Namespace: service.Namespace, Name: SubtreeSyncJobName(service)},
+		client.ObjectKey{Namespace: service.Namespace, Name: SubtreeSyncJobName(service, adapterDiskPVC, adapterDiskPVCUID)},
 		&batchv1.Job{})
-
-	if parentName != "" {
-		pf := controllerutils.Fetch(ctx, c,
-			client.ObjectKey{Namespace: service.Namespace, Name: parentName},
-			&aimv1alpha1.AIMArtifact{})
-		deps.ParentArtifact = &pf
-	}
 
 	return deps
 }
@@ -259,18 +289,22 @@ func Compose(service *aimv1alpha1.AIMService, deps Dependencies) State {
 		parent = deps.ParentArtifact.Value
 		if parent.Spec.Type == aimv1alpha1.ArtifactTypeAdapter {
 			st.ConfigErr = fmt.Errorf("resolved parent artifact %s is not a model artifact", parent.Name)
-		} else {
-			st.AdapterDiskPVC = parent.Status.AdapterPersistentVolumeClaim
 		}
 	}
 
-	// Sticky PVC: the parent's adapter-disk PVC name is stable once provisioned,
-	// so fall back to the value last persisted on status when a transient parent
-	// fetch/status gap leaves it empty. This keeps a blip from re-rendering the
-	// ISVC without its adapter mount (which would restart a running predictor).
+	// Fetch resolves the concrete PVC identity, falling back to the last
+	// successfully synchronized status binding during transient parent gaps.
+	st.AdapterDiskPVC = deps.AdapterDiskPVC
+	st.AdapterDiskPVCUID = deps.AdapterDiskPVCUID
 	if st.AdapterDiskPVC == "" {
 		st.AdapterDiskPVC = service.Status.AdapterDiskPersistentVolumeClaim
+		st.AdapterDiskPVCUID = service.Status.AdapterDiskPersistentVolumeClaimUID
+	} else if st.AdapterDiskPVC == service.Status.AdapterDiskPersistentVolumeClaim &&
+		st.AdapterDiskPVCUID == "" {
+		st.AdapterDiskPVCUID = service.Status.AdapterDiskPersistentVolumeClaimUID
 	}
+	st.StorageBindingChanged = st.AdapterDiskPVC != service.Status.AdapterDiskPersistentVolumeClaim ||
+		st.AdapterDiskPVCUID != service.Status.AdapterDiskPersistentVolumeClaimUID
 
 	// Gate on the runtime contract: the image only loads adapters when its profile
 	// advertises the LoRA feature, so reject up front when it's known-absent.
@@ -291,10 +325,11 @@ func Compose(service *aimv1alpha1.AIMService, deps Dependencies) State {
 	// sticky via the recorded SyncedKey so a later add/remove never tears down a
 	// running ISVC, with the current-cycle success used so the very first sync
 	// gates promptly.
-	st.DesiredKey = desiredAdapterKey(service)
+	st.DesiredKey = desiredAdapterKey(service, st.AdapterDiskPVC, st.AdapterDiskPVCUID)
 	st.SyncedKey = service.Status.AdapterSubtreeSyncKey
 	st.CurrentSyncSucceeded = subtreeSyncSucceeded(deps)
-	st.SubtreeReady = st.AdapterDiskPVC != "" && (st.SyncedKey != "" || st.CurrentSyncSucceeded)
+	st.SubtreeReady = st.AdapterDiskPVC != "" && st.AdapterDiskPVCUID != "" &&
+		((!st.StorageBindingChanged && st.SyncedKey != "") || st.CurrentSyncSucceeded)
 
 	// A removed adapter's bytes are gone once the sync Job for the current
 	// (reduced) set has reconciled the subtree — either it succeeded this cycle or
@@ -330,7 +365,8 @@ func Compose(service *aimv1alpha1.AIMService, deps Dependencies) State {
 	st.AllStaged = st.ConfigErr == nil && active > 0 && downloaded == active
 
 	// MountReady ("mountable"): config valid + disk PVC resolved + subtree present.
-	st.MountReady = st.ConfigErr == nil && st.AdapterDiskPVC != "" && st.SubtreeReady
+	st.MountReady = st.ConfigErr == nil && st.AdapterDiskPVC != "" &&
+		st.AdapterDiskPVCUID != "" && st.SubtreeReady
 
 	// Static mode must additionally wait for downloads (see Ready field doc).
 	if service.Spec.AdapterModeDynamic() {
@@ -366,9 +402,16 @@ func evalAdapter(ref aimv1alpha1.AIMServiceAdapterReference, deps Dependencies, 
 	if artifact.Spec.Type != aimv1alpha1.ArtifactTypeAdapter {
 		cfgErr = fmt.Errorf("artifact %s referenced as an adapter is type %q", ref.Name, artifact.Spec.Type)
 	}
-	if parent != nil && artifact.Spec.ParentArtifact != parent.Name {
-		cfgErr = fmt.Errorf("adapter %s.parentArtifact (%s) does not match the service's resolved base model %s",
-			ref.Name, artifact.Spec.ParentArtifact, parent.Name)
+	if parent != nil {
+		ad.BaseModelID = parent.Spec.ModelID
+		switch {
+		case artifact.Spec.ParentArtifact != "" && artifact.Spec.ParentArtifact != parent.Name:
+			cfgErr = fmt.Errorf("adapter %s.parentArtifact (%s) does not match the service's resolved base model %s",
+				ref.Name, artifact.Spec.ParentArtifact, parent.Name)
+		case len(artifact.Spec.CompatibleWith) > 0 && !slices.Contains(artifact.Spec.CompatibleWith, parent.Spec.ModelID):
+			cfgErr = fmt.Errorf("adapter %s is not compatible with the service's resolved base modelId %q",
+				ref.Name, parent.Spec.ModelID)
+		}
 	}
 
 	ad.SourceURI = effectiveAdapterSourceURI(artifact)
@@ -475,10 +518,10 @@ func Health(st State, numAdapters int) controllerutils.ComponentHealth {
 		return health
 	}
 
-	if st.AdapterDiskPVC == "" {
+	if st.AdapterDiskPVC == "" || st.AdapterDiskPVCUID == "" {
 		health.State = constants.AIMStatusProgressing
 		health.Reason = ReasonParentLacksDisk
-		health.Message = "Base model artifact has no adapter disk yet"
+		health.Message = "Base model artifact has no resolvable adapter disk yet"
 		return health
 	}
 
@@ -528,7 +571,7 @@ func Plan(
 	st State,
 	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
 ) {
-	if st.ConfigErr != nil || st.AdapterDiskPVC == "" {
+	if st.ConfigErr != nil || st.AdapterDiskPVC == "" || st.AdapterDiskPVCUID == "" {
 		return
 	}
 
@@ -541,7 +584,13 @@ func Plan(
 		if deps.ParentArtifact != nil && deps.ParentArtifact.OK() {
 			parent = deps.ParentArtifact.Value
 		}
-		planResult.Apply(BuildSubtreeSyncJob(service, parent, st.AdapterDiskPVC, runtimeConfig))
+		planResult.Apply(BuildSubtreeSyncJob(
+			service,
+			parent,
+			st.AdapterDiskPVC,
+			st.AdapterDiskPVCUID,
+			runtimeConfig,
+		))
 	}
 
 	// Stage adapters independently of the subtree gate (the staging Job creates
@@ -578,6 +627,7 @@ func Plan(
 			service,
 			af.Value,
 			st.AdapterDiskPVC,
+			st.AdapterDiskPVCUID,
 			ad,
 			stagingRuntimeConfig,
 		))
@@ -614,12 +664,12 @@ func jobPresent(jf controllerutils.FetchResult[*batchv1.Job]) bool {
 }
 
 // SubtreeSyncJobName returns the name of the per-service subtree-sync Job. The
-// name encodes the declared adapter set (DesiredKey) so that adding or removing
-// an adapter yields a fresh Job that reconciles the subtree to the new set.
-func SubtreeSyncJobName(service *aimv1alpha1.AIMService) string {
+// name encodes the declared adapter set and adapter-disk PVC so either an
+// adapter edit or a storage-binding change yields a fresh Job.
+func SubtreeSyncJobName(service *aimv1alpha1.AIMService, adapterDiskPVC, adapterDiskPVCUID string) string {
 	name, _ := utils.GenerateDerivedName(
 		[]string{service.Name, "subtree-sync"},
-		utils.WithHashSource(string(service.UID), desiredAdapterKey(service)),
+		utils.WithHashSource(string(service.UID), desiredAdapterKey(service, adapterDiskPVC, adapterDiskPVCUID)),
 	)
 	return name
 }
@@ -635,6 +685,7 @@ func BuildSubtreeSyncJob(
 	service *aimv1alpha1.AIMService,
 	parent *aimv1alpha1.AIMArtifact,
 	adapterDiskPVC string,
+	adapterDiskPVCUID string,
 	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
 ) *batchv1.Job {
 	image := aimartifact.ResolveDownloadImage(parent, runtimeConfig)
@@ -661,7 +712,7 @@ func BuildSubtreeSyncJob(
 			Kind:       "Job",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      SubtreeSyncJobName(service),
+			Name:      SubtreeSyncJobName(service, adapterDiskPVC, adapterDiskPVCUID),
 			Namespace: service.Namespace,
 			Labels:    labels,
 		},
@@ -711,11 +762,11 @@ func BuildSubtreeSyncJob(
 }
 
 // StagingJobName returns the deterministic staging Job name for a
-// (service, adapter) pair.
-func StagingJobName(service *aimv1alpha1.AIMService, adapterName string) string {
+// (service, adapter, adapter-disk PVC) binding.
+func StagingJobName(service *aimv1alpha1.AIMService, adapterName, adapterDiskPVC, adapterDiskPVCUID string) string {
 	name, _ := utils.GenerateDerivedName(
 		[]string{service.Name, adapterName, "stage"},
-		utils.WithHashSource(string(service.UID)),
+		utils.WithHashSource(string(service.UID), adapterDiskPVC, adapterDiskPVCUID),
 	)
 	return name
 }
@@ -726,6 +777,7 @@ func BuildStagingJob(
 	service *aimv1alpha1.AIMService,
 	artifact *aimv1alpha1.AIMArtifact,
 	adapterDiskPVC string,
+	adapterDiskPVCUID string,
 	ad Observation,
 	runtimeConfig *aimv1alpha1.AIMRuntimeConfigCommon,
 ) *batchv1.Job {
@@ -743,7 +795,7 @@ func BuildStagingJob(
 		{Name: "SERVICE_ID", Value: serviceID},
 		{Name: "ADAPTER_PATH", Value: ad.AdapterPath},
 		{Name: "JOB_ID", Value: jobID},
-		{Name: "ADAPTER_BASE_MODEL_ID", Value: ad.ModelID},
+		{Name: "ADAPTER_BASE_MODEL_ID", Value: ad.BaseModelID},
 		{Name: "ADAPTER_RANK", Value: fmt.Sprintf("%d", rank)},
 		// Non-root uid: HF/XET need a writable cache dir or XET fails with
 		// "Permission denied" on $HOME/.cache. Mirrors the model download Job.
@@ -789,7 +841,7 @@ func BuildStagingJob(
 			Kind:       "Job",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      StagingJobName(service, artifact.Name),
+			Name:      StagingJobName(service, artifact.Name, adapterDiskPVC, adapterDiskPVCUID),
 			Namespace: service.Namespace,
 			Labels:    labels,
 		},
@@ -915,13 +967,16 @@ func DynamicModeAllowed(nsLabels map[string]string) bool {
 	return nsLabels[constants.LabelAdapterDynamicAllowed] != "false"
 }
 
-// PreserveExistingMount reports whether the adapter wiring can't be resolved this
-// cycle: the service needs the adapter disk but its PVC is unknown (even after
-// the sticky fallback in Compose). When true and the ISVC already exists, callers
-// MUST skip re-applying it — re-rendering would drop the adapter mount and
-// restart a running predictor — and requeue to resolve next cycle.
+// PreserveExistingMount reports whether an existing InferenceService must keep
+// its current adapter mount this cycle. This is true while the PVC identity is
+// unresolved and while a replacement storage generation has not yet completed
+// its subtree synchronization. Callers skip re-applying the ISVC so it never
+// switches to a PVC before its subPath exists.
 func PreserveExistingMount(service *aimv1alpha1.AIMService, st State) bool {
-	return service.Spec.AdaptersEnabled() && st.AdapterDiskPVC == ""
+	return service.Spec.AdaptersEnabled() &&
+		(st.AdapterDiskPVC == "" ||
+			st.AdapterDiskPVCUID == "" ||
+			(st.StorageBindingChanged && !st.CurrentSyncSucceeded))
 }
 
 // DecorateStatus mirrors the disk-side adapter state onto the AIMService.
@@ -940,15 +995,12 @@ func DecorateStatus(status *aimv1alpha1.AIMServiceStatus, st State) {
 	}
 	status.Adapters = adapters
 
-	// Record the declared set once its subtree-sync Job succeeds, so the
-	// controller stops re-running the sync until the set changes again.
+	// Record the declared set and concrete PVC generation once its subtree-sync
+	// Job succeeds. Until then status continues to describe the mountable
+	// generation currently used by an existing InferenceService.
 	if st.CurrentSyncSucceeded {
 		status.AdapterSubtreeSyncKey = st.DesiredKey
-	}
-
-	// Persist the resolved adapter-disk PVC so it survives a transient parent
-	// resolution gap (see the sticky fallback in Compose). Never cleared once set.
-	if st.AdapterDiskPVC != "" {
 		status.AdapterDiskPersistentVolumeClaim = st.AdapterDiskPVC
+		status.AdapterDiskPersistentVolumeClaimUID = st.AdapterDiskPVCUID
 	}
 }

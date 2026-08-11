@@ -615,22 +615,27 @@ type AIMServiceStatus struct {
 	// +listMapKey=name
 	Adapters []AIMServiceAdapterStatus `json:"adapters,omitempty"`
 
-	// AdapterSubtreeSyncKey records the declared adapter set most recently
-	// reconciled onto the service's adapter subtree by the subtree-sync Job
-	// (a hash of the sorted spec.adapters names). The controller re-runs the
-	// sync Job — which creates the subtree and prunes adapter directories no
-	// longer declared — whenever this drifts from the current desired set, so
-	// editing spec.adapters reclaims removed adapters without re-run loops.
+	// AdapterSubtreeSyncKey records the adapter-disk PVC generation and declared
+	// adapter set most recently reconciled onto the service's adapter subtree by
+	// the subtree-sync Job. The controller re-runs the sync Job whenever the
+	// adapter set or storage binding changes. This both reclaims removed adapters
+	// and provisions a fresh subtree after a PVC or base artifact is recreated.
 	// +optional
 	AdapterSubtreeSyncKey string `json:"adapterSubtreeSyncKey,omitempty"`
 
-	// AdapterDiskPersistentVolumeClaim is the resolved shared adapter-disk PVC
-	// (from the base model artifact's status). It is recorded here once resolved
-	// and reused when a transient parent-resolution gap would otherwise leave it
-	// empty, so a blip never re-renders the InferenceService without its adapter
-	// mount and restarts a running predictor. Never cleared once set.
+	// AdapterDiskPersistentVolumeClaim is the shared adapter-disk PVC whose
+	// service subtree was most recently synchronized successfully. Together with
+	// AdapterDiskPersistentVolumeClaimUID it identifies the currently mountable
+	// storage binding and is reused through transient parent-resolution gaps.
 	// +optional
 	AdapterDiskPersistentVolumeClaim string `json:"adapterDiskPersistentVolumeClaim,omitempty"`
+
+	// AdapterDiskPersistentVolumeClaimUID is the Kubernetes UID of
+	// AdapterDiskPersistentVolumeClaim. A same-name PVC recreation receives a new
+	// UID, forcing the controller to provision and stage the service subtree on
+	// the replacement storage before switching the InferenceService mount.
+	// +optional
+	AdapterDiskPersistentVolumeClaimUID string `json:"adapterDiskPersistentVolumeClaimUid,omitempty"`
 }
 
 // AIMServiceCacheStatus captures cache-related status for an AIMService.

@@ -807,10 +807,9 @@ func (r *ProfileServiceReconciler) PlanResources(
 	if isvc := buildInferenceServiceFromProfile(service, obs); isvc != nil {
 		switch {
 		case aimadapter.PreserveExistingMount(service, obs.adapterState) && isvcExists:
-			// Preserve-on-unknown: the adapter disk PVC didn't resolve this cycle.
-			// Re-applying would drop the adapter mount and restart the running
-			// predictor, so leave the existing ISVC untouched and retry.
-			logger.V(1).Info("Adapter disk PVC unresolved; preserving running ISVC adapter wiring")
+			// Preserve the current mount while the next PVC generation is unknown
+			// or its service subtree has not finished synchronizing.
+			logger.V(1).Info("Adapter disk binding not mountable yet; preserving running ISVC adapter wiring")
 			if planResult.RequeueAfter == 0 {
 				planResult.RequeueAfter = 5 * time.Second
 			}
