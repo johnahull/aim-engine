@@ -56,6 +56,7 @@ const (
 	AIMPrecisionFP8  = aimv1alpha1.AIMPrecisionFP8
 	AIMPrecisionFP16 = aimv1alpha1.AIMPrecisionFP16
 	AIMPrecisionFP32 = aimv1alpha1.AIMPrecisionFP32
+	AIMPrecisionFP64 = aimv1alpha1.AIMPrecisionFP64
 	AIMPrecisionBF16 = aimv1alpha1.AIMPrecisionBF16
 	AIMPrecisionInt4 = aimv1alpha1.AIMPrecisionInt4
 	AIMPrecisionInt8 = aimv1alpha1.AIMPrecisionInt8

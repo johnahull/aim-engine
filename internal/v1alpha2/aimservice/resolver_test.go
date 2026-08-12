@@ -1204,6 +1204,12 @@ func TestProfileLess(t *testing.T) {
 			aWins: true,
 		},
 		{
+			name:  "tier 5: fp64 beats unset precision",
+			a:     spec{Type: aimv1alpha1.AIMProfileTypeOptimized, AcceleratorModel: "MI300X", Metric: "latency"},
+			b:     spec{Type: aimv1alpha1.AIMProfileTypeOptimized, AcceleratorModel: "MI300X", Metric: "latency", Precision: "fp64"},
+			aWins: false,
+		},
+		{
 			name: "tier 6: smaller count wins on tie",
 			a: spec{
 				Type: aimv1alpha1.AIMProfileTypeOptimized, AcceleratorModel: "MI300X", Metric: "latency",

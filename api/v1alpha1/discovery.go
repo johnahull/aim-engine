@@ -149,7 +149,7 @@ type AIMModelSource struct {
 	// Precision describes the runtime precision this source is compatible with.
 	// Used to match model sources to profiles during custom weight onboarding.
 	// +optional
-	// +kubebuilder:validation:Enum=fp4;fp8;fp16;fp32;bf16;int4;int8
+	// +kubebuilder:validation:Enum=fp4;fp8;fp16;fp32;fp64;bf16;int4;int8
 	Precision AIMPrecision `json:"precision,omitempty"`
 
 	// Env specifies per-source credential overrides.

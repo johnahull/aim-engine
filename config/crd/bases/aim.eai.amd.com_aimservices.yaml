@@ -996,6 +996,7 @@ spec:
                                 - fp8
                                 - fp16
                                 - fp32
+                                - fp64
                                 - bf16
                                 - int4
                                 - int8
@@ -1004,6 +1005,7 @@ spec:
                                 - fp8
                                 - fp16
                                 - fp32
+                                - fp64
                                 - bf16
                                 - int4
                                 - int8
@@ -1171,6 +1173,7 @@ spec:
                       - fp8
                       - fp16
                       - fp32
+                      - fp64
                       - bf16
                       - int4
                       - int8
@@ -1180,6 +1183,7 @@ spec:
                       - fp8
                       - fp16
                       - fp32
+                      - fp64
                       - bf16
                       - int4
                       - int8
@@ -1336,6 +1340,7 @@ spec:
                         - fp8
                         - fp16
                         - fp32
+                        - fp64
                         - bf16
                         - int4
                         - int8
@@ -1771,6 +1776,7 @@ spec:
                             - fp8
                             - fp16
                             - fp32
+                            - fp64
                             - bf16
                             - int4
                             - int8
@@ -1779,6 +1785,7 @@ spec:
                             - fp8
                             - fp16
                             - fp32
+                            - fp64
                             - bf16
                             - int4
                             - int8
@@ -3620,6 +3627,7 @@ spec:
                                 - fp8
                                 - fp16
                                 - fp32
+                                - fp64
                                 - bf16
                                 - int4
                                 - int8
@@ -3628,6 +3636,7 @@ spec:
                                 - fp8
                                 - fp16
                                 - fp32
+                                - fp64
                                 - bf16
                                 - int4
                                 - int8
@@ -3795,6 +3804,7 @@ spec:
                       - fp8
                       - fp16
                       - fp32
+                      - fp64
                       - bf16
                       - int4
                       - int8
@@ -3804,6 +3814,7 @@ spec:
                       - fp8
                       - fp16
                       - fp32
+                      - fp64
                       - bf16
                       - int4
                       - int8
@@ -3960,6 +3971,7 @@ spec:
                         - fp8
                         - fp16
                         - fp32
+                        - fp64
                         - bf16
                         - int4
                         - int8
@@ -4395,6 +4407,7 @@ spec:
                             - fp8
                             - fp16
                             - fp32
+                            - fp64
                             - bf16
                             - int4
                             - int8
@@ -4403,6 +4416,7 @@ spec:
                             - fp8
                             - fp16
                             - fp32
+                            - fp64
                             - bf16
                             - int4
                             - int8

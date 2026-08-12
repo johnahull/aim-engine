@@ -528,7 +528,7 @@ func preferNamespaceTemplates(candidates []TemplateCandidate) []TemplateCandidat
 // 1. Profile Type: optimized > preview > unoptimized
 // 2. GPU Tier: MI325X > MI300X > MI250X > MI210
 // 3. Metric: latency > throughput
-// 4. Precision: smaller bit-width preferred (fp4 > int4 > fp8 > int8 > fp16 > bf16 > fp32)
+// 4. Precision: smaller bit-width preferred (fp4 > int4 > fp8 > int8 > fp16 > bf16 > fp32 > fp64)
 //
 // Lower scores indicate higher preference. Unknown values get a high score (len+1000).
 // Returns the best candidate and count of candidates with identical best scores.

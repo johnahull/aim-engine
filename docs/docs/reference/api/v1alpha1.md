@@ -570,7 +570,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `modelName` _string_ | ModelName is the model name. Matches `metadata.name` of an AIMModel or AIMClusterModel. Immutable.<br />Example: `meta/llama-3-8b:1.1+20240915` |  | MinLength: 1 <br /> |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric selects the optimization goal.<br />- `latency`: prioritize low end‑to‑end latency<br />- `throughput`: prioritize sustained requests/second |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 | `hardware` _[AIMHardwareRequirements](#aimhardwarerequirements)_ | Hardware specifies GPU and CPU requirements for each replica.<br />For GPU models, defines the GPU count and model types required for deployment.<br />For CPU-only models, defines CPU resource requirements.<br />This field is immutable after creation. |  | Optional: \{\} <br /> |
 | `runtimeConfigName` _string_ | Name is the name of the runtime config to use for this resource. If a runtime config with this name exists both<br />as a namespace and a cluster runtime config, the values are merged together, the namespace config taking priority<br />over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster<br />runtime config with the name `default` is used, if it exists. |  | Optional: \{\} <br /> |
 | `aimId` _string_ | AimId is the AIM product family identifier (e.g., "meta-llama/Llama-3-8B").<br />Required when customProfile is set; used to assemble the profile YAML aim_id field<br />and to compute the custom profile ID for AIM_PROFILE_ID. |  | Optional: \{\} <br /> |
@@ -717,7 +717,7 @@ _Appears in:_
 | `gpu` _string_ | GPU specifies the GPU model this profile is optimized for (e.g., "MI300X", "MI325X"). |  | Optional: \{\} <br /> |
 | `gpu_count` _integer_ | GPUCount indicates how many GPUs are required per replica for this profile. |  | Optional: \{\} <br /> |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric indicates the optimization goal for this profile ("latency" or "throughput"). |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision specifies the numeric precision used in this profile (e.g., "fp16", "fp8"). |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision specifies the numeric precision used in this profile (e.g., "fp16", "fp8"). |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 | `type` _[AIMProfileType](#aimprofiletype)_ | Type specifies the optimization level of this profile (optimized, unoptimized, preview). |  | Enum: [optimized general preview unoptimized] <br />Optional: \{\} <br /> |
 
 
@@ -1013,7 +1013,7 @@ _Appears in:_
 | `modelId` _string_ | ModelID is the canonical identifier in \{org\}/\{name\} format.<br />Determines the cache mount path: /workspace/cache/\{modelId\}<br />For HuggingFace sources, this typically mirrors the URI path (e.g., meta-llama/Llama-3-8B).<br />For S3 sources, users define their own organizational structure. |  | Pattern: `^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$` <br />Required: \{\} <br /> |
 | `sourceUri` _string_ | SourceURI is the location from which the model should be downloaded.<br />Supported schemes:<br />- hf://org/model - Hugging Face Hub model<br />- s3://bucket/key - S3-compatible storage |  | Pattern: `^(hf\|s3)://[^ \t\r\n]+$` <br /> |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | Size is the expected storage space required for this model artifact.<br />Used for PVC sizing and capacity planning during cache creation.<br />Optional - if not specified, the download job will discover the size automatically.<br />Can be set explicitly to pre-allocate storage or override auto-discovery. |  | Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision describes the runtime precision this source is compatible with.<br />Used to match model sources to profiles during custom weight onboarding. |  | Enum: [fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision describes the runtime precision this source is compatible with.<br />Used to match model sources to profiles during custom weight onboarding. |  | Enum: [fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies per-source credential overrides.<br />These variables are used for authentication when downloading this specific source.<br />Takes precedence over base-level env for the same variable name. |  | Optional: \{\} <br /> |
 
 
@@ -1118,7 +1118,7 @@ _Underlying type:_ _string_
 AIMPrecision enumerates supported numeric precisions
 
 _Validation:_
-- Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8]
+- Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8]
 
 _Appears in:_
 - [AIMClusterServiceTemplateSpec](#aimclusterservicetemplatespec)
@@ -1140,6 +1140,7 @@ _Appears in:_
 | `fp8` |  |
 | `fp16` |  |
 | `fp32` |  |
+| `fp64` |  |
 | `bf16` |  |
 | `int4` |  |
 | `int8` |  |
@@ -1165,7 +1166,7 @@ _Appears in:_
 | `gpu` _string_ | GPU specifies the GPU model this profile is optimized for (e.g., "MI300X", "MI325X"). |  | Optional: \{\} <br /> |
 | `gpuCount` _integer_ | GPUCount indicates how many GPUs are required per replica for this profile. |  | Optional: \{\} <br /> |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric indicates the optimization goal for this profile ("latency" or "throughput"). |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision specifies the numeric precision used in this profile (e.g., "fp16", "fp8"). |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision specifies the numeric precision used in this profile (e.g., "fp16", "fp8"). |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 | `type` _[AIMProfileType](#aimprofiletype)_ | Type indicates the optimization level of this profile (optimized, preview, unoptimized). |  | Enum: [optimized general preview unoptimized] <br />Optional: \{\} <br /> |
 
 
@@ -1472,7 +1473,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric selects the optimization goal.<br />- `latency`: prioritize low end‑to‑end latency<br />- `throughput`: prioritize sustained requests/second |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 | `hardware` _[AIMHardwareRequirements](#aimhardwarerequirements)_ | Hardware specifies GPU and CPU requirements for each replica.<br />For GPU models, defines the GPU count and model types required for deployment.<br />For CPU-only models, defines CPU resource requirements.<br />This field is immutable after creation. |  | Optional: \{\} <br /> |
 
 
@@ -1785,7 +1786,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric selects the optimization goal.<br />- `latency`: prioritize low end‑to‑end latency<br />- `throughput`: prioritize sustained requests/second |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 | `hardware` _[AIMHardwareRequirements](#aimhardwarerequirements)_ | Hardware specifies GPU and CPU requirements for each replica.<br />For GPU models, defines the GPU count and model types required for deployment.<br />For CPU-only models, defines CPU resource requirements.<br />This field is immutable after creation. |  | Optional: \{\} <br /> |
 
 
@@ -2119,7 +2120,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `modelName` _string_ | ModelName is the model name. Matches `metadata.name` of an AIMModel or AIMClusterModel. Immutable.<br />Example: `meta/llama-3-8b:1.1+20240915` |  | MinLength: 1 <br /> |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric selects the optimization goal.<br />- `latency`: prioritize low end‑to‑end latency<br />- `throughput`: prioritize sustained requests/second |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 | `hardware` _[AIMHardwareRequirements](#aimhardwarerequirements)_ | Hardware specifies GPU and CPU requirements for each replica.<br />For GPU models, defines the GPU count and model types required for deployment.<br />For CPU-only models, defines CPU resource requirements.<br />This field is immutable after creation. |  | Optional: \{\} <br /> |
 | `runtimeConfigName` _string_ | Name is the name of the runtime config to use for this resource. If a runtime config with this name exists both<br />as a namespace and a cluster runtime config, the values are merged together, the namespace config taking priority<br />over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster<br />runtime config with the name `default` is used, if it exists. |  | Optional: \{\} <br /> |
 | `aimId` _string_ | AimId is the AIM product family identifier (e.g., "meta-llama/Llama-3-8B").<br />Required when customProfile is set; used to assemble the profile YAML aim_id field<br />and to compute the custom profile ID for AIM_PROFILE_ID. |  | Optional: \{\} <br /> |
@@ -2151,7 +2152,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `modelName` _string_ | ModelName is the model name. Matches `metadata.name` of an AIMModel or AIMClusterModel. Immutable.<br />Example: `meta/llama-3-8b:1.1+20240915` |  | MinLength: 1 <br /> |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric selects the optimization goal.<br />- `latency`: prioritize low end‑to‑end latency<br />- `throughput`: prioritize sustained requests/second |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision selects the numeric precision used by the runtime. |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 | `hardware` _[AIMHardwareRequirements](#aimhardwarerequirements)_ | Hardware specifies GPU and CPU requirements for each replica.<br />For GPU models, defines the GPU count and model types required for deployment.<br />For CPU-only models, defines CPU resource requirements.<br />This field is immutable after creation. |  | Optional: \{\} <br /> |
 | `runtimeConfigName` _string_ | Name is the name of the runtime config to use for this resource. If a runtime config with this name exists both<br />as a namespace and a cluster runtime config, the values are merged together, the namespace config taking priority<br />over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster<br />runtime config with the name `default` is used, if it exists. |  | Optional: \{\} <br /> |
 | `aimId` _string_ | AimId is the AIM product family identifier (e.g., "meta-llama/Llama-3-8B").<br />Required when customProfile is set; used to assemble the profile YAML aim_id field<br />and to compute the custom profile ID for AIM_PROFILE_ID. |  | Optional: \{\} <br /> |
@@ -2355,7 +2356,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric specifies the optimization target (e.g., latency, throughput). |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision specifies the numerical precision (e.g., fp8, fp16, bf16). |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision specifies the numerical precision (e.g., fp8, fp16, bf16). |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 
 
 #### AIMVersionPolicy
@@ -2701,7 +2702,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric is the optimization target (latency, throughput). |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision is the numeric precision (fp4, fp8, bf16, …). |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision is the numeric precision (fp4, fp8, bf16, …). |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 
 
 #### ProfileOrigin
@@ -2788,7 +2789,7 @@ _Appears in:_
 | `profileId` _string_ | ProfileId filters by the source profile's profile identifier. |  | Optional: \{\} <br /> |
 | `engine` _string_ | Engine filters by inference engine. |  | Optional: \{\} <br /> |
 | `metric` _[AIMMetric](#aimmetric)_ | Metric filters by optimization target. |  | Enum: [latency throughput] <br />Optional: \{\} <br /> |
-| `precision` _[AIMPrecision](#aimprecision)_ | Precision filters by numeric precision. |  | Enum: [auto fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision filters by numeric precision. |  | Enum: [auto fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
 | `type` _[AIMProfileType](#aimprofiletype)_ | Type filters by optimization level (exact match). |  | Enum: [optimized general preview unoptimized] <br />Optional: \{\} <br /> |
 | `minimumType` _[AIMProfileTypeFloor](#aimprofiletypefloor)_ | MinimumType filters by a minimum optimization level: candidates whose<br />type is this tier OR BETTER are accepted (hierarchy: optimized > general<br />> preview > unoptimized). This is the floor counterpart to the exact-match<br />Type field; the two AND together when both are set.<br />The sentinel "any" disables the floor (accept every tier). When this<br />field is empty the AIMService resolver applies a default floor of<br />"optimized" so auto-selection prefers production-grade profiles and never<br />silently picks an unoptimized one; to opt a service into lower tiers<br />(e.g. CPU/EPYC profiles published as unoptimized) set minimumType<br />explicitly to "unoptimized" or "any". Derivation selectors<br />(AIMProfileSet / AIMModel.profiles) treat empty as "any" so copying is<br />never tier-restricted by default. |  | Enum: [optimized general preview unoptimized any] <br />Optional: \{\} <br /> |
 | `acceleratorModel` _string_ | AcceleratorModel filters by accelerator identifier. |  | Optional: \{\} <br /> |

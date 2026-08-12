@@ -42,7 +42,7 @@ type AIMRuntimeParameters struct {
 
 	// Precision selects the numeric precision used by the runtime.
 	// +optional
-	// +kubebuilder:validation:Enum=auto;fp4;fp8;fp16;fp32;bf16;int4;int8
+	// +kubebuilder:validation:Enum=auto;fp4;fp8;fp16;fp32;fp64;bf16;int4;int8
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="precision is immutable"
 	Precision *AIMPrecision `json:"precision,omitempty"`
 
@@ -65,7 +65,7 @@ const (
 )
 
 // AIMPrecision enumerates supported numeric precisions
-// +kubebuilder:validation:Enum=auto;fp4;fp8;fp16;fp32;bf16;int4;int8
+// +kubebuilder:validation:Enum=auto;fp4;fp8;fp16;fp32;fp64;bf16;int4;int8
 type AIMPrecision string
 
 const (
@@ -74,6 +74,7 @@ const (
 	AIMPrecisionFP8  AIMPrecision = "fp8"
 	AIMPrecisionFP16 AIMPrecision = "fp16"
 	AIMPrecisionFP32 AIMPrecision = "fp32"
+	AIMPrecisionFP64 AIMPrecision = "fp64"
 	AIMPrecisionBF16 AIMPrecision = "bf16"
 	AIMPrecisionInt4 AIMPrecision = "int4"
 	AIMPrecisionInt8 AIMPrecision = "int8"

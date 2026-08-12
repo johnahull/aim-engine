@@ -178,7 +178,7 @@ type AIMTemplateProfile struct {
 
 	// Precision specifies the numerical precision (e.g., fp8, fp16, bf16).
 	// +optional
-	// +kubebuilder:validation:Enum=auto;fp4;fp8;fp16;fp32;bf16;int4;int8
+	// +kubebuilder:validation:Enum=auto;fp4;fp8;fp16;fp32;fp64;bf16;int4;int8
 	Precision AIMPrecision `json:"precision,omitempty"`
 }
 

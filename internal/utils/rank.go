@@ -64,7 +64,7 @@ var (
 	// secondary ordering by type (fp > bf > int, floating-point
 	// preferred for accuracy).
 	PrecisionPreferenceOrder = []string{
-		"fp4", "int4", "fp8", "int8", "fp16", "bf16", "fp32",
+		"fp4", "int4", "fp8", "int8", "fp16", "bf16", "fp32", "fp64",
 	}
 )
 

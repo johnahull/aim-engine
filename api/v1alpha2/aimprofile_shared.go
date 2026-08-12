@@ -88,7 +88,7 @@ type AIMProfileSpecCommon struct {
 
 	// Precision is the numeric precision used by this profile.
 	// +optional
-	// +kubebuilder:validation:Enum=fp4;fp8;fp16;fp32;bf16;int4;int8
+	// +kubebuilder:validation:Enum=fp4;fp8;fp16;fp32;fp64;bf16;int4;int8
 	Precision AIMPrecision `json:"precision,omitempty"`
 
 	// Type indicates the optimization level. Hierarchy: optimized > general > preview > unoptimized.

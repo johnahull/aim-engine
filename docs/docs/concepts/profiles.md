@@ -137,7 +137,7 @@ spec:
 | `engine` | Inference engine (`vllm`, `vllm_omni`, ...). Projected onto the inference container as the framework-owned `AIM_ENGINE` variable. |
 | `variant` | Optional runtime recipe suffix for profiles that otherwise share the same engine/hardware/precision/count/metric tuple (for example `usp4`). Discovery preserves `metadata.variant` from the image. It is identity metadata, not currently a selector or ranking axis. |
 | `metric` | Optimization target: `latency` or `throughput`. |
-| `precision` | Numeric precision: `fp4`, `fp8`, `fp16`, `fp32`, `bf16`, `int4`, `int8`. |
+| `precision` | Numeric precision: `fp4`, `fp8`, `fp16`, `fp32`, `fp64`, `bf16`, `int4`, `int8`. |
 | `type` | Optimization level. Hierarchy: `optimized > general > preview > unoptimized`. Auto-selection compares this against the selector's `minimumType` floor (default `optimized` for AIMServices), so lower tiers are opt-in. An empty/unset `type` is treated as `unoptimized` (conservative: an undeclared tier is excluded by the default floor unless the selector opts down). |
 | `primary` | Marks the recommended default for this model + hardware combination. Boosts ranking during automatic selection. Default `false`. |
 | `manualSelectionOnly` | **Deprecated and ignored by the resolver.** Formerly excluded a profile from automatic selection; that role is now served by `type` + the selector's `minimumType` floor. Retained for backward compatibility (still accepted on existing objects and aim-build YAMLs) but has no effect. Default `false`. |

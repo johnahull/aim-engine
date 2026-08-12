@@ -446,6 +446,7 @@ func TestChoosePreferredTemplate(t *testing.T) {
 	fp16 := aimv1alpha1.AIMPrecisionFP16
 	fp8 := aimv1alpha1.AIMPrecisionFP8
 	bf16 := aimv1alpha1.AIMPrecisionBF16
+	fp64 := aimv1alpha1.AIMPrecisionFP64
 
 	tests := []struct {
 		name          string
@@ -519,6 +520,15 @@ func TestChoosePreferredTemplate(t *testing.T) {
 				NewCandidate("fp8").WithProfileType(aimv1alpha1.AIMProfileTypeOptimized).WithGPU("MI300X", 4).WithMetric(latency).WithPrecision(fp8).Build(),
 			},
 			expectedName:  "fp8",
+			expectedCount: 1,
+		},
+		{
+			name: "prefer fp64 over unset precision",
+			candidates: []TemplateCandidate{
+				NewCandidate("unset").WithProfileType(aimv1alpha1.AIMProfileTypeOptimized).WithGPU("MI300X", 4).WithMetric(latency).Build(),
+				NewCandidate("fp64").WithProfileType(aimv1alpha1.AIMProfileTypeOptimized).WithGPU("MI300X", 4).WithMetric(latency).WithPrecision(fp64).Build(),
+			},
+			expectedName:  "fp64",
 			expectedCount: 1,
 		},
 		{

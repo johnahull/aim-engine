@@ -57,7 +57,7 @@ spec:
 | `modelName` | `AIMModel` / `AIMClusterModel` name. | Yes |
 | `runtimeConfigName` | Runtime configuration for storage defaults / discovery settings. Defaults to `default`. | No |
 | `metric` | `latency` or `throughput`. | Yes |
-| `precision` | `auto`, `fp4`, `fp8`, `fp16`, `fp32`, `bf16`, `int4`, `int8`. | Yes |
+| `precision` | `auto`, `fp4`, `fp8`, `fp16`, `fp32`, `fp64`, `bf16`, `int4`, `int8`. | Yes |
 | `hardware.gpu.requests` | GPUs per replica. | Yes |
 | `hardware.gpu.model` | GPU model (e.g. `MI300X`). | Yes |
 | `hardware.cpu` | CPU requirements (alternative to `hardware.gpu`). | Yes |
