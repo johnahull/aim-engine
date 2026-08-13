@@ -3,7 +3,7 @@
 An **AIM profile** is a self-contained runtime configuration for an inference workload. It answers five questions about a deployment without consulting any other resource:
 
 1. **Model architecture** — What model family does this serve? (`aimId`)
-2. **Accelerator** — What hardware is required? (`acceleratorType`, `acceleratorModel`, `acceleratorCount`)
+2. **Accelerator** — What hardware is required? (`acceleratorVendor`, `acceleratorType`, `acceleratorModel`, `acceleratorCount`)
 3. **Engine** — How is the inference engine configured? (`engineArgs`, `engineEnv`)
 4. **Container image** — What image runs the workload? (`image`)
 5. **Optimization target** — What was this profile tuned for? (`metric`, `precision`, `type`)
@@ -17,16 +17,18 @@ Profiles are part of `aim.eai.amd.com/v1alpha2`. They replace v1alpha1 [Service 
 :::
 ## Where profiles come from
 
-Most profiles aren't hand-authored. They're produced by `AIMModel` reconcilers in one of three flows:
+Most profiles aren't hand-authored. They're produced by model discovery,
+model-ID profile generation, or profile derivation:
 
 | Source | Profile origin | Typical labels |
 |---|---|---|
-| Image discovery on an official AIM image | `origin: Discovered`, `role: deployable` | `source-model=<official-model>` |
-| Image discovery on a base AIM image | `origin: Discovered`, `role: base` | `source-model=<base-model>` |
-| `AIMProfileSet` derivation (fine-tune or custom-model) | `origin: Derived`, `role: deployable` | `source-model=<derivation-model>` |
-| Hand-authored by a user | `origin: UserAuthored`, `role: deployable` | (none of the `source-model*` labels) |
+| Image discovery on an official AIM image | `origin: discovered`, `role: deployable` | `source-model=<official-model>` |
+| Image discovery on a base AIM image | `origin: discovered`, `role: base` | `source-model=<base-model>` |
+| `AIMModel.spec.modelId` plus a RuntimeConfig fallback | `origin: generated`, `role: deployable` | `source-model=<generated-model>` |
+| `AIMProfileSet` derivation (fine-tune or custom-model) | `origin: derived`, `role: deployable` | `source-model=<derivation-model>` |
+| Hand-authored by a user | `origin: user-authored`, `role: deployable` | (none of the `source-model*` labels) |
 
-See [AIM Models](models.md) for the three model flows that produce these profiles.
+See [AIM Models](models.md) for the four model flows that produce these profiles.
 
 ## Cluster vs namespace scope
 
@@ -52,10 +54,15 @@ v1alpha2 stamps a small set of canonical labels on every operator-produced profi
 | Label | Values |
 |---|---|
 | `aim.eai.amd.com/profile-role` | `base`, `deployable` |
-| `aim.eai.amd.com/profile-origin` | `discovered`, `derived`, `user-authored` |
+| `aim.eai.amd.com/profile-origin` | `discovered`, `generated`, `derived`, `user-authored` |
 | `aim.eai.amd.com/source-model` | Name of the owning `AIMModel` / `AIMClusterModel` |
 | `aim.eai.amd.com/source-model-scope` | `namespace`, `cluster` |
-| `aim.eai.amd.com/profile-source` | `copy` (AIMProfileSet derivation marker) |
+
+Two more provenance markers are **annotations**, not labels — nothing selects on them, so a label selector will never match:
+
+| Annotation | Values |
+|---|---|
+| `aim.eai.amd.com/profile-source` | `image` (discovery), `copy` (AIMProfileSet derivation), `generated` (modelId + RuntimeConfig fallback) |
 | `aim.eai.amd.com/profile-copyable` | `"true"` (eligible to be a derivation source) |
 
 The matching `status` fields mirror the labels for kubectl-friendly access:
@@ -107,6 +114,7 @@ spec:
   type: optimized
   primary: true
 
+  acceleratorVendor: amd
   acceleratorModel: MI300X
   acceleratorType: gpu
   acceleratorCount: 1
@@ -139,14 +147,16 @@ spec:
 | `metric` | Optimization target: `latency` or `throughput`. |
 | `precision` | Numeric precision: `fp4`, `fp8`, `fp16`, `fp32`, `fp64`, `bf16`, `int4`, `int8`. |
 | `type` | Optimization level. Hierarchy: `optimized > general > preview > unoptimized`. Auto-selection compares this against the selector's `minimumType` floor (default `optimized` for AIMServices), so lower tiers are opt-in. An empty/unset `type` is treated as `unoptimized` (conservative: an undeclared tier is excluded by the default floor unless the selector opts down). |
+| `autoSelectionPolicy` | Automatic-selection policy: `optimized` (default) applies the implicit optimized floor; `any` admits this profile regardless of optimization tier in a second pass only when the service did not explicitly set `minimumType` and no optimized namespace or cluster profile matched. |
 | `primary` | Marks the recommended default for this model + hardware combination. Boosts ranking during automatic selection. Default `false`. |
-| `manualSelectionOnly` | **Deprecated and ignored by the resolver.** Formerly excluded a profile from automatic selection; that role is now served by `type` + the selector's `minimumType` floor. Retained for backward compatibility (still accepted on existing objects and aim-build YAMLs) but has no effect. Default `false`. |
+| `manualSelectionOnly` | **Deprecated and ignored by the resolver.** Use `type` + the selector's `minimumType` floor for service-authored consent and `autoSelectionPolicy` for platform-authored automatic eligibility. Retained for backward compatibility but has no effect. Default `false`. |
+| `acceleratorVendor` | Accelerator device-plugin contract: `amd` or `nvidia`. Selects the vendor node label and default GPU resource name. Empty preserves the legacy AMD behavior. |
 | `acceleratorModel` | Accelerator identifier for node selection (e.g. `MI300X`, `CDNA3`, `EPYC_ZEN5`). Maps to a `feature.node.kubernetes.io/aim-accelerator.<value>` node label with the `Exists` operator. |
 | `acceleratorType` | `gpu` or `cpu`. Determines resource derivation strategy. |
-| `acceleratorCount` | Number of accelerator units required. Combined with `acceleratorType` and cluster config to compute default resource requests. |
+| `acceleratorCount` | Number of accelerator units required. Combined with `acceleratorVendor` and `acceleratorType` to compute default resource requests. |
 | `resources` | Optional override for K8s `ResourceRequirements`. Merged on top of computed defaults; result lands in `status.resources`. |
 | `image` | **Required.** Deployment container image. For purpose-built profiles: the full AIM image. For overlay-produced custom-model profiles: the base image. |
-| `engineArgs` | Inference engine CLI arguments as a free-form JSON object. Typed values (ints, floats, booleans, strings) preserved; converted to `--key value` flags by the runtime. |
+| `engineArgs` | Optional inference-engine tuning and overrides as a free-form JSON object. Typed values (ints, floats, booleans, strings) are preserved and projected into engine-specific CLI flags. |
 | `engineEnv` | Environment variables passed to the inference engine subprocess (distinct from `containerEnv`). |
 | `modelSources` | Model artifact sources with download URIs. |
 | `containerEnv` | Container-level env vars on the pod spec. |
@@ -166,24 +176,32 @@ Namespace-scoped `AIMProfile` adds one more field:
 
 ## Accelerator and node affinity
 
-The three accelerator fields jointly describe the hardware AIM Engine schedules onto.
+The accelerator fields jointly describe the hardware AIM Engine schedules onto. `acceleratorVendor` is sufficient to target any GPU from one vendor; `acceleratorModel` is an optional additional constraint for profiles that require a specific card.
 
 ```
+spec.acceleratorVendor: amd
+  → feature.node.kubernetes.io/aim-accelerator.vendor.GPU.AMD  (Exists)
+
 spec.acceleratorModel: MI300X
   → feature.node.kubernetes.io/aim-accelerator.MI300X  (Exists)
 
 spec.acceleratorType: gpu
 spec.acceleratorCount: 1
-  → AIM Engine computes the default device request (e.g. amd.com/gpu: "1")
+  → AIM Engine computes amd.com/gpu: "1"
+
+spec.acceleratorVendor: nvidia
+spec.acceleratorType: gpu
+spec.acceleratorCount: 1
+  → AIM Engine computes nvidia.com/gpu: "1"
 ```
 
-The [AcceleratorDetector](accelerator-detection.md) DaemonSet labels each node with all applicable identifiers (specific GPU model, CPU architecture). A profile with `acceleratorModel: MI300X` matches exactly that GPU model; a fallback profile with `acceleratorModel: EPYC_ZEN5` matches any Zen5 EPYC node.
+The [AcceleratorDetector](accelerator-detection.md) DaemonSet labels each node with its vendor and applicable identifiers (specific GPU model, CPU architecture). A generic profile with `acceleratorVendor: nvidia` matches NVIDIA GPU nodes of any model. Adding `acceleratorModel: H100` narrows that profile to H100 nodes.
 
 The label value (count) is informational only — the selector operator is `Exists`. Actual capacity is enforced via the computed device resource request.
 
 ### Hardware support
 
-Different AIM images support different AMD hardware families:
+Optimized AIM images declare the concrete AMD hardware family they support:
 
 | Family | Example `acceleratorModel` |
 |---|---|
@@ -191,11 +209,12 @@ Different AIM images support different AMD hardware families:
 | AMD Radeon | `RadeonW7900` |
 | AMD EPYC | `EPYC_9965` |
 
-The hardware a profile targets is declared on the **profile** itself, via `AIMProfile.spec.acceleratorModel`:
+The hardware a profile targets is declared on the **profile** itself, via `AIMProfile.spec.acceleratorVendor` and, when required, `AIMProfile.spec.acceleratorModel`:
 
 ```yaml
 # AIMProfile (or AIMClusterProfile)
 spec:
+  acceleratorVendor: amd
   acceleratorModel: MI300X
 ```
 
@@ -215,18 +234,48 @@ spec:
 
 Make sure the chosen model image actually supports the target hardware — an image built for AMD Instinct GPUs will not run on Radeon or EPYC. Profile resolution only matches an image to a node whose detected labels satisfy the profile's `spec.acceleratorModel`; it does not transcode an unsupported image onto incompatible hardware. See [Deploying Services — Model + selector](../guides/deploying-services.md#model--selector) for the full selector resolution flow.
 
+### Generic NVIDIA vLLM profiles
+
+A hand-authored profile can run an upstream vLLM image on any NVIDIA GPU model without pre-creating a profile per card:
+
+```yaml
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: qwen2-5-0-5b-nvidia-vllm
+spec:
+  aimId: Qwen/Qwen2.5-0.5B-Instruct
+  modelId: Qwen/Qwen2.5-0.5B-Instruct
+  engine: vllm
+  type: unoptimized
+  acceleratorVendor: nvidia
+  acceleratorType: gpu
+  acceleratorCount: 1
+  image: vllm/vllm-openai:v0.16.0
+  modelSources:
+    - modelId: Qwen/Qwen2.5-0.5B-Instruct
+      sourceUri: hf://Qwen/Qwen2.5-0.5B-Instruct
+```
+
+For this direct NVIDIA vLLM contract, AIM Engine generates `vllm serve`, points it at the locally mounted model artifact, sets the served model name, host, port, and tensor-parallel size, and forces Hugging Face offline mode. `engineArgs` is optional and is only needed for additional vLLM tuning or to override generated tuning values such as `served-model-name` and `tensor-parallel-size`; the model path, host, and port remain controller-managed.
+
+The profile itself does not need `spec.caching`. An `AIMService` selecting the profile creates or reuses the cache according to the service's caching mode and does not create the InferenceService until the model artifact is ready. Because `type: unoptimized` is below the default profile-selection floor, a selector using this reference profile must explicitly set `minimumType: unoptimized` (or `any`).
+
 ### Partitioned GPUs
 
-For partitioned GPU configurations (CPX-NPS4, MIG, etc.), override the derived device resource in `spec.resources`:
+The vendor resolver is also the extension point for partition-specific device-plugin resources. In the current implementation, AMD partition modes still derive `amd.com/gpu`; a later resource-naming strategy can map a concrete mode such as `CPX-NPS4` to `amd.com/cpx_nps4` without changing profile selection or runtime projection.
+
+Until that mapping is enabled, a cluster that advertises a partition-specific resource can override the derived device resource explicitly:
 
 ```yaml
 spec:
+  acceleratorVendor: amd
   acceleratorModel: MI300X
   acceleratorType: gpu
   acceleratorCount: 0
   resources:
     requests:
-      amd.com/cpx-nps4: "4"
+      amd.com/cpx_nps4: "4"
 ```
 
 `acceleratorCount: 0` suppresses the default `amd.com/gpu` derivation so the override stands alone.
@@ -287,7 +336,12 @@ When a service uses `spec.model.name` resolution (which produces multiple candid
 
 ## Optimization tier and the `minimumType` floor
 
-A profile's `spec.type` (`optimized > general > preview > unoptimized`) is both a ranking signal and a selection gate. Automatic selection (`spec.model.name` / selector resolution) only considers profiles whose `type` is at or above the selector's `spec.profile.selector.minimumType` floor. For AIMServices that floor **defaults to `optimized`**, so preview/unoptimized profiles (e.g. CPU/EPYC tunings published as `unoptimized`) are never auto-picked unless the service opts in:
+A profile's `spec.type` (`optimized > general > preview > unoptimized`) is both
+a ranking signal and a selection gate. Automatic selection
+(`spec.model.name` / selector resolution) first considers profiles whose `type`
+is at or above the selector's `spec.profile.selector.minimumType` floor. For
+AIMServices that floor **defaults to `optimized`**, so lower-tier profiles are
+excluded from the optimized pass unless the service opts in:
 
 ```yaml
 # AIMService — accept lower tiers (e.g. an EPYC unoptimized profile)
@@ -301,8 +355,17 @@ spec:
 
 Any profile — including lower tiers — also remains addressable by explicit `spec.profile.name`, which bypasses the floor entirely.
 
+`spec.autoSelectionPolicy: any` is a platform/profile-publisher opt-in for
+automatic selection regardless of optimization tier. If the service did not
+explicitly set `minimumType` and no optimized profile matched in either scope,
+the resolver performs a second pass containing only `any` profiles. This allows
+a generic runtime such as the chart-provided NVIDIA vLLM profile to remain
+truthfully `unoptimized` without requiring every service to lower its floor.
+The default policy is `optimized`, so existing AMD preview and unoptimized
+profiles remain excluded.
+
 !!! warning "`manualSelectionOnly` is deprecated"
-    `spec.manualSelectionOnly` is no longer honored. It was a binary "exclude from auto-selection" gate, redundant with the graded `type` hierarchy. Express the same intent by publishing the profile as `type: unoptimized` (the resolver's default `minimumType: optimized` floor then keeps it opt-in). The field is still accepted for backward compatibility but has no effect and will be removed in a future API version.
+    `spec.manualSelectionOnly` is no longer honored. Use `type` + `minimumType` for service-authored optimization-tier consent and `autoSelectionPolicy` for platform-authored automatic eligibility. The field is still accepted for backward compatibility but has no effect and will be removed in a future API version.
 
 ## Examples
 

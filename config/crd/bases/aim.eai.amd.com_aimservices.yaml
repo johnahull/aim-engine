@@ -1254,6 +1254,13 @@ spec:
                         - gpu
                         - cpu
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor filters by the vendor-specific
+                          device-plugin contract.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: AimId filters by model architecture identifier
                           (e.g., "qwen/qwen3-32b").
@@ -1330,6 +1337,7 @@ spec:
                         enum:
                         - discovered
                         - derived
+                        - generated
                         - user-authored
                         type: string
                       precision:
@@ -1405,6 +1413,13 @@ spec:
                       conservatively requires the count be restated. See
                       AcceleratorPartitioningMode on AIMProfileSpecCommon for the reserved
                       values ("unpartitioned", "partitioned", "<C>-<M>").
+                    type: string
+                  acceleratorVendor:
+                    description: AcceleratorVendor replaces the referenced profile's
+                      acceleratorVendor.
+                    enum:
+                    - amd
+                    - nvidia
                     type: string
                   containerEnv:
                     description: |-
@@ -3885,6 +3900,13 @@ spec:
                         - gpu
                         - cpu
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor filters by the vendor-specific
+                          device-plugin contract.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: AimId filters by model architecture identifier
                           (e.g., "qwen/qwen3-32b").
@@ -3961,6 +3983,7 @@ spec:
                         enum:
                         - discovered
                         - derived
+                        - generated
                         - user-authored
                         type: string
                       precision:
@@ -4036,6 +4059,13 @@ spec:
                       conservatively requires the count be restated. See
                       AcceleratorPartitioningMode on AIMProfileSpecCommon for the reserved
                       values ("unpartitioned", "partitioned", "<C>-<M>").
+                    type: string
+                  acceleratorVendor:
+                    description: AcceleratorVendor replaces the referenced profile's
+                      acceleratorVendor.
+                    enum:
+                    - amd
+                    - nvidia
                     type: string
                   containerEnv:
                     description: |-

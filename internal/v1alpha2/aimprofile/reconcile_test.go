@@ -39,15 +39,13 @@ import (
 
 func TestBuildComponentHealth(t *testing.T) {
 	tests := []struct {
-		name              string
-		accelModel        string
-		accelCount        int32
-		resolvedResources *corev1.ResourceRequirements
-		nodeErr           error
-		matchResult       NodeMatchResult
-		wantLen           int
-		wantState         constants.AIMStatus
-		wantReason        string
+		name        string
+		spec        aimv1alpha2.AIMProfileSpecCommon
+		nodeErr     error
+		matchResult NodeMatchResult
+		wantLen     int
+		wantState   constants.AIMStatus
+		wantReason  string
 	}{
 		{
 			name:        "no accelerator returns nil",
@@ -56,18 +54,18 @@ func TestBuildComponentHealth(t *testing.T) {
 		},
 		{
 			name: "cpu-only resources returns nil",
-			resolvedResources: &corev1.ResourceRequirements{
+			spec: aimv1alpha2.AIMProfileSpecCommon{Resources: &corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceCPU:    resource.MustParse("4"),
 					corev1.ResourceMemory: resource.MustParse("32Gi"),
 				},
-			},
+			}},
 			matchResult: NodeMatchResult{},
 			wantLen:     0,
 		},
 		{
 			name:        "node list failure returns degraded",
-			accelModel:  "MI300X",
+			spec:        aimv1alpha2.AIMProfileSpecCommon{AcceleratorModel: "MI300X"},
 			nodeErr:     fmt.Errorf("connection refused"),
 			matchResult: NodeMatchResult{},
 			wantLen:     1,
@@ -75,30 +73,38 @@ func TestBuildComponentHealth(t *testing.T) {
 			wantReason:  "NodeListFailed",
 		},
 		{
-			name:              "matching nodes returns ready",
-			accelModel:        "MI300X",
-			accelCount:        1,
-			resolvedResources: ResolveResources(aimv1alpha2.AcceleratorTypeGPU, 1, nil, "MI300X", nil),
-			matchResult:       NodeMatchResult{MatchingNodes: 2},
-			wantLen:           1,
-			wantState:         constants.AIMStatusReady,
-			wantReason:        aimv1alpha2.AIMProfileReasonHardwareAvailable,
+			name: "vendor-only node list failure returns degraded",
+			spec: aimv1alpha2.AIMProfileSpecCommon{
+				AcceleratorVendor: aimv1alpha2.AcceleratorVendorNVIDIA,
+				AcceleratorType:   aimv1alpha2.AcceleratorTypeGPU,
+			},
+			nodeErr:     fmt.Errorf("connection refused"),
+			matchResult: NodeMatchResult{},
+			wantLen:     1,
+			wantState:   constants.AIMStatusDegraded,
+			wantReason:  "NodeListFailed",
 		},
 		{
-			name:              "no matching nodes returns not available",
-			accelModel:        "MI300X",
-			accelCount:        1,
-			resolvedResources: ResolveResources(aimv1alpha2.AcceleratorTypeGPU, 1, nil, "MI300X", nil),
-			matchResult:       NodeMatchResult{MatchingNodes: 0},
-			wantLen:           1,
-			wantState:         constants.AIMStatusNotAvailable,
-			wantReason:        aimv1alpha2.AIMProfileReasonHardwareNotAvailable,
+			name:        "matching nodes returns ready",
+			spec:        aimv1alpha2.AIMProfileSpecCommon{AcceleratorModel: "MI300X", AcceleratorCount: 1},
+			matchResult: NodeMatchResult{MatchingNodes: 2},
+			wantLen:     1,
+			wantState:   constants.AIMStatusReady,
+			wantReason:  aimv1alpha2.AIMProfileReasonHardwareAvailable,
+		},
+		{
+			name:        "no matching nodes returns not available",
+			spec:        aimv1alpha2.AIMProfileSpecCommon{AcceleratorModel: "MI300X", AcceleratorCount: 1},
+			matchResult: NodeMatchResult{MatchingNodes: 0},
+			wantLen:     1,
+			wantState:   constants.AIMStatusNotAvailable,
+			wantReason:  aimv1alpha2.AIMProfileReasonHardwareNotAvailable,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildComponentHealth(tt.accelModel, tt.accelCount, tt.resolvedResources, tt.nodeErr, tt.matchResult)
+			result := buildComponentHealth(tt.spec, tt.nodeErr, tt.matchResult)
 			if len(result) != tt.wantLen {
 				t.Fatalf("len(result) = %d, want %d", len(result), tt.wantLen)
 			}
@@ -400,6 +406,15 @@ func TestDeriveProfileOrigin_PrefersExistingLabel(t *testing.T) {
 		t.Fatalf("DeriveProfileOrigin() = %q, want %q (existing label wins)", got, aimv1alpha1.ProfileOriginDiscovered)
 	}
 
+	generatedLabel := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{constants.LabelKeyProfileOrigin: string(aimv1alpha1.ProfileOriginGenerated)},
+		},
+	}
+	if got := DeriveProfileOrigin(generatedLabel); got != aimv1alpha1.ProfileOriginGenerated {
+		t.Fatalf("generated profile label = %q, want Generated", got)
+	}
+
 	owned := &aimv1alpha2.AIMProfile{
 		ObjectMeta: metav1.ObjectMeta{
 			OwnerReferences: []metav1.OwnerReference{{
@@ -412,6 +427,20 @@ func TestDeriveProfileOrigin_PrefersExistingLabel(t *testing.T) {
 	}
 	if got := DeriveProfileOrigin(owned); got != aimv1alpha1.ProfileOriginDiscovered {
 		t.Fatalf("AIMModel-owned image source = %q, want Discovered", got)
+	}
+
+	generated := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: aimv1alpha2.GroupVersion.String(),
+				Kind:       "AIMModel",
+				Name:       "owner",
+			}},
+			Annotations: map[string]string{AnnotationProfileSource: ProfileSourceGenerated},
+		},
+	}
+	if got := DeriveProfileOrigin(generated); got != aimv1alpha1.ProfileOriginGenerated {
+		t.Fatalf("AIMModel-owned generated source = %q, want Generated", got)
 	}
 
 	derived := &aimv1alpha2.AIMProfile{

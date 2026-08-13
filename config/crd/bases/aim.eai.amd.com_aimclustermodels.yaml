@@ -80,6 +80,41 @@ spec:
               fields) live on the version-specific AIMModel / AIMClusterModel root types
               in the per-version *_types.go files.
             properties:
+              accelerator:
+                description: |-
+                  Accelerator requests the hardware shape for modelId-backed onboarding —
+                  how many accelerator units the model needs and, optionally, which vendor,
+                  card model, or partitioning mode. Narrows which RuntimeConfig fallbacks
+                  apply and is stamped onto the generated profile. Defaults to one unit of
+                  whatever the matched fallback targets.
+                properties:
+                  count:
+                    description: |-
+                      Count is the number of accelerator units the model needs. It drives the
+                      generated profile's acceleratorCount, and therefore both the device
+                      resource request and the engine's tensor-parallel size. Defaults to 1.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  model:
+                    description: |-
+                      Model requests an exact detector accelerator model (e.g. "MI300X",
+                      "H100"). Empty matches any model the fallback supports.
+                    maxLength: 64
+                    type: string
+                  partitioningMode:
+                    description: |-
+                      PartitioningMode requests a GPU partitioning mode. See
+                      AcceleratorPartitioningMode on AIMProfileSpecCommon for the reserved
+                      values ("unpartitioned", "partitioned", "<C>-<M>").
+                    type: string
+                  vendor:
+                    description: Vendor requests a specific accelerator vendor.
+                    enum:
+                    - amd
+                    - nvidia
+                    type: string
+                type: object
               aimId:
                 description: |-
                   AimId is the AIM product family identifier (e.g., "qwen/qwen3-32b").
@@ -621,6 +656,13 @@ spec:
                           read the base profile to tell whether the meaning actually changed, so it
                           conservatively requires the count be restated.
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor replaces the copied profile's
+                          acceleratorVendor.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: |-
                           AimId stamps the derived profile's spec.aimId. When set, wins over
@@ -1088,6 +1130,13 @@ spec:
                         - gpu
                         - cpu
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor filters by the vendor-specific
+                          device-plugin contract.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: AimId filters by model architecture identifier
                           (e.g., "qwen/qwen3-32b").
@@ -1164,6 +1213,7 @@ spec:
                         enum:
                         - discovered
                         - derived
+                        - generated
                         - user-authored
                         type: string
                       precision:
@@ -1238,9 +1288,10 @@ spec:
                   rule: has(self.sourceRef) || has(self.selector.aimId) || has(self.selector.modelId)
                     || has(self.selector.profileId) || has(self.selector.engine) ||
                     has(self.selector.metric) || has(self.selector.precision) || has(self.selector.type)
-                    || has(self.selector.acceleratorModel) || has(self.selector.acceleratorType)
-                    || has(self.selector.acceleratorCount) || has(self.selector.engineArgs)
-                    || has(self.selector.modelRef) || has(self.selector.origin)
+                    || has(self.selector.acceleratorModel) || has(self.selector.acceleratorVendor)
+                    || has(self.selector.acceleratorType) || has(self.selector.acceleratorCount)
+                    || has(self.selector.engineArgs) || has(self.selector.modelRef)
+                    || has(self.selector.origin)
                 - message: version is required when versionPolicy is pinned
                   rule: has(self.version) || (has(self.versionPolicy) && self.versionPolicy
                     != 'pinned')
@@ -1448,7 +1499,8 @@ spec:
                   Image is the container image URI for this AIM model.
                   This image is inspected by the operator to select runtime profiles used by templates.
                   Discovery behavior is controlled by the discovery field and runtime config's AutoDiscovery setting.
-                  Required unless aimId is set with versionPolicy latest or any, or profileCopy is set.
+                  Required unless modelId, an eligible aimId-only flow, or a profile
+                  derivation flow is set.
                 type: string
               imageMetadata:
                 description: |-
@@ -1650,6 +1702,13 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              modelId:
+                description: |-
+                  ModelID is the canonical model identifier for generated-profile
+                  onboarding. The controller combines it with RuntimeConfig profile
+                  generation fallbacks and observed hardware to materialize profiles.
+                pattern: ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$
+                type: string
               modelSources:
                 description: |-
                   ModelSources specifies the model sources to use for this model.
@@ -1943,6 +2002,13 @@ spec:
                           read the base profile to tell whether the meaning actually changed, so it
                           conservatively requires the count be restated.
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor replaces the copied profile's
+                          acceleratorVendor.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: |-
                           AimId stamps the derived profile's spec.aimId. When set, wins over
@@ -2410,6 +2476,13 @@ spec:
                         - gpu
                         - cpu
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor filters by the vendor-specific
+                          device-plugin contract.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: AimId filters by model architecture identifier
                           (e.g., "qwen/qwen3-32b").
@@ -2486,6 +2559,7 @@ spec:
                         enum:
                         - discovered
                         - derived
+                        - generated
                         - user-authored
                         type: string
                       precision:
@@ -2560,9 +2634,10 @@ spec:
                   rule: has(self.sourceRef) || has(self.selector.aimId) || has(self.selector.modelId)
                     || has(self.selector.profileId) || has(self.selector.engine) ||
                     has(self.selector.metric) || has(self.selector.precision) || has(self.selector.type)
-                    || has(self.selector.acceleratorModel) || has(self.selector.acceleratorType)
-                    || has(self.selector.acceleratorCount) || has(self.selector.engineArgs)
-                    || has(self.selector.modelRef) || has(self.selector.origin)
+                    || has(self.selector.acceleratorModel) || has(self.selector.acceleratorVendor)
+                    || has(self.selector.acceleratorType) || has(self.selector.acceleratorCount)
+                    || has(self.selector.engineArgs) || has(self.selector.modelRef)
+                    || has(self.selector.origin)
                 - message: version is required when versionPolicy is pinned
                   rule: has(self.version) || (has(self.versionPolicy) && self.versionPolicy
                     != 'pinned')
@@ -2636,6 +2711,13 @@ spec:
                             enum:
                             - gpu
                             - cpu
+                            type: string
+                          acceleratorVendor:
+                            description: AcceleratorVendor filters by the vendor-specific
+                              device-plugin contract.
+                            enum:
+                            - amd
+                            - nvidia
                             type: string
                           aimId:
                             description: AimId filters by model architecture identifier
@@ -2713,6 +2795,7 @@ spec:
                             enum:
                             - discovered
                             - derived
+                            - generated
                             - user-authored
                             type: string
                           precision:
@@ -2791,6 +2874,13 @@ spec:
                           changes the per-unit interpretation of acceleratorCount, and CEL cannot
                           read the base profile to tell whether the meaning actually changed, so it
                           conservatively requires the count be restated.
+                        type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor replaces the copied profile's
+                          acceleratorVendor.
+                        enum:
+                        - amd
+                        - nvidia
                         type: string
                       aimId:
                         description: |-
@@ -3338,6 +3428,209 @@ spec:
                   This includes metadata extraction jobs and any other model-related operations.
                   If empty, the default service account for the namespace is used.
                 type: string
+              source:
+                description: |-
+                  Source optionally overrides the default hf://<modelId> model source for
+                  modelId-backed onboarding.
+                properties:
+                  env:
+                    description: Env specifies source-specific credential overrides.
+                    items:
+                      description: EnvVar represents an environment variable present
+                        in a Container.
+                      properties:
+                        name:
+                          description: |-
+                            Name of the environment variable.
+                            May consist of any printable ASCII characters except '='.
+                          type: string
+                        value:
+                          description: |-
+                            Variable references $(VAR_NAME) are expanded
+                            using the previously defined environment variables in the container and
+                            any service environment variables. If a variable cannot be resolved,
+                            the reference in the input string will be unchanged. Double $$ are reduced
+                            to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                            "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                            Escaped references will never be expanded, regardless of whether the variable
+                            exists or not.
+                            Defaults to "".
+                          type: string
+                        valueFrom:
+                          description: Source for the environment variable's value.
+                            Cannot be used if value is not empty.
+                          properties:
+                            configMapKeyRef:
+                              description: Selects a key of a ConfigMap.
+                              properties:
+                                key:
+                                  description: The key to select.
+                                  type: string
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the ConfigMap or its
+                                    key must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            fieldRef:
+                              description: |-
+                                Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                              properties:
+                                apiVersion:
+                                  description: Version of the schema the FieldPath
+                                    is written in terms of, defaults to "v1".
+                                  type: string
+                                fieldPath:
+                                  description: Path of the field to select in the
+                                    specified API version.
+                                  type: string
+                              required:
+                              - fieldPath
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            fileKeyRef:
+                              description: |-
+                                FileKeyRef selects a key of the env file.
+                                Requires the EnvFiles feature gate to be enabled.
+                              properties:
+                                key:
+                                  description: |-
+                                    The key within the env file. An invalid key will prevent the pod from starting.
+                                    The keys defined within a source may consist of any printable ASCII characters except '='.
+                                    During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                  type: string
+                                optional:
+                                  default: false
+                                  description: |-
+                                    Specify whether the file or its key must be defined. If the file or key
+                                    does not exist, then the env var is not published.
+                                    If optional is set to true and the specified key does not exist,
+                                    the environment variable will not be set in the Pod's containers.
+
+                                    If optional is set to false and the specified key does not exist,
+                                    an error will be returned during Pod creation.
+                                  type: boolean
+                                path:
+                                  description: |-
+                                    The path within the volume from which to select the file.
+                                    Must be relative and may not contain the '..' path or start with '..'.
+                                  type: string
+                                volumeName:
+                                  description: The name of the volume mount containing
+                                    the env file.
+                                  type: string
+                              required:
+                              - key
+                              - path
+                              - volumeName
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            resourceFieldRef:
+                              description: |-
+                                Selects a resource of the container: only resources limits and requests
+                                (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                              properties:
+                                containerName:
+                                  description: 'Container name: required for volumes,
+                                    optional for env vars'
+                                  type: string
+                                divisor:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: Specifies the output format of the
+                                    exposed resources, defaults to "1"
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                resource:
+                                  description: 'Required: resource to select'
+                                  type: string
+                              required:
+                              - resource
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            secretKeyRef:
+                              description: Selects a key of a secret in the pod's
+                                namespace
+                              properties:
+                                key:
+                                  description: The key of the secret to select from.  Must
+                                    be a valid secret key.
+                                  type: string
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the Secret or its key
+                                    must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                          type: object
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  precision:
+                    allOf:
+                    - enum:
+                      - auto
+                      - fp4
+                      - fp8
+                      - fp16
+                      - fp32
+                      - fp64
+                      - bf16
+                      - int4
+                      - int8
+                    - enum:
+                      - fp4
+                      - fp8
+                      - fp16
+                      - fp32
+                      - bf16
+                      - int4
+                      - int8
+                    description: Precision describes the runtime precision of the
+                      source weights.
+                    type: string
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Size is the expected model artifact size.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  uri:
+                    description: |-
+                      URI is the location from which model weights are downloaded. When
+                      omitted, modelId-backed models default to hf://<modelId>.
+                    pattern: ^(hf|s3)://[^ \t\r\n]+$
+                    type: string
+                type: object
             type: object
             x-kubernetes-validations:
             - message: when using modelSources without aimId, set custom.hardware
@@ -3346,12 +3639,12 @@ spec:
                 || (has(self.custom) && has(self.custom.hardware)) || !has(self.customTemplates)
                 || size(self.customTemplates) == 0 || self.customTemplates.all(t,
                 has(t.hardware) || (has(self.custom) && has(self.custom.hardware)))'
-            - message: image is required unless aimId is set with versionPolicy latest
-                or any, or profileCopy/derivedFrom/profiles is set
-              rule: (has(self.image) && size(self.image) > 0) || has(self.profileCopy)
-                || has(self.derivedFrom) || has(self.profiles) || (has(self.aimId)
-                && has(self.custom) && has(self.custom.versionPolicy) && self.custom.versionPolicy
-                != 'pinned')
+            - message: image or modelId is required unless aimId is set with versionPolicy
+                latest or any, or profileCopy/derivedFrom/profiles is set
+              rule: (has(self.image) && size(self.image) > 0) || (has(self.modelId)
+                && size(self.modelId) > 0) || has(self.profileCopy) || has(self.derivedFrom)
+                || has(self.profiles) || (has(self.aimId) && has(self.custom) && has(self.custom.versionPolicy)
+                && self.custom.versionPolicy != 'pinned')
             - message: profileCopy cannot be combined with deprecated legacy AIMModel
                 fields
               rule: '!has(self.profileCopy) || (!has(self.discovery) && !has(self.defaultServiceTemplate)
@@ -3743,13 +4036,14 @@ spec:
               kind:
                 description: |-
                   Kind classifies the v1alpha2 onboarding flow that produced this
-                  model's profiles (Image / Derived / Custom). See AIMModelKind for
+                  model's profiles (Image / Generated / Derived / Custom). See AIMModelKind for
                   the per-value semantics. Populated by the v1alpha2 controller from
                   the spec shape; left empty by the v1alpha1 controller.
                 enum:
                 - Image
                 - Derived
                 - Custom
+                - Generated
                 type: string
               managedProfiles:
                 description: ManagedProfiles summarizes the direct promoted or derived
@@ -3803,6 +4097,25 @@ spec:
                   by the controller
                 format: int64
                 type: integer
+              profileGeneration:
+                description: |-
+                  ProfileGeneration reports how a Generated model's profiles were
+                  resolved. Empty for every other kind.
+                properties:
+                  matchedFallbacks:
+                    description: |-
+                      MatchedFallbacks lists the RuntimeConfig fallback names that produced a
+                      profile, in the order the profiles are named. Empty when no fallback
+                      matched the model's hardware request.
+                    items:
+                      type: string
+                    type: array
+                  strategy:
+                    description: Strategy is the mechanism that produced the profiles.
+                    enum:
+                    - RuntimeFallback
+                    type: string
+                type: object
               profileSetRef:
                 description: ProfileSetRef identifies the child profile set synthesized
                   for derivation flows.
@@ -3898,6 +4211,10 @@ spec:
         - message: spec.profiles is only supported on v1alpha2; use spec.profileCopy
             on v1alpha1
           rule: '!has(self.spec.profiles)'
+        - message: spec.modelId is only supported on v1alpha2
+          rule: '!has(self.spec.modelId)'
+        - message: spec.accelerator is only supported on v1alpha2
+          rule: '!has(self.spec.accelerator)'
     served: true
     storage: false
     subresources:
@@ -3962,6 +4279,41 @@ spec:
               fields) live on the version-specific AIMModel / AIMClusterModel root types
               in the per-version *_types.go files.
             properties:
+              accelerator:
+                description: |-
+                  Accelerator requests the hardware shape for modelId-backed onboarding —
+                  how many accelerator units the model needs and, optionally, which vendor,
+                  card model, or partitioning mode. Narrows which RuntimeConfig fallbacks
+                  apply and is stamped onto the generated profile. Defaults to one unit of
+                  whatever the matched fallback targets.
+                properties:
+                  count:
+                    description: |-
+                      Count is the number of accelerator units the model needs. It drives the
+                      generated profile's acceleratorCount, and therefore both the device
+                      resource request and the engine's tensor-parallel size. Defaults to 1.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  model:
+                    description: |-
+                      Model requests an exact detector accelerator model (e.g. "MI300X",
+                      "H100"). Empty matches any model the fallback supports.
+                    maxLength: 64
+                    type: string
+                  partitioningMode:
+                    description: |-
+                      PartitioningMode requests a GPU partitioning mode. See
+                      AcceleratorPartitioningMode on AIMProfileSpecCommon for the reserved
+                      values ("unpartitioned", "partitioned", "<C>-<M>").
+                    type: string
+                  vendor:
+                    description: Vendor requests a specific accelerator vendor.
+                    enum:
+                    - amd
+                    - nvidia
+                    type: string
+                type: object
               aimId:
                 description: |-
                   AimId is the AIM product family identifier (e.g., "qwen/qwen3-32b").
@@ -4503,6 +4855,13 @@ spec:
                           read the base profile to tell whether the meaning actually changed, so it
                           conservatively requires the count be restated.
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor replaces the copied profile's
+                          acceleratorVendor.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: |-
                           AimId stamps the derived profile's spec.aimId. When set, wins over
@@ -4970,6 +5329,13 @@ spec:
                         - gpu
                         - cpu
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor filters by the vendor-specific
+                          device-plugin contract.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: AimId filters by model architecture identifier
                           (e.g., "qwen/qwen3-32b").
@@ -5046,6 +5412,7 @@ spec:
                         enum:
                         - discovered
                         - derived
+                        - generated
                         - user-authored
                         type: string
                       precision:
@@ -5120,9 +5487,10 @@ spec:
                   rule: has(self.sourceRef) || has(self.selector.aimId) || has(self.selector.modelId)
                     || has(self.selector.profileId) || has(self.selector.engine) ||
                     has(self.selector.metric) || has(self.selector.precision) || has(self.selector.type)
-                    || has(self.selector.acceleratorModel) || has(self.selector.acceleratorType)
-                    || has(self.selector.acceleratorCount) || has(self.selector.engineArgs)
-                    || has(self.selector.modelRef) || has(self.selector.origin)
+                    || has(self.selector.acceleratorModel) || has(self.selector.acceleratorVendor)
+                    || has(self.selector.acceleratorType) || has(self.selector.acceleratorCount)
+                    || has(self.selector.engineArgs) || has(self.selector.modelRef)
+                    || has(self.selector.origin)
                 - message: version is required when versionPolicy is pinned
                   rule: has(self.version) || (has(self.versionPolicy) && self.versionPolicy
                     != 'pinned')
@@ -5330,7 +5698,8 @@ spec:
                   Image is the container image URI for this AIM model.
                   This image is inspected by the operator to select runtime profiles used by templates.
                   Discovery behavior is controlled by the discovery field and runtime config's AutoDiscovery setting.
-                  Required unless aimId is set with versionPolicy latest or any, or profileCopy is set.
+                  Required unless modelId, an eligible aimId-only flow, or a profile
+                  derivation flow is set.
                 type: string
               imageMetadata:
                 description: |-
@@ -5532,6 +5901,13 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              modelId:
+                description: |-
+                  ModelID is the canonical model identifier for generated-profile
+                  onboarding. The controller combines it with RuntimeConfig profile
+                  generation fallbacks and observed hardware to materialize profiles.
+                pattern: ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$
+                type: string
               modelSources:
                 description: |-
                   ModelSources specifies the model sources to use for this model.
@@ -5825,6 +6201,13 @@ spec:
                           read the base profile to tell whether the meaning actually changed, so it
                           conservatively requires the count be restated.
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor replaces the copied profile's
+                          acceleratorVendor.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: |-
                           AimId stamps the derived profile's spec.aimId. When set, wins over
@@ -6292,6 +6675,13 @@ spec:
                         - gpu
                         - cpu
                         type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor filters by the vendor-specific
+                          device-plugin contract.
+                        enum:
+                        - amd
+                        - nvidia
+                        type: string
                       aimId:
                         description: AimId filters by model architecture identifier
                           (e.g., "qwen/qwen3-32b").
@@ -6368,6 +6758,7 @@ spec:
                         enum:
                         - discovered
                         - derived
+                        - generated
                         - user-authored
                         type: string
                       precision:
@@ -6442,9 +6833,10 @@ spec:
                   rule: has(self.sourceRef) || has(self.selector.aimId) || has(self.selector.modelId)
                     || has(self.selector.profileId) || has(self.selector.engine) ||
                     has(self.selector.metric) || has(self.selector.precision) || has(self.selector.type)
-                    || has(self.selector.acceleratorModel) || has(self.selector.acceleratorType)
-                    || has(self.selector.acceleratorCount) || has(self.selector.engineArgs)
-                    || has(self.selector.modelRef) || has(self.selector.origin)
+                    || has(self.selector.acceleratorModel) || has(self.selector.acceleratorVendor)
+                    || has(self.selector.acceleratorType) || has(self.selector.acceleratorCount)
+                    || has(self.selector.engineArgs) || has(self.selector.modelRef)
+                    || has(self.selector.origin)
                 - message: version is required when versionPolicy is pinned
                   rule: has(self.version) || (has(self.versionPolicy) && self.versionPolicy
                     != 'pinned')
@@ -6518,6 +6910,13 @@ spec:
                             enum:
                             - gpu
                             - cpu
+                            type: string
+                          acceleratorVendor:
+                            description: AcceleratorVendor filters by the vendor-specific
+                              device-plugin contract.
+                            enum:
+                            - amd
+                            - nvidia
                             type: string
                           aimId:
                             description: AimId filters by model architecture identifier
@@ -6595,6 +6994,7 @@ spec:
                             enum:
                             - discovered
                             - derived
+                            - generated
                             - user-authored
                             type: string
                           precision:
@@ -6673,6 +7073,13 @@ spec:
                           changes the per-unit interpretation of acceleratorCount, and CEL cannot
                           read the base profile to tell whether the meaning actually changed, so it
                           conservatively requires the count be restated.
+                        type: string
+                      acceleratorVendor:
+                        description: AcceleratorVendor replaces the copied profile's
+                          acceleratorVendor.
+                        enum:
+                        - amd
+                        - nvidia
                         type: string
                       aimId:
                         description: |-
@@ -7220,6 +7627,209 @@ spec:
                   This includes metadata extraction jobs and any other model-related operations.
                   If empty, the default service account for the namespace is used.
                 type: string
+              source:
+                description: |-
+                  Source optionally overrides the default hf://<modelId> model source for
+                  modelId-backed onboarding.
+                properties:
+                  env:
+                    description: Env specifies source-specific credential overrides.
+                    items:
+                      description: EnvVar represents an environment variable present
+                        in a Container.
+                      properties:
+                        name:
+                          description: |-
+                            Name of the environment variable.
+                            May consist of any printable ASCII characters except '='.
+                          type: string
+                        value:
+                          description: |-
+                            Variable references $(VAR_NAME) are expanded
+                            using the previously defined environment variables in the container and
+                            any service environment variables. If a variable cannot be resolved,
+                            the reference in the input string will be unchanged. Double $$ are reduced
+                            to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                            "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                            Escaped references will never be expanded, regardless of whether the variable
+                            exists or not.
+                            Defaults to "".
+                          type: string
+                        valueFrom:
+                          description: Source for the environment variable's value.
+                            Cannot be used if value is not empty.
+                          properties:
+                            configMapKeyRef:
+                              description: Selects a key of a ConfigMap.
+                              properties:
+                                key:
+                                  description: The key to select.
+                                  type: string
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the ConfigMap or its
+                                    key must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            fieldRef:
+                              description: |-
+                                Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                              properties:
+                                apiVersion:
+                                  description: Version of the schema the FieldPath
+                                    is written in terms of, defaults to "v1".
+                                  type: string
+                                fieldPath:
+                                  description: Path of the field to select in the
+                                    specified API version.
+                                  type: string
+                              required:
+                              - fieldPath
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            fileKeyRef:
+                              description: |-
+                                FileKeyRef selects a key of the env file.
+                                Requires the EnvFiles feature gate to be enabled.
+                              properties:
+                                key:
+                                  description: |-
+                                    The key within the env file. An invalid key will prevent the pod from starting.
+                                    The keys defined within a source may consist of any printable ASCII characters except '='.
+                                    During Alpha stage of the EnvFiles feature gate, the key size is limited to 128 characters.
+                                  type: string
+                                optional:
+                                  default: false
+                                  description: |-
+                                    Specify whether the file or its key must be defined. If the file or key
+                                    does not exist, then the env var is not published.
+                                    If optional is set to true and the specified key does not exist,
+                                    the environment variable will not be set in the Pod's containers.
+
+                                    If optional is set to false and the specified key does not exist,
+                                    an error will be returned during Pod creation.
+                                  type: boolean
+                                path:
+                                  description: |-
+                                    The path within the volume from which to select the file.
+                                    Must be relative and may not contain the '..' path or start with '..'.
+                                  type: string
+                                volumeName:
+                                  description: The name of the volume mount containing
+                                    the env file.
+                                  type: string
+                              required:
+                              - key
+                              - path
+                              - volumeName
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            resourceFieldRef:
+                              description: |-
+                                Selects a resource of the container: only resources limits and requests
+                                (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                              properties:
+                                containerName:
+                                  description: 'Container name: required for volumes,
+                                    optional for env vars'
+                                  type: string
+                                divisor:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: Specifies the output format of the
+                                    exposed resources, defaults to "1"
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                resource:
+                                  description: 'Required: resource to select'
+                                  type: string
+                              required:
+                              - resource
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            secretKeyRef:
+                              description: Selects a key of a secret in the pod's
+                                namespace
+                              properties:
+                                key:
+                                  description: The key of the secret to select from.  Must
+                                    be a valid secret key.
+                                  type: string
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the Secret or its key
+                                    must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                          type: object
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  precision:
+                    allOf:
+                    - enum:
+                      - auto
+                      - fp4
+                      - fp8
+                      - fp16
+                      - fp32
+                      - fp64
+                      - bf16
+                      - int4
+                      - int8
+                    - enum:
+                      - fp4
+                      - fp8
+                      - fp16
+                      - fp32
+                      - bf16
+                      - int4
+                      - int8
+                    description: Precision describes the runtime precision of the
+                      source weights.
+                    type: string
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Size is the expected model artifact size.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  uri:
+                    description: |-
+                      URI is the location from which model weights are downloaded. When
+                      omitted, modelId-backed models default to hf://<modelId>.
+                    pattern: ^(hf|s3)://[^ \t\r\n]+$
+                    type: string
+                type: object
             type: object
             x-kubernetes-validations:
             - message: when using modelSources without aimId, set custom.hardware
@@ -7228,12 +7838,12 @@ spec:
                 || (has(self.custom) && has(self.custom.hardware)) || !has(self.customTemplates)
                 || size(self.customTemplates) == 0 || self.customTemplates.all(t,
                 has(t.hardware) || (has(self.custom) && has(self.custom.hardware)))'
-            - message: image is required unless aimId is set with versionPolicy latest
-                or any, or profileCopy/derivedFrom/profiles is set
-              rule: (has(self.image) && size(self.image) > 0) || has(self.profileCopy)
-                || has(self.derivedFrom) || has(self.profiles) || (has(self.aimId)
-                && has(self.custom) && has(self.custom.versionPolicy) && self.custom.versionPolicy
-                != 'pinned')
+            - message: image or modelId is required unless aimId is set with versionPolicy
+                latest or any, or profileCopy/derivedFrom/profiles is set
+              rule: (has(self.image) && size(self.image) > 0) || (has(self.modelId)
+                && size(self.modelId) > 0) || has(self.profileCopy) || has(self.derivedFrom)
+                || has(self.profiles) || (has(self.aimId) && has(self.custom) && has(self.custom.versionPolicy)
+                && self.custom.versionPolicy != 'pinned')
             - message: profileCopy cannot be combined with deprecated legacy AIMModel
                 fields
               rule: '!has(self.profileCopy) || (!has(self.discovery) && !has(self.defaultServiceTemplate)
@@ -7625,13 +8235,14 @@ spec:
               kind:
                 description: |-
                   Kind classifies the v1alpha2 onboarding flow that produced this
-                  model's profiles (Image / Derived / Custom). See AIMModelKind for
+                  model's profiles (Image / Generated / Derived / Custom). See AIMModelKind for
                   the per-value semantics. Populated by the v1alpha2 controller from
                   the spec shape; left empty by the v1alpha1 controller.
                 enum:
                 - Image
                 - Derived
                 - Custom
+                - Generated
                 type: string
               managedProfiles:
                 description: ManagedProfiles summarizes the direct promoted or derived
@@ -7685,6 +8296,25 @@ spec:
                   by the controller
                 format: int64
                 type: integer
+              profileGeneration:
+                description: |-
+                  ProfileGeneration reports how a Generated model's profiles were
+                  resolved. Empty for every other kind.
+                properties:
+                  matchedFallbacks:
+                    description: |-
+                      MatchedFallbacks lists the RuntimeConfig fallback names that produced a
+                      profile, in the order the profiles are named. Empty when no fallback
+                      matched the model's hardware request.
+                    items:
+                      type: string
+                    type: array
+                  strategy:
+                    description: Strategy is the mechanism that produced the profiles.
+                    enum:
+                    - RuntimeFallback
+                    type: string
+                type: object
               profileSetRef:
                 description: ProfileSetRef identifies the child profile set synthesized
                   for derivation flows.
@@ -7774,12 +8404,32 @@ spec:
             type: object
         type: object
         x-kubernetes-validations:
-        - message: exactly one of spec.image or spec.profiles must be set on v1alpha2
+        - message: exactly one of spec.image, spec.modelId, or spec.profiles must
+            be set on v1alpha2
           optionalOldSelf: true
-          rule: (has(self.spec.image) && size(self.spec.image) > 0) != (has(self.spec.profiles)
-            || has(self.spec.derivedFrom)) || (oldSelf.hasValue() && !((has(oldSelf.value().spec.image)
-            && size(oldSelf.value().spec.image) > 0) != (has(oldSelf.value().spec.profiles)
-            || has(oldSelf.value().spec.derivedFrom))))
+          rule: '((has(self.spec.image) && size(self.spec.image) > 0) ? 1 : 0) + ((has(self.spec.modelId)
+            && size(self.spec.modelId) > 0) ? 1 : 0) + ((has(self.spec.profiles) ||
+            has(self.spec.derivedFrom)) ? 1 : 0) == 1 || (oldSelf.hasValue() && (((has(oldSelf.value().spec.image)
+            && size(oldSelf.value().spec.image) > 0) ? 1 : 0) + ((has(oldSelf.value().spec.modelId)
+            && size(oldSelf.value().spec.modelId) > 0) ? 1 : 0) + ((has(oldSelf.value().spec.profiles)
+            || has(oldSelf.value().spec.derivedFrom)) ? 1 : 0) != 1))'
+        - message: spec.source is only valid with spec.modelId
+          rule: '!has(self.spec.source) || (has(self.spec.modelId) && size(self.spec.modelId)
+            > 0)'
+        - message: spec.accelerator is only valid with spec.modelId; image-backed
+            profiles declare their own hardware, and AIMService.spec.profile.selector
+            narrows which one is deployed
+          rule: '!has(self.spec.accelerator) || (has(self.spec.modelId) && size(self.spec.modelId)
+            > 0)'
+        - message: spec.modelId cannot be combined with image discovery or model runtime
+            fields; configure the generated profile runtime in RuntimeConfig
+          rule: '!has(self.spec.modelId) || (!has(self.spec.discovery) && !has(self.spec.defaultServiceTemplate)
+            && !has(self.spec.env) && !has(self.spec.imageMetadata) && (!has(self.spec.imagePullSecrets)
+            || size(self.spec.imagePullSecrets) == 0) && !has(self.spec.serviceAccountName)
+            && (!has(self.spec.resources) || ((!has(self.spec.resources.requests)
+            || size(self.spec.resources.requests) == 0) && (!has(self.spec.resources.limits)
+            || size(self.spec.resources.limits) == 0) && (!has(self.spec.resources.claims)
+            || size(self.spec.resources.claims) == 0))))'
         - message: spec.profileCopy is forbidden on v1alpha2; use spec.profiles
           optionalOldSelf: true
           rule: '!has(self.spec.profileCopy) || (oldSelf.hasValue() && has(oldSelf.value().spec.profileCopy))'
@@ -7799,10 +8449,11 @@ spec:
           rule: '!has(self.spec.modelSources) || size(self.spec.modelSources) == 0
             || (oldSelf.hasValue() && has(oldSelf.value().spec.modelSources) && size(oldSelf.value().spec.modelSources)
             > 0)'
-        - message: spec.profiles cannot be combined with spec.aimId, spec.discovery,
-            spec.defaultServiceTemplate, spec.runtimeConfigName, spec.env, or spec.imageMetadata
+        - message: spec.profiles cannot be combined with spec.aimId, spec.source,
+            spec.discovery, spec.defaultServiceTemplate, spec.runtimeConfigName, spec.env,
+            or spec.imageMetadata
           rule: (!has(self.spec.profiles) && !has(self.spec.derivedFrom)) || (!has(self.spec.aimId)
-            && !has(self.spec.discovery) && !has(self.spec.defaultServiceTemplate)
+            && !has(self.spec.source) && !has(self.spec.discovery) && !has(self.spec.defaultServiceTemplate)
             && !has(self.spec.runtimeConfigName) && !has(self.spec.env) && !has(self.spec.imageMetadata))
     served: true
     storage: true

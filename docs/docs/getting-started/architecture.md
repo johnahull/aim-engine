@@ -31,25 +31,27 @@ v1alpha2 is the current API. v1alpha1 resources remain supported during the depr
 | CRD | Scope | Role |
 |---|---|---|
 | `AIMService` | Namespace | Deploys an inference endpoint by resolving a profile and creating a KServe InferenceService. |
-| `AIMModel` / `AIMClusterModel` | Namespace / Cluster | Onboards a model — three flows (official, fine-tuned, custom). Produces profiles. |
+| `AIMModel` / `AIMClusterModel` | Namespace / Cluster | Onboards a model — four flows (official, generated, fine-tuned, custom). Produces profiles. |
 | `AIMProfile` / `AIMClusterProfile` | Namespace / Cluster | Self-contained runtime configuration (image, accelerator, engine args, model sources). The unit a service resolves to. |
 | `AIMProfileSet` / `AIMClusterProfileSet` | Namespace / Cluster | Derives profiles by selector + overrides. Usually synthesised by `AIMModel.spec.profiles`, also usable standalone. |
 | `AIMProfileCache` | Namespace | Pre-warms a profile's `modelSources` to a PVC for fast service start. |
 | `AIMArtifact` | Namespace | Manages a single model artifact download to a PVC. |
-| `AIMClusterModelSource` | Cluster | Auto-discovers AIM models from a container registry. |
+| `AIMClusterModelSource` | Cluster | Auto-discovers AIM images from a registry (`spec.filters`/`spec.images`) or materializes declared model IDs (`spec.models`). Declared models are created as v1alpha2 `AIMClusterModel`, since `spec.modelId` is a v1alpha2-only field; discovered images are created as v1alpha1. Both are the same stored object — v1alpha2 is the storage version. |
 | `AIMRuntimeConfig` / `AIMClusterRuntimeConfig` | Namespace / Cluster | Storage defaults, routing defaults, environment defaults. |
 
-## Three model flows
+## Four model flows
 
-Every `AIMModel` resolves to one of three flows, selected by which spec field is set. The full mechanics live in [AIM Models](../concepts/models.md):
+Every `AIMModel` resolves to one of four flows, selected by which spec field is set. The full mechanics live in [AIM Models](../concepts/models.md):
 
 | Flow | Spec | Source of profiles |
 |---|---|---|
 | **Official** | `spec.image` (AIM image) | Image discovery — profile YAMLs inside the container |
+| **Generated** | `spec.modelId` | Hardware-matched RuntimeConfig fallbacks |
 | **Fine-tuned** | `spec.profiles.derivedFrom` (selecting deployable profiles) | A previously-applied official AIMModel |
 | **Custom** | `spec.profiles.derivedFrom` (selecting base-image base profiles) | A previously-applied base-image AIMModel |
 
-CRD validation enforces "exactly one of `spec.image` or `spec.profiles`" — neither can be set, both cannot be set.
+CRD validation enforces exactly one of `spec.image`, `spec.modelId`, or
+`spec.profiles`.
 
 ## Service resolution
 

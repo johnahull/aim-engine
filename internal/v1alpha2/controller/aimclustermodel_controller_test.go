@@ -106,10 +106,14 @@ func TestFindClusterModelsForNodeChange_QueuesEveryImageBackedModel(t *testing.T
 			},
 		},
 	}
+	generated := &aimv1alpha2.AIMClusterModel{
+		ObjectMeta: metav1.ObjectMeta{Name: "generated"},
+		Spec:       aimv1alpha1.AIMModelSpec{ModelID: "Qwen/Qwen3.5-0.8B"},
+	}
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(imageOnly, imageWithProfileCopy, fineTuneOnly).
+		WithObjects(imageOnly, imageWithProfileCopy, fineTuneOnly, generated).
 		Build()
 
 	reconciler := &AIMClusterModelReconciler{Client: fakeClient}
@@ -121,7 +125,7 @@ func TestFindClusterModelsForNodeChange_QueuesEveryImageBackedModel(t *testing.T
 	}
 	sort.Strings(got)
 
-	want := []string{"image-only", "image-with-profile-copy"}
+	want := []string{"generated", "image-only", "image-with-profile-copy"}
 	if len(got) != len(want) {
 		t.Fatalf("len(requests) = %d, want %d (%v)", len(got), len(want), got)
 	}

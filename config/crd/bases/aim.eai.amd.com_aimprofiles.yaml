@@ -35,6 +35,10 @@ spec:
     - jsonPath: .status.hardwareSummary
       name: Hardware
       type: string
+    - jsonPath: .spec.acceleratorVendor
+      name: Vendor
+      priority: 1
+      type: string
     - jsonPath: .spec.metric
       name: Metric
       type: string
@@ -170,6 +174,19 @@ spec:
                   AIM Engine computes default resource requests from this field combined
                   with AcceleratorCount and cluster-level configuration.
                 type: string
+              acceleratorVendor:
+                description: |-
+                  AcceleratorVendor selects the vendor-specific device-plugin resource and
+                  vendor node label used for this profile. A generic NVIDIA profile can set
+                  this to "nvidia" without declaring an acceleratorModel; AIM Engine then
+                  requests nvidia.com/gpu and matches NVIDIA GPU nodes of any model.
+
+                  Empty preserves the legacy AMD behavior for profiles created before this
+                  field existed.
+                enum:
+                - amd
+                - nvidia
+                type: string
               aimId:
                 description: |-
                   AimId is the model architecture identifier (e.g., "qwen/qwen3-32b").
@@ -186,6 +203,22 @@ spec:
                 x-kubernetes-validations:
                 - message: aimId is immutable once set
                   rule: oldSelf == '' || self == oldSelf
+              autoSelectionPolicy:
+                default: optimized
+                description: |-
+                  AutoSelectionPolicy controls which optimization tiers may participate in
+                  automatic selection when the AIMService does not explicitly set
+                  minimumType.
+
+                  "optimized" applies the implicit optimized floor. "any" permits the
+                  profile to participate in a second selection pass regardless of its type,
+                  but only when no optimized candidate matched. It never overrides an
+                  explicitly authored minimumType. Explicit spec.profile.name resolution is
+                  unaffected.
+                enum:
+                - optimized
+                - any
+                type: string
               caching:
                 description: Caching configures model caching behavior for this namespace-scoped
                   profile.
@@ -577,14 +610,15 @@ spec:
                 description: |-
                   ManualSelectionOnly is DEPRECATED and no longer honored by the resolver.
                   It was a binary gate excluding a profile from automatic AIMService
-                  selection; that intent is now expressed through the graded `type`
-                  hierarchy (optimized > general > preview > unoptimized) combined with the
-                  selector's `minimumType` floor. The field is retained for backward
-                  compatibility (existing objects and aim-build profile YAMLs still set it)
-                  but has no effect on selection; it will be removed in a future API
-                  version. Use `type: unoptimized` (+ a selector `minimumType`) instead.
+                  selection. Optimization-tier consent is now expressed through the graded
+                  `type` hierarchy combined with the selector's `minimumType` floor, while
+                  eligibility for implicit any-tier automatic selection is expressed through
+                  `autoSelectionPolicy`. The field is retained for backward compatibility
+                  (existing objects and aim-build profile YAMLs still set it) but has no
+                  effect on selection; it will be removed in a future API version.
 
-                  Deprecated: superseded by `type` + selector `minimumType`; ignored by the resolver.
+                  Deprecated: superseded by `type`, selector `minimumType`, and
+                  `autoSelectionPolicy`; ignored by the resolver.
                 type: boolean
               metric:
                 allOf:
@@ -1071,6 +1105,7 @@ spec:
                     - discovered: emitted by image discovery (AIMModel.spec.image).
                     - derived: emitted by an AIMProfileSet or
                       AIMModel.spec.profiles.derivedFrom.
+                    - generated: emitted from AIMModel.spec.modelId and a RuntimeConfig fallback.
                     - user-authored: created independently by a user.
 
                   Backfilled by the AIMProfile reconciler when not stamped at creation
@@ -1078,6 +1113,7 @@ spec:
                 enum:
                 - discovered
                 - derived
+                - generated
                 - user-authored
                 type: string
               projectedModelSlugRuntimeName:

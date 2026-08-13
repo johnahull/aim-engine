@@ -360,6 +360,22 @@ const (
 	AIMProfileTypeAny AIMProfileType = "any"
 )
 
+// AIMProfileAutoSelectionPolicy controls which optimization tiers may
+// participate in automatic selection when the AIMService does not explicitly
+// set selector.minimumType.
+// +kubebuilder:validation:Enum=optimized;any
+type AIMProfileAutoSelectionPolicy string
+
+const (
+	// AIMProfileAutoSelectionPolicyOptimized applies the implicit optimized
+	// minimumType floor.
+	AIMProfileAutoSelectionPolicyOptimized AIMProfileAutoSelectionPolicy = "optimized"
+	// AIMProfileAutoSelectionPolicyAny permits a profile of any optimization
+	// tier to participate in a second selection pass when no optimized candidate
+	// matched and the AIMService did not explicitly set selector.minimumType.
+	AIMProfileAutoSelectionPolicyAny AIMProfileAutoSelectionPolicy = "any"
+)
+
 // AIMProfileTypeFloor enumerates the values accepted by a profile selector's
 // minimumType floor: the real optimization tiers plus the selector-only "any"
 // sentinel that disables the floor.

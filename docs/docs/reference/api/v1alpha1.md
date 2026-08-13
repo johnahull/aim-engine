@@ -392,6 +392,25 @@ AIMClusterModelSourceList contains a list of AIMClusterModelSource.
 | `items` _[AIMClusterModelSource](#aimclustermodelsource) array_ |  |  |  |
 
 
+#### AIMClusterModelSourceModel
+
+
+
+AIMClusterModelSourceModel is a modelId-backed cluster model declaration.
+
+
+
+_Appears in:_
+- [AIMClusterModelSourceSpec](#aimclustermodelsourcespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `modelId` _string_ | ModelID is the canonical model identifier. |  | Pattern: `^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$` <br /> |
+| `aimId` _string_ | AimID optionally overrides the model architecture identifier. |  | Optional: \{\} <br /> |
+| `source` _[AIMModelSourceLocation](#aimmodelsourcelocation)_ | Source optionally overrides the default hf://<modelId> source. |  | Optional: \{\} <br /> |
+| `accelerator` _[AIMModelAcceleratorRequest](#aimmodelacceleratorrequest)_ | Accelerator optionally requests the hardware shape for the generated<br />model. Mirrors AIMModelSpec.Accelerator. |  | Optional: \{\} <br /> |
+
+
 #### AIMClusterModelSourceSpec
 
 
@@ -409,6 +428,7 @@ _Appears in:_
 | `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets contains references to secrets for authenticating to private registries.<br />Secrets must exist in the operator namespace (typically aim-system).<br />Used for both registry catalog listing and image metadata extraction. |  | Optional: \{\} <br /> |
 | `filters` _[ModelSourceFilter](#modelsourcefilter) array_ | Filters define which images to discover and sync.<br />Each filter specifies an image selector with optional version constraints and exclusions.<br />Multiple filters are combined with OR logic (any match includes the image).<br />Use this field for advanced matching options. For simple explicit image lists, use Images instead. |  | MaxItems: 100 <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `images` _string array_ | Images defines a simple explicit list of images to discover and sync.<br />Use this for straightforward static declarations without per-filter options.<br />Supported image formats:<br />- Repository with tag: "amdenterpriseai/aim-qwen-qwen3-32b:0.8.4"<br />- Repository without tag: "amdenterpriseai/aim-qwen-qwen3-32b" (uses Versions if set)<br />- Full URI with tag: "ghcr.io/silogen/aim-llama:1.0.0"<br />Must not be set together with Filters. |  | MaxItems: 100 <br />MinItems: 1 <br />Optional: \{\} <br /> |
+| `models` _[AIMClusterModelSourceModel](#aimclustermodelsourcemodel) array_ | Models declares canonical model identifiers to materialize as<br />v1alpha2 AIMClusterModel resources. Models may be combined with either<br />Filters or Images.<br />Lifecycle differs from registry discovery in one respect. Discovered<br />images are a snapshot of an external registry, so they are only ever<br />appended. A declaration is desired state the user edits in this spec, so<br />models this source owns are kept in sync with their declaration —<br />editing aimId, source, or accelerator updates the existing model in<br />place. Neither kind is ever deleted: removing a declaration leaves its<br />AIMClusterModel behind for an operator to remove deliberately. |  | MaxItems: 100 <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `syncInterval` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#duration-v1-meta)_ | SyncInterval defines how often to sync with the registry.<br />Defaults to 1h. Minimum recommended interval is 15m to avoid rate limiting.<br />Format: duration string (e.g., "30m", "1h", "2h30m"). | 1h | Optional: \{\} <br /> |
 | `versions` _string array_ | Versions specifies global semantic version constraints applied to all filters.<br />Individual filters can override this with their own version constraints.<br />Constraints use semver syntax: >=1.0.0, <2.0.0, ~1.2.0, ^1.0.0, etc.<br />Non-semver tags (e.g., "latest", "dev") are silently skipped.<br />Version ranges work on all registries (including ghcr.io, gcr.io) when combined with<br />exact repository names (no wildcards). The controller uses the Tags List API to fetch<br />all tags for the repository and filters them by the semver constraint.<br />Example: registry=ghcr.io, filters=[\{image: "silogen/aim-llama"\}], versions=[">=1.0.0"]<br />will fetch all tags from ghcr.io/silogen/aim-llama and include only those >=1.0.0. |  | Optional: \{\} <br /> |
 | `maxModels` _integer_ | MaxModels is the maximum number of AIMClusterModel resources to create from this source.<br />Once this limit is reached, no new models will be created, even if more matching images are discovered.<br />Existing models are never deleted.<br />This prevents runaway model creation from overly broad filters. | 100 | Maximum: 10000 <br />Minimum: 1 <br />Optional: \{\} <br /> |
@@ -841,6 +861,39 @@ _Appears in:_
 | `status` _[AIMModelStatus](#aimmodelstatus)_ |  |  |  |
 
 
+#### AIMModelAcceleratorRequest
+
+
+
+AIMModelAcceleratorRequest is the per-model hardware request for
+modelId-backed onboarding. RuntimeConfig fallbacks are cluster policy — they
+describe which runtime image serves which class of hardware — so the shape of
+one model's deployment (how many devices it needs, and optionally which card)
+belongs here rather than on the fallback.
+
+Each field plays two roles: it narrows which fallbacks apply (a fallback
+matches when its own match.* is empty or equal to the request) and it is
+stamped onto the generated profile. Fields left empty inherit the matched
+fallback's value.
+
+Only valid alongside spec.modelId. Image-backed models get their hardware
+from discovery, and narrowing which discovered profile a deployment picks is
+AIMService.spec.profile.selector's job.
+
+
+
+_Appears in:_
+- [AIMClusterModelSourceModel](#aimclustermodelsourcemodel)
+- [AIMModelSpec](#aimmodelspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `vendor` _[AcceleratorVendor](#acceleratorvendor)_ | Vendor requests a specific accelerator vendor. |  | Enum: [amd nvidia] <br />Optional: \{\} <br /> |
+| `model` _string_ | Model requests an exact detector accelerator model (e.g. "MI300X",<br />"H100"). Empty matches any model the fallback supports. |  | MaxLength: 64 <br />Optional: \{\} <br /> |
+| `count` _integer_ | Count is the number of accelerator units the model needs. It drives the<br />generated profile's acceleratorCount, and therefore both the device<br />resource request and the engine's tensor-parallel size. Defaults to 1. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `partitioningMode` _string_ | PartitioningMode requests a GPU partitioning mode. See<br />AcceleratorPartitioningMode on AIMProfileSpecCommon for the reserved<br />values ("unpartitioned", "partitioned", "<C>-<M>"). |  | Optional: \{\} <br /> |
+
+
 #### AIMModelConfig
 
 
@@ -857,6 +910,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `autoDiscovery` _boolean_ | AutoDiscovery controls whether models run discovery by default.<br />When true, models run discovery jobs to extract metadata and auto-create templates.<br />When false, discovery is skipped. Discovery failures are non-fatal and reported via conditions. |  | Optional: \{\} <br /> |
+| `profileGeneration` _[AIMProfileGenerationConfig](#aimprofilegenerationconfig)_ | ProfileGeneration configures generic runtime fallbacks used to generate<br />profiles for v1alpha2 modelId-backed models. |  | Optional: \{\} <br /> |
 
 
 #### AIMModelDiscoveryConfig
@@ -890,7 +944,7 @@ AIMModelKind classifies the v1alpha2 AIMModel onboarding flow that
 produced this model's profiles. Populated by the v1alpha2 controller
 during reconciliation from the model's spec shape.
 
-The three kinds correspond 1:1 to the "three flows" documented in
+The four kinds correspond 1:1 to the onboarding flows documented in
 concepts/models.md:
 
   - Image    — spec.image is set; profiles come from in-cluster image
@@ -905,13 +959,15 @@ concepts/models.md:
   - Custom   — spec.profiles.derivedFrom with selector.role=base;
     profiles are derived by overlaying BYO weights + target identity
     onto a base image's generic base profiles.
+  - Generated — spec.modelId is set; profiles are generated from matching
+    RuntimeConfig fallbacks and observed cluster hardware.
 
 Empty when the spec hasn't been classified yet (controller hasn't
-reconciled) or when the spec shape doesn't match any of the three
-flows (a misconfigured spec the CEL validators didn't catch).
+reconciled) or when the spec shape doesn't match any onboarding flow
+(a misconfigured spec the CEL validators didn't catch).
 
 _Validation:_
-- Enum: [Image Derived Custom]
+- Enum: [Image Derived Custom Generated]
 
 _Appears in:_
 - [AIMModelStatus](#aimmodelstatus)
@@ -921,6 +977,7 @@ _Appears in:_
 | `Image` |  |
 | `Derived` |  |
 | `Custom` |  |
+| `Generated` |  |
 
 
 #### AIMModelList
@@ -939,6 +996,23 @@ AIMModelList contains a list of AIMModel.
 | `kind` _string_ | `AIMModelList` | | |
 | `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMModel](#aimmodel) array_ |  |  |  |
+
+
+#### AIMModelProfileGenerationStatus
+
+
+
+AIMModelProfileGenerationStatus reports the resolution of a Generated model.
+
+
+
+_Appears in:_
+- [AIMModelStatus](#aimmodelstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `strategy` _[ProfileGenerationStrategy](#profilegenerationstrategy)_ | Strategy is the mechanism that produced the profiles. |  | Enum: [RuntimeFallback] <br />Optional: \{\} <br /> |
+| `matchedFallbacks` _string array_ | MatchedFallbacks lists the RuntimeConfig fallback names that produced a<br />profile, in the order the profiles are named. Empty when no fallback<br />matched the model's hardware request. |  | Optional: \{\} <br /> |
 
 
 #### AIMModelProfilesDerivedFrom
@@ -1017,6 +1091,28 @@ _Appears in:_
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies per-source credential overrides.<br />These variables are used for authentication when downloading this specific source.<br />Takes precedence over base-level env for the same variable name. |  | Optional: \{\} <br /> |
 
 
+#### AIMModelSourceLocation
+
+
+
+AIMModelSourceLocation describes the location and optional metadata for a
+v1alpha2 modelId-backed model. The modelId itself lives on AIMModelSpec so
+users do not have to repeat it in both the model and source declarations.
+
+
+
+_Appears in:_
+- [AIMClusterModelSourceModel](#aimclustermodelsourcemodel)
+- [AIMModelSpec](#aimmodelspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uri` _string_ | URI is the location from which model weights are downloaded. When<br />omitted, modelId-backed models default to hf://<modelId>. |  | Pattern: `^(hf\|s3)://[^ \t\r\n]+$` <br />Optional: \{\} <br /> |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | Size is the expected model artifact size. |  | Optional: \{\} <br /> |
+| `precision` _[AIMPrecision](#aimprecision)_ | Precision describes the runtime precision of the source weights. |  | Enum: [fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies source-specific credential overrides. |  | Optional: \{\} <br /> |
+
+
 #### AIMModelSourceType
 
 _Underlying type:_ _string_
@@ -1027,8 +1123,8 @@ Only set by the v1alpha1 controller, which lumps fine-tunes and custom
 models together as "Custom" — losing the distinction users actually
 care about. The v1alpha2 controller intentionally does not populate
 this field on v1alpha2-shaped specs; v1alpha2 consumers should read
-AIMModelStatus.Kind instead, which is a three-way classifier
-(Image / Derived / Custom).
+AIMModelStatus.Kind instead, which classifies Image, Generated, Derived,
+and Custom onboarding.
 
 _Validation:_
 - Enum: [Image Custom]
@@ -1062,8 +1158,11 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `image` _string_ | Image is the container image URI for this AIM model.<br />This image is inspected by the operator to select runtime profiles used by templates.<br />Discovery behavior is controlled by the discovery field and runtime config's AutoDiscovery setting.<br />Required unless aimId is set with versionPolicy latest or any, or profileCopy is set. |  | Optional: \{\} <br /> |
+| `image` _string_ | Image is the container image URI for this AIM model.<br />This image is inspected by the operator to select runtime profiles used by templates.<br />Discovery behavior is controlled by the discovery field and runtime config's AutoDiscovery setting.<br />Required unless modelId, an eligible aimId-only flow, or a profile<br />derivation flow is set. |  | Optional: \{\} <br /> |
+| `modelId` _string_ | ModelID is the canonical model identifier for generated-profile<br />onboarding. The controller combines it with RuntimeConfig profile<br />generation fallbacks and observed hardware to materialize profiles. |  | Pattern: `^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$` <br />Optional: \{\} <br /> |
 | `aimId` _string_ | AimId is the AIM product family identifier (e.g., "qwen/qwen3-32b").<br />When set together with modelSources, enables aimId-based template matching:<br />the controller finds official templates by aimId, filters by versionPolicy,<br />matches by modelId, and creates copies with the custom weight source. |  | Optional: \{\} <br /> |
+| `source` _[AIMModelSourceLocation](#aimmodelsourcelocation)_ | Source optionally overrides the default hf://<modelId> model source for<br />modelId-backed onboarding. |  | Optional: \{\} <br /> |
+| `accelerator` _[AIMModelAcceleratorRequest](#aimmodelacceleratorrequest)_ | Accelerator requests the hardware shape for modelId-backed onboarding —<br />how many accelerator units the model needs and, optionally, which vendor,<br />card model, or partitioning mode. Narrows which RuntimeConfig fallbacks<br />apply and is stamped onto the generated profile. Defaults to one unit of<br />whatever the matched fallback targets. |  | Optional: \{\} <br /> |
 | `profileCopy` _[AIMProfileSetSpec](#aimprofilesetspec)_ | ProfileCopy reuses the AIMProfileSet derivation shape so an AIMModel can<br />publish derivative AIMProfiles directly. The controller may synthesize a<br />child AIMProfileSet and fill SourceRef when image-backed discovery is<br />involved. Mutually exclusive with all deprecated v1alpha1 fields.<br />DEPRECATED on v1alpha2: use spec.profiles. v1alpha1 still accepts<br />ProfileCopy. v1alpha2 CRD CEL forbids ProfileCopy. |  | Optional: \{\} <br /> |
 | `derivedFrom` _[AIMProfileSetSpec](#aimprofilesetspec)_ | DerivedFrom is the legacy flat shape of v1alpha2's profile-derivation<br />onboarding surface. New objects must use spec.profiles instead; the<br />field is retained so existing v1alpha2 objects (and the v1alpha2<br />reconciler reading them) round-trip cleanly.<br />DEPRECATED: prefer spec.profiles.derivedFrom on v1alpha2. |  | Optional: \{\} <br /> |
 | `profiles` _[AIMModelProfilesSpec](#aimmodelprofilesspec)_ | Profiles is the v1alpha2 fine-tune / custom-model onboarding surface.<br />It groups the source descriptor (`profiles.derivedFrom.selector` /<br />`profiles.derivedFrom.sourceRef`), the version filter<br />(`profiles.versionPolicy` / `profiles.version`), and the modifications<br />applied to copies (`profiles.overrides`). When set, the AIMModel<br />reconciler synthesises a child AIMProfileSet from this block.<br />Mutually exclusive with spec.image (exactly one of the two is required<br />for v1alpha2 AIMModel). v1alpha1 rejects spec.profiles via per-version<br />CEL. |  | Optional: \{\} <br /> |
@@ -1100,7 +1199,8 @@ _Appears in:_
 | `resolvedRuntimeConfig` _[AIMResolvedReference](#aimresolvedreference)_ | ResolvedRuntimeConfig captures metadata about the runtime config that was resolved. |  | Optional: \{\} <br /> |
 | `imageMetadata` _[ImageMetadata](#imagemetadata)_ | ImageMetadata is the metadata extracted from an AIM image |  | Optional: \{\} <br /> |
 | `sourceType` _[AIMModelSourceType](#aimmodelsourcetype)_ | SourceType indicates how this model's artifacts are sourced.<br />- "Image": Model discovered from container image labels<br />- "Custom": Model uses explicit spec.modelSources<br />Set by the controller based on whether spec.modelSources is populated.<br />Note: only populated by the v1alpha1 controller; v1alpha2 consumers<br />should read .status.kind instead, which distinguishes fine-tunes<br />(Derived) from BYO base-image overlays (Custom). |  | Enum: [Image Custom] <br />Optional: \{\} <br /> |
-| `kind` _[AIMModelKind](#aimmodelkind)_ | Kind classifies the v1alpha2 onboarding flow that produced this<br />model's profiles (Image / Derived / Custom). See AIMModelKind for<br />the per-value semantics. Populated by the v1alpha2 controller from<br />the spec shape; left empty by the v1alpha1 controller. |  | Enum: [Image Derived Custom] <br />Optional: \{\} <br /> |
+| `kind` _[AIMModelKind](#aimmodelkind)_ | Kind classifies the v1alpha2 onboarding flow that produced this<br />model's profiles (Image / Generated / Derived / Custom). See AIMModelKind for<br />the per-value semantics. Populated by the v1alpha2 controller from<br />the spec shape; left empty by the v1alpha1 controller. |  | Enum: [Image Derived Custom Generated] <br />Optional: \{\} <br /> |
+| `profileGeneration` _[AIMModelProfileGenerationStatus](#aimmodelprofilegenerationstatus)_ | ProfileGeneration reports how a Generated model's profiles were<br />resolved. Empty for every other kind. |  | Optional: \{\} <br /> |
 | `aimId` _string_ | AimId is the resolved model architecture identifier for this model.<br />Populated by the v1alpha2 controller from spec.aimId or discovered metadata. |  | Optional: \{\} <br /> |
 | `baseImage` _string_ | BaseImage is the extracted AIM base image reference (AIM_BASE_IMAGE_REF) when known.<br />Used when resolving deployment images for fine-tuned models that have no spec.image. |  | Optional: \{\} <br /> |
 | `version` _string_ | Version is the effective image version of the model. Populated from<br />the spec.image tag (`amdenterpriseai/aim-qwen-qwen3-32b:0.11.0` →<br />`0.11.0`) during reconciliation. Empty for models that have no<br />spec.image (e.g. fine-tuned models derived from a parent) or that<br />reference an image by digest.<br />This mirrors AIMProfileStatus.Version so the two surfaces stay in<br />lock-step: a single image-tag extraction rule governs what users<br />see in the kubectl printcolumn for both kinds.<br />The image-author-declared version (i.e. the<br />`org.opencontainers.image.version` OCI label) is preserved separately<br />under .status.imageMetadata.oci.version for users that want to inspect<br />what the image build pipeline stamped. The two values usually agree;<br />when the OCI label is missing or empty, this field still surfaces a<br />useful version from the tag itself. |  | Optional: \{\} <br /> |
@@ -1124,6 +1224,7 @@ _Appears in:_
 - [AIMClusterServiceTemplateSpec](#aimclusterservicetemplatespec)
 - [AIMDiscoveryProfileMetadata](#aimdiscoveryprofilemetadata)
 - [AIMModelSource](#aimmodelsource)
+- [AIMModelSourceLocation](#aimmodelsourcelocation)
 - [AIMProfileMetadata](#aimprofilemetadata)
 - [AIMRuntimeParameters](#aimruntimeparameters)
 - [AIMServiceOverrides](#aimserviceoverrides)
@@ -1144,6 +1245,108 @@ _Appears in:_
 | `bf16` |  |
 | `int4` |  |
 | `int8` |  |
+
+
+#### AIMProfileAutoSelectionPolicy
+
+_Underlying type:_ _string_
+
+AIMProfileAutoSelectionPolicy controls which optimization tiers may
+participate in automatic selection when the AIMService does not explicitly
+set selector.minimumType.
+
+_Validation:_
+- Enum: [optimized any]
+
+_Appears in:_
+- [AIMProfileGenerationFallback](#aimprofilegenerationfallback)
+
+| Field | Description |
+| --- | --- |
+| `optimized` | AIMProfileAutoSelectionPolicyOptimized applies the implicit optimized<br />minimumType floor.<br /> |
+| `any` | AIMProfileAutoSelectionPolicyAny permits a profile of any optimization<br />tier to participate in a second selection pass when no optimized candidate<br />matched and the AIMService did not explicitly set selector.minimumType.<br /> |
+
+
+#### AIMProfileGenerationConfig
+
+
+
+AIMProfileGenerationConfig controls profile generation for modelId-backed
+AIMModel and AIMClusterModel resources.
+
+
+
+_Appears in:_
+- [AIMModelConfig](#aimmodelconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `fallbacks` _[AIMProfileGenerationFallback](#aimprofilegenerationfallback) array_ | Fallbacks are runtime templates selected by observed cluster hardware.<br />Namespace entries replace cluster entries with the same name. |  | Optional: \{\} <br /> |
+
+
+#### AIMProfileGenerationFallback
+
+
+
+AIMProfileGenerationFallback describes one hardware match and runtime
+template used to generate a self-contained AIMProfile.
+
+
+
+_Appears in:_
+- [AIMProfileGenerationConfig](#aimprofilegenerationconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the stable fallback identity and merge key. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `priority` _integer_ | Priority selects the primary profile when multiple fallbacks match.<br />Higher values win. |  | Optional: \{\} <br /> |
+| `type` _[AIMProfileType](#aimprofiletype)_ | Type is the optimization tier stamped on the generated profile.<br />Generated profiles default to "unoptimized" because a generic runtime<br />template is not tuned for any particular model. AutoSelectionPolicy<br />controls whether a lower-tier generated profile can serve as an automatic<br />fallback. | unoptimized | Enum: [optimized general preview unoptimized] <br />Optional: \{\} <br /> |
+| `autoSelectionPolicy` _[AIMProfileAutoSelectionPolicy](#aimprofileautoselectionpolicy)_ | AutoSelectionPolicy is stamped on the generated profile.<br />"optimized" keeps the profile subject to the implicit optimized<br />minimumType floor. "any" permits it to participate in a second<br />automatic-selection pass when no optimized candidate matched and the<br />service did not explicitly set minimumType. | optimized | Enum: [optimized any] <br />Optional: \{\} <br /> |
+| `match` _[AIMProfileGenerationMatch](#aimprofilegenerationmatch)_ | Match constrains the hardware on which this fallback is applicable. |  |  |
+| `runtime` _[AIMProfileGenerationRuntime](#aimprofilegenerationruntime)_ | Runtime is copied into the generated profile. |  |  |
+
+
+#### AIMProfileGenerationMatch
+
+
+
+AIMProfileGenerationMatch identifies compatible accelerator hardware.
+
+
+
+_Appears in:_
+- [AIMProfileGenerationFallback](#aimprofilegenerationfallback)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor selects the hardware vendor. |  | Enum: [amd nvidia] <br /> |
+| `acceleratorType` _[AcceleratorType](#acceleratortype)_ | AcceleratorType selects GPU or CPU hardware. |  | Enum: [gpu cpu] <br /> |
+| `acceleratorModel` _string_ | AcceleratorModel optionally requires an exact detector model label. |  | Optional: \{\} <br /> |
+| `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode optionally requires a partitioning mode. |  | Optional: \{\} <br /> |
+
+
+#### AIMProfileGenerationRuntime
+
+
+
+AIMProfileGenerationRuntime contains the profile runtime fields controlled by
+cluster or namespace policy.
+
+
+
+_Appears in:_
+- [AIMProfileGenerationFallback](#aimprofilegenerationfallback)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `image` _string_ | Image is the serving container image. |  | MinLength: 1 <br /> |
+| `engine` _string_ | Engine identifies the inference engine, for example vllm. |  | MinLength: 1 <br /> |
+| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs overrides or extends generated engine CLI arguments. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
+| `engineEnv` _object (keys:string, values:string)_ | EngineEnv contains inference-engine subprocess environment variables. |  | Optional: \{\} <br /> |
+| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | ContainerEnv contains pod-level environment variables. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources overrides generated Kubernetes resource requirements. |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets contains credentials for pulling the serving image. |  | Optional: \{\} <br /> |
+| `serviceAccountName` _string_ | ServiceAccountName selects the serving workload service account. |  | Optional: \{\} <br /> |
 
 
 #### AIMProfileMetadata
@@ -1215,6 +1418,7 @@ _Appears in:_
 - [AIMCustomModelSpec](#aimcustommodelspec)
 - [AIMCustomTemplate](#aimcustomtemplate)
 - [AIMDiscoveryProfileMetadata](#aimdiscoveryprofilemetadata)
+- [AIMProfileGenerationFallback](#aimprofilegenerationfallback)
 - [AIMProfileMetadata](#aimprofilemetadata)
 - [AIMServiceTemplateSpec](#aimservicetemplatespec)
 - [AIMServiceTemplateSpecCommon](#aimservicetemplatespeccommon)
@@ -1887,6 +2091,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources replaces the referenced profile's modelSources entirely.<br />Use this to point a profile at user-supplied weights (e.g. a fine-tuned<br />checkpoint) without forking the profile itself. The first source's<br />modelId becomes the overlay profile's modelId. |  | Optional: \{\} <br /> |
 | `acceleratorModel` _string_ | AcceleratorModel replaces the referenced profile's acceleratorModel<br />(e.g. "MI300X" -> "MI325X"). Validation against actual cluster<br />availability is left to the AIMServiceTemplate / runtime layers. |  | Optional: \{\} <br /> |
+| `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor replaces the referenced profile's acceleratorVendor. |  | Enum: [amd nvidia] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount replaces the referenced profile's acceleratorCount. |  | Optional: \{\} <br /> |
 | `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode replaces the referenced profile's<br />acceleratorPartitioningMode. Complete replacement, not a merge — single<br />string, no substruct ambiguity. Empty string means "no override" (the<br />resolved overlay inherits the base profile's mode). Use this to deploy a<br />profile written for whole GPUs onto a partition slice. Whenever this<br />override is set (to any value, including "unpartitioned"), the CEL rule on<br />AIMService also requires an acceleratorCount override: partition mode<br />changes the per-unit interpretation of acceleratorCount, and CEL cannot<br />read the base profile to tell whether the meaning actually changed, so it<br />conservatively requires the count be restated. See<br />AcceleratorPartitioningMode on AIMProfileSpecCommon for the reserved<br />values ("unpartitioned", "partitioned", "<C>-<M>"). |  | Optional: \{\} <br /> |
 | `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | ContainerEnv merges by env-var name on top of the profile's<br />containerEnv. Matching names override; new names are appended.<br />AIM framework variables (AIM_*) reserved for the controller are<br />applied after the overlay's containerEnv and cannot be overridden<br />here. |  | Optional: \{\} <br /> |
@@ -2385,12 +2590,13 @@ _Underlying type:_ _string_
 
 AcceleratorType distinguishes CPU from GPU accelerators.
 Used by AIM Engine to determine the resource derivation strategy
-(e.g., gpu → amd.com/gpu, cpu → cpu).
+(e.g., gpu → a vendor-specific extended resource, cpu → cpu).
 
 _Validation:_
 - Enum: [gpu cpu]
 
 _Appears in:_
+- [AIMProfileGenerationMatch](#aimprofilegenerationmatch)
 - [ProfileHardwareGroup](#profilehardwaregroup)
 - [ProfileSelector](#profileselector)
 
@@ -2398,6 +2604,31 @@ _Appears in:_
 | --- | --- |
 | `cpu` |  |
 | `gpu` |  |
+
+
+#### AcceleratorVendor
+
+_Underlying type:_ _string_
+
+AcceleratorVendor identifies the vendor-specific device-plugin contract for
+an accelerator. It is intentionally independent of AcceleratorModel so a
+generic profile can target any GPU from one vendor without enumerating every
+possible card model.
+
+_Validation:_
+- Enum: [amd nvidia]
+
+_Appears in:_
+- [AIMModelAcceleratorRequest](#aimmodelacceleratorrequest)
+- [AIMProfileGenerationMatch](#aimprofilegenerationmatch)
+- [AIMServiceProfileOverrides](#aimserviceprofileoverrides)
+- [ProfileOverrides](#profileoverrides)
+- [ProfileSelector](#profileselector)
+
+| Field | Description |
+| --- | --- |
+| `amd` |  |
+| `nvidia` |  |
 
 
 #### ArtifactCacheConfig
@@ -2665,6 +2896,32 @@ _Appears in:_
 
 
 
+#### ProfileGenerationStrategy
+
+_Underlying type:_ _string_
+
+ProfileGenerationStrategy names the mechanism that resolved a Generated
+model's profiles.
+
+spec.modelId is one onboarding flow with more than one possible resolution
+mechanism, so the mechanism is reported here rather than folded into
+AIMModelKind. Recording it separately means the planned AMD catalog lookup
+(match modelId against published optimized AIM images) can be added without
+flipping status.kind on an unchanged spec, and without a fifth kind.
+
+RuntimeFallback is the only strategy implemented today.
+
+_Validation:_
+- Enum: [RuntimeFallback]
+
+_Appears in:_
+- [AIMModelProfileGenerationStatus](#aimmodelprofilegenerationstatus)
+
+| Field | Description |
+| --- | --- |
+| `RuntimeFallback` | ProfileGenerationStrategyRuntimeFallback indicates profiles were built<br />from RuntimeConfig model.profileGeneration.fallbacks matched against<br />observed cluster hardware.<br /> |
+
+
 #### ProfileHardwareGroup
 
 
@@ -2718,7 +2975,7 @@ to `user-authored` by the AIMProfile reconciler when no AIM controller
 owns them.
 
 _Validation:_
-- Enum: [discovered derived user-authored]
+- Enum: [discovered derived generated user-authored]
 
 _Appears in:_
 - [ProfileSelector](#profileselector)
@@ -2727,6 +2984,7 @@ _Appears in:_
 | --- | --- |
 | `discovered` | ProfileOriginDiscovered indicates the profile was produced by image<br />discovery (today: AIMModel.spec.image native discovery path).<br /> |
 | `derived` | ProfileOriginDerived indicates the profile was produced by a derivation<br />flow (AIMModel.spec.profiles.derivedFrom or an AIMProfileSet).<br /> |
+| `generated` | ProfileOriginGenerated indicates the profile was generated from a<br />modelId declaration and a RuntimeConfig fallback.<br /> |
 | `user-authored` | ProfileOriginUserAuthored indicates the profile was created<br />independently by a user (no AIM controller owner reference).<br /> |
 
 
@@ -2762,6 +3020,7 @@ _Appears in:_
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources replaces the copied profile's modelSources. When<br />modelSources[0].modelId is set and overrides.modelId is unset, the<br />derived profile's modelId is auto-derived from modelSources[0]; an<br />explicit overrides.modelId always wins. |  | Optional: \{\} <br /> |
 | `image` _string_ | Image overrides the runtime container image used by the derived<br />profiles. When empty the deployment image is rebased onto the source<br />profile's base-image (status.baseImage) so private mirrors stay<br />self-contained. |  | Optional: \{\} <br /> |
 | `acceleratorModel` _string_ | AcceleratorModel replaces the copied profile's acceleratorModel. |  | Optional: \{\} <br /> |
+| `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor replaces the copied profile's acceleratorVendor. |  | Enum: [amd nvidia] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount replaces the copied profile's acceleratorCount. |  | Optional: \{\} <br /> |
 | `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode replaces the copied profile's<br />acceleratorPartitioningMode. Complete replacement, not a merge; an empty<br />override string leaves the source profile's mode untouched. Same reserved<br />values as AIMProfileSpecCommon.AcceleratorPartitioningMode. Whenever this<br />override is set (to any value, including "unpartitioned"), the CEL rule on the<br />enclosing spec also requires AcceleratorCount to be set: partition mode<br />changes the per-unit interpretation of acceleratorCount, and CEL cannot<br />read the base profile to tell whether the meaning actually changed, so it<br />conservatively requires the count be restated. |  | Optional: \{\} <br /> |
 | `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | ContainerEnv merges by env var name, overriding matching source entries. |  | Optional: \{\} <br /> |
@@ -2793,13 +3052,14 @@ _Appears in:_
 | `type` _[AIMProfileType](#aimprofiletype)_ | Type filters by optimization level (exact match). |  | Enum: [optimized general preview unoptimized] <br />Optional: \{\} <br /> |
 | `minimumType` _[AIMProfileTypeFloor](#aimprofiletypefloor)_ | MinimumType filters by a minimum optimization level: candidates whose<br />type is this tier OR BETTER are accepted (hierarchy: optimized > general<br />> preview > unoptimized). This is the floor counterpart to the exact-match<br />Type field; the two AND together when both are set.<br />The sentinel "any" disables the floor (accept every tier). When this<br />field is empty the AIMService resolver applies a default floor of<br />"optimized" so auto-selection prefers production-grade profiles and never<br />silently picks an unoptimized one; to opt a service into lower tiers<br />(e.g. CPU/EPYC profiles published as unoptimized) set minimumType<br />explicitly to "unoptimized" or "any". Derivation selectors<br />(AIMProfileSet / AIMModel.profiles) treat empty as "any" so copying is<br />never tier-restricted by default. |  | Enum: [optimized general preview unoptimized any] <br />Optional: \{\} <br /> |
 | `acceleratorModel` _string_ | AcceleratorModel filters by accelerator identifier. |  | Optional: \{\} <br /> |
+| `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor filters by the vendor-specific device-plugin contract. |  | Enum: [amd nvidia] <br />Optional: \{\} <br /> |
 | `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode filters candidates by their declared<br />partitioning mode. Partial-order match (NOT strict equality):<br />  ""              - no filter on this field.<br />  "unpartitioned" - matches profiles with mode "" or "unpartitioned".<br />  "partitioned"   - matches profiles whose mode is non-trivial (anything<br />                    other than "" / "unpartitioned").<br />  "<C>"           - selector-only convenience: matches profiles with mode<br />                    "<C>-*" (prefix on the scheme). Not a valid profile-spec<br />                    value (e.g. selector "CPX" matches "CPX-NPS1", "CPX-NPS4").<br />  "<C>-<M>"       - exact-string match on the scheme. |  | Optional: \{\} <br /> |
 | `acceleratorType` _[AcceleratorType](#acceleratortype)_ | AcceleratorType filters by accelerator resource type. |  | Enum: [gpu cpu] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount filters by accelerator unit count. |  | Optional: \{\} <br /> |
 | `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs partially matches source engineArgs: every provided top-level key must<br />exist in the source object with an equal value. |  | Type: object <br />Optional: \{\} <br /> |
 | `modelRef` _[ProfileSelectorModelRef](#profileselectormodelref)_ | ModelRef narrows candidates to those produced by a specific<br />AIM(Cluster)Model, matched via the `aim.eai.amd.com/source-model[-scope]`<br />labels stamped by the AIMModel reconcilers. Iteration 1 (v1alpha2 only). |  | Optional: \{\} <br /> |
 | `role` _[ProfileSelectorRole](#profileselectorrole)_ | Role filters by the `aim.eai.amd.com/profile-role` label. Defaults to<br />`deployable`. `base` filters to base profiles emitted by base-image<br />discovery (custom-model derivation source material). | deployable | Enum: [base deployable] <br />Optional: \{\} <br /> |
-| `origin` _[ProfileOrigin](#profileorigin)_ | Origin filters by the `aim.eai.amd.com/profile-origin` label. When unset<br />(empty) the selector does not filter by origin. Iteration 1 (v1alpha2<br />only). |  | Enum: [discovered derived user-authored] <br />Optional: \{\} <br /> |
+| `origin` _[ProfileOrigin](#profileorigin)_ | Origin filters by the `aim.eai.amd.com/profile-origin` label. When unset<br />(empty) the selector does not filter by origin. Iteration 1 (v1alpha2<br />only). |  | Enum: [discovered derived generated user-authored] <br />Optional: \{\} <br /> |
 
 
 #### ProfileSelectorModelRef

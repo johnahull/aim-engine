@@ -1,4 +1,8 @@
-# A namespaced v1alpha2 AIMService that references a cluster profile by name.
+# A namespaced v1alpha2 AIMService that automatically selects a lower-tier
+# cluster profile through autoSelectionPolicy=any. The service intentionally
+# omits minimumType, so the any-tier pass is eligible only after the optimized
+# pass finds no candidate.
+#
 # Phase C: the service never inlines a predictor — it sets
 # predictor.model.runtime: aim-test-phase-c-fe2d5ebc and overlays only service-specific
 # fields. The runtime does not exist eagerly (this is a cluster profile and no
@@ -22,7 +26,8 @@ metadata:
     example.com/ignored: drop-me
 spec:
   profile:
-    name: test-phase-c
+    selector:
+      aimId: test/fallback-phase-c
   replicas: 1
   caching:
     env:

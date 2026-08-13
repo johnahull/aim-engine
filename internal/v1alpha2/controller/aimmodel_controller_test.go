@@ -170,10 +170,14 @@ func TestFindModelsForNodeChange_QueuesEveryImageBackedModel(t *testing.T) {
 			},
 		},
 	}
+	generated := &aimv1alpha2.AIMModel{
+		ObjectMeta: metav1.ObjectMeta{Name: "generated", Namespace: "team-a"},
+		Spec:       aimv1alpha1.AIMModelSpec{ModelID: "Qwen/Qwen3.5-0.8B"},
+	}
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(imageOnly, imageWithProfileCopy, fineTuneOnly).
+		WithObjects(imageOnly, imageWithProfileCopy, fineTuneOnly, generated).
 		Build()
 
 	reconciler := &AIMModelReconciler{Client: fakeClient}
@@ -185,7 +189,7 @@ func TestFindModelsForNodeChange_QueuesEveryImageBackedModel(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	want := []string{"team-a/image-only", "team-a/image-with-profile-copy"}
+	want := []string{"team-a/generated", "team-a/image-only", "team-a/image-with-profile-copy"}
 	if len(got) != len(want) {
 		t.Fatalf("len(requests) = %d, want %d (%v)", len(got), len(want), got)
 	}

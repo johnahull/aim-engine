@@ -124,18 +124,19 @@ type imageProfileFile struct {
 }
 
 type imageProfileMetadata struct {
-	Engine              string                      `json:"engine"`
-	Variant             string                      `json:"variant,omitempty"`
-	Metric              aimv1alpha1.AIMMetric       `json:"metric"`
-	Precision           aimv1alpha1.AIMPrecision    `json:"precision"`
-	Type                aimv1alpha1.AIMProfileType  `json:"type"`
-	Primary             *bool                       `json:"primary,omitempty"`
-	ManualSelectionOnly bool                        `json:"manual_selection_only,omitempty"`
-	AcceleratorModel    string                      `json:"accelerator_model,omitempty"`
-	GPU                 string                      `json:"gpu,omitempty"`
-	AcceleratorType     aimv1alpha1.AcceleratorType `json:"accelerator_type,omitempty"`
-	AcceleratorCount    *int32                      `json:"accelerator_count,omitempty"`
-	GPUCount            *int32                      `json:"gpu_count,omitempty"`
+	Engine              string                                    `json:"engine"`
+	Variant             string                                    `json:"variant,omitempty"`
+	Metric              aimv1alpha1.AIMMetric                     `json:"metric"`
+	Precision           aimv1alpha1.AIMPrecision                  `json:"precision"`
+	Type                aimv1alpha1.AIMProfileType                `json:"type"`
+	AutoSelectionPolicy aimv1alpha1.AIMProfileAutoSelectionPolicy `json:"auto_selection_policy,omitempty"`
+	Primary             *bool                                     `json:"primary,omitempty"`
+	ManualSelectionOnly bool                                      `json:"manual_selection_only,omitempty"`
+	AcceleratorModel    string                                    `json:"accelerator_model,omitempty"`
+	GPU                 string                                    `json:"gpu,omitempty"`
+	AcceleratorType     aimv1alpha1.AcceleratorType               `json:"accelerator_type,omitempty"`
+	AcceleratorCount    *int32                                    `json:"accelerator_count,omitempty"`
+	GPUCount            *int32                                    `json:"gpu_count,omitempty"`
 	// Features mirrors the runtime's metadata.features (e.g. "adapters"); discovery
 	// materialises it onto AIMProfile.spec.features so gating matches the image.
 	Features []string `json:"features,omitempty"`
@@ -380,6 +381,7 @@ func parseProfileYAMLIntoCatalogItem(raw []byte, relpath, defaultAimID, sourceIm
 			Metric:              parsed.Metadata.Metric,
 			Precision:           parsed.Metadata.Precision,
 			Type:                parsed.Metadata.Type,
+			AutoSelectionPolicy: parsed.Metadata.AutoSelectionPolicy,
 			Primary:             primary,
 			ManualSelectionOnly: parsed.Metadata.ManualSelectionOnly,
 			AcceleratorModel:    acceleratorModel,

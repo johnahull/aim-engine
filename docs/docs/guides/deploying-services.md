@@ -44,11 +44,12 @@ See [Services concept](../concepts/services.md#resolution-shapes) for the full m
 
 Every shape except **By name** produces a candidate pool that the controller filters and ranks. The pipeline:
 
-1. **Selector filter** — keep only candidates that match every field set on `spec.profile.selector` (`aimId`, `modelRef`, `precision`, `metric`, `acceleratorModel`, `acceleratorCount`, `acceleratorType`, `engine`, `engineArgs`). The selector is an AND — every field provided must match the candidate exactly.
-2. **Hardware filter** — drop candidates whose `acceleratorModel` is not present in the cluster (via the AcceleratorDetector node labels).
-3. **Deployable filter** — drop profiles with `status.deployable=false` (base profiles).
-4. **Scope preference** — namespace `AIMProfile` outranks cluster `AIMClusterProfile` when both match.
-5. **Rank** — order the survivors by `primary > type > version > name`, where:
+1. **Optimized selector pass** — keep candidates that match every field set on `spec.profile.selector`, including the effective `minimumType` floor. The selector is an AND — every field provided must match the candidate.
+2. **Any-tier pass** — only when the service did not explicitly set `minimumType` and no optimized candidate matched in either scope, retry without the implicit floor and admit only profiles with `autoSelectionPolicy: any`.
+3. **Hardware filter** — drop candidates whose `acceleratorModel` is not present in the cluster (via the AcceleratorDetector node labels).
+4. **Deployable filter** — drop profiles with `status.deployable=false` (base profiles).
+5. **Scope preference** — namespace `AIMProfile` outranks cluster `AIMClusterProfile` when both match within the selected pass.
+6. **Rank** — order the survivors by `primary > type > version > name`, where:
     - `primary: true` beats `primary: false`.
     - `type` ranks `optimized > general > preview > unoptimized`.
     - `version` is the highest semver from the profile's container-image tag.

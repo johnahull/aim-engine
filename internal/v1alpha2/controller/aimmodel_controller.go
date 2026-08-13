@@ -47,6 +47,7 @@ import (
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	discoverylock "github.com/amd-enterprise-ai/aim-engine/internal/discovery/lock"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimruntimeconfig"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimmodel"
 )
 
@@ -253,12 +254,28 @@ func (r *AIMModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}); err != nil {
 		return err
 	}
+	// Models that name no runtime config are indexed under "default", not
+	// skipped: modelId-backed models read their profile-generation fallbacks
+	// from the default config, so an edit there must reach them.
+	//
+	// Fan-out this widens: an edit to the *cluster* default AIMClusterRuntimeConfig
+	// now enqueues every AIMModel in the cluster (findModelsForClusterRuntimeConfig
+	// has no namespace filter), where before it enqueued only models naming a
+	// config explicitly. Namespace-scoped configs are unaffected —
+	// findModelsForRuntimeConfig filters by config.Namespace. RuntimeConfig
+	// edits are rare and controller-runtime dedups the queue, so this is
+	// acceptable; it is worth knowing before adding a hot write path to
+	// RuntimeConfig status.
 	if err := mgr.GetFieldIndexer().IndexField(ctx, &aimv1alpha2.AIMModel{}, aimv1alpha1.ModelRuntimeConfigIndexKey, func(obj client.Object) []string {
 		model, ok := obj.(*aimv1alpha2.AIMModel)
-		if !ok || model.Spec.Name == "" {
+		if !ok {
 			return nil
 		}
-		return []string{model.Spec.Name}
+		name := model.Spec.Name
+		if name == "" {
+			name = aimruntimeconfig.DefaultRuntimeConfigName
+		}
+		return []string{name}
 	}); err != nil {
 		return err
 	}
@@ -518,11 +535,10 @@ func (r *AIMModelReconciler) findModelsForNodeChange(ctx context.Context, obj cl
 }
 
 // modelRequiresNodeReconcile returns true for AIMModels whose plan can be
-// affected by node-label changes. Today that's just image-backed models — the
-// native discovery pipeline filters discovered profiles against node
-// accelerator labels, so any node fleet change can flip the supported set.
+// affected by node-label changes. Image-backed discovery and modelId-backed
+// profile generation both filter desired profiles against node hardware.
 func modelRequiresNodeReconcile(model *aimv1alpha2.AIMModel) bool {
-	return model != nil && model.Spec.Image != ""
+	return model != nil && (model.Spec.Image != "" || model.Spec.ModelID != "")
 }
 
 func dedupeRequests(requests []reconcile.Request) []reconcile.Request {

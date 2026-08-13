@@ -24,6 +24,7 @@ package aimprofile
 
 import (
 	"context"
+	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,7 +47,7 @@ func runtimeProjectable(spec aimv1alpha2.AIMProfileSpecCommon, deployable bool, 
 	if !deployable || spec.Image == "" {
 		return false
 	}
-	if !HasAcceleratorRequirement(spec.AcceleratorModel, spec.AcceleratorCount, spec.Resources) {
+	if !HasProfileAcceleratorRequirement(spec) {
 		return true
 	}
 	return match.MatchingNodes > 0
@@ -66,6 +67,66 @@ func runtimeProjectable(spec aimv1alpha2.AIMProfileSpecCommon, deployable bool, 
 // determinism concern).
 func modelSlugProjectable(spec aimv1alpha2.AIMProfileSpecCommon, projectable bool) bool {
 	return projectable && spec.Primary && spec.AimId != ""
+}
+
+func validateNamespaceRuntimeProjection(
+	mode aimv1alpha2.RuntimeProjectionMode,
+	profile *aimv1alpha2.AIMProfile,
+	obs ProfileObservation,
+) error {
+	if profile == nil || !obs.projectable {
+		return nil
+	}
+	spec := profile.Spec.AIMProfileSpecCommon
+	input := serving.NamespaceRuntimeInput{
+		ProfileName:  profile.Name,
+		Namespace:    profile.Namespace,
+		Spec:         &spec,
+		Resources:    obs.resolvedResources,
+		NodeAffinity: obs.matchResult.NodeAffinity,
+		Cache:        obs.profileCache,
+	}
+	if mode.ProjectsPerProfile() {
+		if _, _, err := serving.BuildNamespaceServingRuntime(input); err != nil {
+			return fmt.Errorf("build per-profile ServingRuntime: %w", err)
+		}
+	}
+	if mode.ProjectsModelSlug() && modelSlugProjectable(spec, obs.projectable) {
+		input.Name = serving.ModelSlugRuntimeName(spec.AimId)
+		if _, _, err := serving.BuildNamespaceServingRuntime(input); err != nil {
+			return fmt.Errorf("build model-slug ServingRuntime: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateClusterRuntimeProjection(
+	mode aimv1alpha2.RuntimeProjectionMode,
+	profile *aimv1alpha2.AIMClusterProfile,
+	obs ClusterProfileObservation,
+) error {
+	if profile == nil || !obs.projectable {
+		return nil
+	}
+	spec := profile.Spec.AIMProfileSpecCommon
+	input := serving.ClusterRuntimeInput{
+		ProfileName:  profile.Name,
+		Spec:         &spec,
+		Resources:    obs.resolvedResources,
+		NodeAffinity: obs.matchResult.NodeAffinity,
+	}
+	if mode.ProjectsPerProfile() {
+		if _, err := serving.BuildClusterServingRuntime(input); err != nil {
+			return fmt.Errorf("build per-profile ClusterServingRuntime: %w", err)
+		}
+	}
+	if mode.ProjectsModelSlug() && modelSlugProjectable(spec, obs.projectable) {
+		input.Name = serving.ModelSlugRuntimeName(spec.AimId)
+		if _, err := serving.BuildClusterServingRuntime(input); err != nil {
+			return fmt.Errorf("build model-slug ClusterServingRuntime: %w", err)
+		}
+	}
+	return nil
 }
 
 // fetchMountableCache resolves the Ready, profile-owned (Shared) AIMProfileCache
@@ -327,17 +388,26 @@ func recordProjectedRuntimeNames(
 }
 
 // decorateProjectionCondition records the RuntimeProjected condition for the
-// mode in effect. Per-profile modes (Exhaustive/Both) always reflect this
-// profile's own projection. Reduced-only mode has no per-profile runtime, so it
-// reflects the condition only for the model's primary profile (the one that
-// publishes the model-slug primary); non-primary profiles project nothing and
-// stay silent.
+// mode in effect. A builder error always records False/RuntimeProjectionFailed.
+// Otherwise per-profile modes (Exhaustive/Both) reflect this profile's own
+// projection. Reduced-only mode has no per-profile runtime, so it reflects the
+// condition only for the model's primary profile (the one that publishes the
+// model-slug primary); non-primary profiles project nothing and stay silent.
 func decorateProjectionCondition(
 	cm *controllerutils.ConditionManager,
 	mode aimv1alpha2.RuntimeProjectionMode,
 	primary, projectable bool,
 	nodeErr error,
+	projectionErr error,
 ) {
+	if projectionErr != nil {
+		cm.MarkFalse(
+			aimv1alpha2.AIMProfileConditionRuntimeProjected,
+			aimv1alpha2.AIMProfileReasonRuntimeProjectionFailed,
+			fmt.Sprintf("Failed to build projected runtime: %v", projectionErr),
+		)
+		return
+	}
 	switch {
 	case mode.ProjectsPerProfile():
 		// Exhaustive/Both project a per-profile runtime. Asymmetric teardown: when

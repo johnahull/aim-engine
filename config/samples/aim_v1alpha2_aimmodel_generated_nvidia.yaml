@@ -1,0 +1,25 @@
+# Generated-profile onboarding. Requires a RuntimeConfig with a matching
+# model.profileGeneration fallback — see
+# aim_v1alpha1_aimruntimeconfig_nvidia_fallback.yaml.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMModel
+metadata:
+  name: qwen3-5-0-8b
+  namespace: default
+spec:
+  modelId: Qwen/Qwen3.5-0.8B
+
+  # aimId defaults to modelId, and the weights default to hf://<modelId>.
+  # Override either for a fine-tune or S3-hosted weights:
+  #
+  # aimId: Qwen/Qwen3.5-0.8B
+  # source:
+  #   uri: s3://customer-models/qwen-finetune
+
+  # The hardware shape this model needs. Narrows which fallbacks apply and is
+  # stamped on the generated profile. Defaults to one unit of whatever the
+  # matched fallback targets.
+  #
+  # accelerator:
+  #   vendor: nvidia
+  #   count: 4

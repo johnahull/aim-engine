@@ -60,11 +60,19 @@ The canonical label set stamped on every operator-produced `AIMProfile` / `AIMCl
 | Label | Values | Set by | Used by |
 |---|---|---|---|
 | `aim.eai.amd.com/profile-role` | `base`, `deployable` | Model controller, AIMProfileSet controller | AIMProfileSet `selector.role`, AIMService `selector.role` (reserved) |
-| `aim.eai.amd.com/profile-origin` | `discovered`, `derived`, `user-authored` | Model / AIMProfileSet controllers; backfilled by AIMProfile controller for user-authored | AIMProfileSet `selector.origin` |
+| `aim.eai.amd.com/profile-origin` | `discovered`, `derived`, `generated`, `user-authored` | Model / AIMProfileSet controllers; backfilled by AIMProfile controller for user-authored | AIMProfileSet `selector.origin` |
 | `aim.eai.amd.com/source-model` | Name of producing AIM(Cluster)Model | Model / AIMProfileSet controllers (with controller ownerRef) | AIMProfileSet `selector.modelRef.name`, AIMService `spec.model.name` shortcut |
 | `aim.eai.amd.com/source-model-scope` | `namespace`, `cluster` | Model / AIMProfileSet controllers | AIMProfileSet `selector.modelRef.scope` |
-| `aim.eai.amd.com/profile-source` | `copy` | AIMProfileSet derivation | Provenance only |
+
+### v1alpha2 profile provenance annotations
+
+These carry provenance that nothing selects on, so they are **annotations**, not labels — a label selector will never match them.
+
+| Annotation | Values | Set by | Used by |
+|---|---|---|---|
+| `aim.eai.amd.com/profile-source` | `image`, `copy`, `generated` | AIMModel discovery/generation or AIMProfileSet derivation | Origin classification (`status.origin`) |
 | `aim.eai.amd.com/profile-copyable` | `"true"` | Image discovery (default); manual opt-in for hand-authored profiles | AIMProfileSet candidate eligibility |
+| `aim.eai.amd.com/profile-generation-fallback` | RuntimeConfig fallback name | AIMModel generation | Retaining a generated profile when its hardware disappears |
 
 :::{admonition} Hand-authored profiles
 :class: important

@@ -286,8 +286,15 @@ const (
 	DefaultHTTPPort = 8000
 	// DefaultGatewayPort is the default gateway port
 	DefaultGatewayPort = 80
-	// DefaultGPUResourceName is the default resource name for AMD GPUs
-	DefaultGPUResourceName = "amd.com/gpu"
+	// AMDGPUResourceName is the whole-device resource published by the AMD
+	// Kubernetes device plugin.
+	AMDGPUResourceName = "amd.com/gpu"
+	// NVIDIAGPUResourceName is the whole-device resource published by the NVIDIA
+	// Kubernetes device plugin.
+	NVIDIAGPUResourceName = "nvidia.com/gpu"
+	// DefaultGPUResourceName is retained for legacy v1alpha1 and profiles that
+	// predate acceleratorVendor. Empty vendor continues to mean AMD.
+	DefaultGPUResourceName = AMDGPUResourceName
 	// DefaultCPURequestPerGPU is the default host CPU request for each GPU.
 	DefaultCPURequestPerGPU int64 = 4
 	// DefaultMemoryRequestGiPerGPU is the default host memory request, in GiB,
@@ -365,6 +372,11 @@ const (
 	EnvAIMMetric = "AIM_METRIC"
 	// EnvAIMModelID is the environment variable for the model ID
 	EnvAIMModelID = "AIM_MODEL_ID"
+	// EnvAIMVLLMModel is the direct-vLLM model argument. Projected runtimes use
+	// Kubernetes argument expansion ($(AIM_VLLM_MODEL)) so an InferenceService
+	// overlay can switch an online model ID to a service-owned cache mount without
+	// replacing the complete generated vLLM argument list.
+	EnvAIMVLLMModel = "AIM_VLLM_MODEL"
 	// EnvAIMPrecision is the environment variable for the numeric precision
 	EnvAIMPrecision = "AIM_PRECISION"
 	// EnvAIMProfileID is the environment variable for the profile ID

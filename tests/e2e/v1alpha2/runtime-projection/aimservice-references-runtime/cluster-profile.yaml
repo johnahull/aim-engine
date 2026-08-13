@@ -1,8 +1,9 @@
-# Backing cluster profile for the runtime an AIMService references. No
-# accelerator fields, so it has no hardware requirement and reaches Ready in
-# any cluster (kind or GPU vcluster). Deployable: aimId + modelSources are both
-# set, so the shared builder can turn it into a complete namespace runtime and
-# the consuming AIMService stands up a profile-owned (Shared) cache for it.
+# Backing cluster fallback profile that an AIMService resolves automatically.
+# No accelerator fields are set, so it has no hardware requirement and reaches
+# Ready in any cluster (kind or GPU vcluster). Deployable: aimId + modelSources
+# are both set, so the shared builder can turn it into a complete namespace
+# runtime and the consuming AIMService stands up a profile-owned (Shared) cache
+# for it.
 #
 # The image is a placeholder (registry.example.com): chain (c) asserts the
 # Phase-C consumption contract (reference + overlay split, lazy runtime
@@ -13,12 +14,17 @@ kind: AIMClusterProfile
 metadata:
   name: test-phase-c
 spec:
-  aimId: Qwen/Qwen3-0.6B
+  # Unique to this test so selector resolution cannot collide with profiles
+  # created concurrently by another cluster-scoped test.
+  aimId: test/fallback-phase-c
   modelId: Qwen/Qwen3-0.6B
   engine: vllm
   metric: latency
   precision: bf16
-  type: general
+  # Exercise the kind-compatible full chain for the new auto-selection policy:
+  # implicit optimized floor -> any-tier pass -> runtime -> InferenceService.
+  type: unoptimized
+  autoSelectionPolicy: any
   image: registry.example.com/aim-cpu-base:0.12.0
   modelSources:
     - modelId: Qwen/Qwen3-0.6B

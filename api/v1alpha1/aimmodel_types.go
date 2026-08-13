@@ -51,6 +51,8 @@ const (
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.derivedFrom)",message="spec.derivedFrom is only supported on v1alpha2; use spec.profileCopy on v1alpha1"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.profiles)",message="spec.profiles is only supported on v1alpha2; use spec.profileCopy on v1alpha1"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.modelId)",message="spec.modelId is only supported on v1alpha2"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.accelerator)",message="spec.accelerator is only supported on v1alpha2"
 type AIMModel struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

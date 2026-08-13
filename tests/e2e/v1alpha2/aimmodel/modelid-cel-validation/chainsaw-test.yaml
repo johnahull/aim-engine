@@ -1,0 +1,130 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: v1alpha2-aimmodel-modelid-cel-validation
+spec:
+  description: v1alpha2 models accept exactly one of image, modelId, or profiles
+  steps:
+    - name: Accept modelId-only shape
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: valid-modelid
+              spec:
+                modelId: Qwen/Qwen3.5-0.8B
+
+    - name: Reject empty onboarding shape
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: invalid-empty
+              spec: {}
+
+    - name: Reject image plus modelId
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: invalid-image-modelid
+              spec:
+                image: example.invalid/aim:test
+                modelId: Qwen/Qwen3.5-0.8B
+
+    - name: Reject source without modelId
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: invalid-source
+              spec:
+                image: example.invalid/aim:test
+                source:
+                  uri: hf://Qwen/Qwen3.5-0.8B
+
+    - name: Accept accelerator alongside modelId
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: valid-modelid-accelerator
+              spec:
+                modelId: Qwen/Qwen3.5-0.8B
+                accelerator:
+                  vendor: nvidia
+                  count: 4
+
+    - name: Reject accelerator without modelId
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: invalid-accelerator
+              spec:
+                image: example.invalid/aim:test
+                accelerator:
+                  count: 4
+
+    - name: Reject accelerator on v1alpha1
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMModel
+              metadata:
+                name: invalid-accelerator-v1alpha1
+              spec:
+                image: example.invalid/aim:test
+                accelerator:
+                  count: 4
+
+    - name: Reject fallback without image
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMRuntimeConfig
+              metadata:
+                name: invalid-generated-fallback
+              spec:
+                model:
+                  profileGeneration:
+                    fallbacks:
+                      - name: nvidia-vllm
+                        match:
+                          acceleratorVendor: nvidia
+                          acceleratorType: gpu
+                        runtime:
+                          engine: vllm

@@ -122,6 +122,11 @@ func buildInferenceServiceFromProfile(
 		model.Resources = *service.Spec.Resources
 	}
 
+	serviceAccountName := service.Spec.ServiceAccountName
+	if serviceAccountName == "" {
+		serviceAccountName = profileSpec.ServiceAccountName
+	}
+
 	isvc := &servingv1beta1.InferenceService{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: servingv1beta1.SchemeGroupVersion.String(),
@@ -137,7 +142,7 @@ func buildInferenceServiceFromProfile(
 			Predictor: servingv1beta1.PredictorSpec{
 				PodSpec: servingv1beta1.PodSpec{
 					ImagePullSecrets:   utils.CopyPullSecrets(service.Spec.ImagePullSecrets),
-					ServiceAccountName: service.Spec.ServiceAccountName,
+					ServiceAccountName: serviceAccountName,
 					PriorityClassName:  service.Spec.PriorityClassName,
 				},
 				Model: model,
@@ -270,6 +275,7 @@ func addServiceOwnedCacheOverlay(
 	}
 
 	model.Env = upsertEnvVars(model.Env, buildFrameworkEnvVars(obs.resolvedProfileSpec, obs.profileYAMLName))
+	model.Env = upsertEnvVars(model.Env, serving.BuildDirectVLLMCacheEnv(obs.resolvedProfileSpec, obs.profileCache.Value))
 
 	for _, resolved := range sortedReadyArtifacts(obs.profileCache.Value) {
 		volumeName := strings.ReplaceAll(utils.MakeRFC1123Compliant(resolved.Name), ".", "-")

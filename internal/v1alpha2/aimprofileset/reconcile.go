@@ -616,7 +616,7 @@ func candidateIdentity(candidate aimprofile.ProfileCopyCandidate) string {
 	// manualSelectionOnly is intentionally omitted: it is deprecated and no
 	// longer affects selection, so two candidates differing only by it are
 	// equivalent for dedup purposes.
-	return fmt.Sprintf(
+	identity := fmt.Sprintf(
 		"%s|%s|%s|%s|%s|%s|%s|%t|%s|%s|%s|%d|%s|%s",
 		candidate.Name,
 		candidate.Spec.AimId,
@@ -633,6 +633,13 @@ func candidateIdentity(candidate aimprofile.ProfileCopyCandidate) string {
 		candidate.Status.Version,
 		engineArgsIdentity(candidate.Spec.EngineArgs),
 	)
+	// Preserve the exact pre-acceleratorVendor identity for legacy profiles so
+	// existing derived profile names remain stable. Explicit vendor contracts
+	// extend the identity and therefore cannot collide with each other.
+	if candidate.Spec.AcceleratorVendor != "" {
+		identity += "|vendor=" + string(candidate.Spec.AcceleratorVendor)
+	}
+	return identity
 }
 
 func engineArgsIdentity(value *apiextensionsv1.JSON) string {

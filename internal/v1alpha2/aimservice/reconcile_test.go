@@ -320,6 +320,31 @@ func TestBuildInferenceServiceFromProfile_ReferencesRuntime(t *testing.T) {
 	}
 }
 
+func TestBuildInferenceServiceFromProfile_ServiceAccountPrecedence(t *testing.T) {
+	profileSpec := sampleProfileSpec()
+	profileSpec.ServiceAccountName = "profile-sa"
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+	}
+	obs := ServiceObservation{
+		resolvedProfileSpec:   profileSpec,
+		resolvedProfileStatus: &aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+		profileName:           testProfileA,
+		isvcName:              "service-isvc",
+	}
+
+	isvc := buildInferenceServiceFromProfile(service, obs)
+	if got := isvc.Spec.Predictor.ServiceAccountName; got != "profile-sa" {
+		t.Fatalf("profile service account fallback = %q, want profile-sa", got)
+	}
+
+	service.Spec.ServiceAccountName = "service-sa"
+	isvc = buildInferenceServiceFromProfile(service, obs)
+	if got := isvc.Spec.Predictor.ServiceAccountName; got != "service-sa" {
+		t.Fatalf("service account override = %q, want service-sa", got)
+	}
+}
+
 // TestBuildInferenceServiceFromProfile_StickyReference pins that an existing
 // ISVC keeps its current runtime reference even when the resolved profile name
 // would now project a different runtime (e.g. a projection-mode change), so a
@@ -1056,6 +1081,39 @@ func TestBuildInferenceServiceFromProfile_DedicatedCacheOverlaid(t *testing.T) {
 	}
 }
 
+func TestBuildInferenceServiceFromProfile_DedicatedCacheOverridesDirectVLLMModelReference(t *testing.T) {
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Caching: &aimv1alpha1.AIMServiceCachingConfig{Mode: aimv1alpha1.CachingModeDedicated},
+		},
+	}
+	profileSpec := profileSpecWithModelSources()
+	profileSpec.Engine = "vllm"
+	profileSpec.AcceleratorVendor = aimv1alpha1.AcceleratorVendorNVIDIA
+	cache := readyCacheFixture()
+	obs := ServiceObservation{
+		ServiceFetchResult: ServiceFetchResult{
+			service:      service,
+			profileCache: controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]{Value: cache},
+		},
+		resolvedProfileSpec:   profileSpec,
+		resolvedProfileStatus: &aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+		profileName:           testProfileA,
+		isvcName:              "service-isvc",
+		profileCacheReady:     true,
+	}
+
+	isvc := buildInferenceServiceFromProfile(service, obs)
+	env := envMap(isvc.Spec.Predictor.Model.Env)
+	if got := env[constants.EnvAIMVLLMModel]; got != "/workspace/cache/org/model" {
+		t.Fatalf("%s = %q, want dedicated cache mount", constants.EnvAIMVLLMModel, got)
+	}
+	if env["HF_HUB_OFFLINE"] != "1" || env["TRANSFORMERS_OFFLINE"] != "1" {
+		t.Fatalf("dedicated direct-vLLM cache must force offline mode: %#v", env)
+	}
+}
+
 func profileSpecWithModelSources() *aimv1alpha2.AIMProfileSpecCommon {
 	spec := sampleProfileSpec()
 	spec.ModelSources = []aimv1alpha1.AIMModelSource{{ModelID: "org/model", SourceURI: "hf://org/model"}}
@@ -1069,6 +1127,7 @@ func readyCacheFixture() *aimv1alpha2.AIMProfileCache {
 			Artifacts: map[string]aimv1alpha1.AIMResolvedArtifact{
 				"weights": {
 					Name:                  "weights",
+					Model:                 "org/model",
 					Status:                constants.AIMStatusReady,
 					PersistentVolumeClaim: "weights-pvc",
 					MountPoint:            "/workspace/cache/org/model",

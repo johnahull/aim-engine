@@ -1,0 +1,112 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: v1alpha2-modelid-amd-generated
+spec:
+  description: Select the AMD runtime fallback for a modelId declaration on AMD-only hardware
+  timeouts:
+    assert: 180s
+  steps:
+    - name: Configure AMD and NVIDIA fallbacks
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMRuntimeConfig
+              metadata:
+                name: default
+              spec:
+                model:
+                  profileGeneration:
+                    fallbacks:
+                      - name: amd-vllm
+                        priority: 10
+                        match:
+                          acceleratorVendor: amd
+                          acceleratorType: gpu
+                        runtime:
+                          image: registry.example.com/amd-vllm:test
+                          engine: vllm
+                      - name: nvidia-vllm
+                        priority: 20
+                        match:
+                          acceleratorVendor: nvidia
+                          acceleratorType: gpu
+                        runtime:
+                          image: registry.example.com/nvidia-vllm:test
+                          engine: vllm
+
+    - name: Create modelId-only model
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: amd-generated-model
+              spec:
+                modelId: Qwen/Qwen3.5-0.8B
+
+    - name: Assert only the AMD profile is generated
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/source-model: amd-generated-model
+                  aim.eai.amd.com/source-model-scope: namespace
+                  aim.eai.amd.com/profile-origin: generated
+              spec:
+                aimId: Qwen/Qwen3.5-0.8B
+                modelId: Qwen/Qwen3.5-0.8B
+                profileId: amd-vllm
+                image: registry.example.com/amd-vllm:test
+                engine: vllm
+                type: unoptimized
+                primary: true
+                acceleratorVendor: amd
+                acceleratorType: gpu
+                acceleratorCount: 1
+                modelSources:
+                  - modelId: Qwen/Qwen3.5-0.8B
+                    sourceUri: hf://Qwen/Qwen3.5-0.8B
+              status:
+                status: Ready
+                origin: generated
+                (resources.requests."amd.com/gpu"): "1"
+                (resources.requests."nvidia.com/gpu" == null): true
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+        - script:
+            content: |
+              NVIDIA_PROFILES=$(kubectl get aimprofile -n "$NAMESPACE" \
+                -l "aim.eai.amd.com/source-model=amd-generated-model,aim.eai.amd.com/profile-origin=generated" \
+                -o json |
+                jq '[.items[] | select(.spec.acceleratorVendor == "nvidia")] | length')
+              test "$NVIDIA_PROFILES" -eq 0
+
+    - name: Assert the projected runtime uses the AMD resource
+      try:
+        - script:
+            timeout: 120s
+            content: |
+              PROFILE=$(kubectl get aimprofile -n "$NAMESPACE" \
+                -l "aim.eai.amd.com/source-model=amd-generated-model,aim.eai.amd.com/profile-origin=generated" \
+                -o jsonpath='{.items[0].metadata.name}')
+              test -n "$PROFILE"
+
+              RUNTIME=$(kubectl get aimprofile "$PROFILE" -n "$NAMESPACE" \
+                -o jsonpath='{.status.projectedRuntimeName}')
+              test -n "$RUNTIME"
+
+              kubectl get servingruntime "$RUNTIME" -n "$NAMESPACE" -o json |
+                jq -e '
+                  .spec.containers[0].resources.requests["amd.com/gpu"] == "1" and
+                  .spec.containers[0].resources.limits["amd.com/gpu"] == "1" and
+                  .spec.containers[0].resources.requests["nvidia.com/gpu"] == null and
+                  .spec.containers[0].resources.limits["nvidia.com/gpu"] == null
+                '

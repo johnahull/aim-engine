@@ -383,6 +383,10 @@ type AIMServiceProfileOverrides struct {
 	// +optional
 	AcceleratorModel string `json:"acceleratorModel,omitempty"`
 
+	// AcceleratorVendor replaces the referenced profile's acceleratorVendor.
+	// +optional
+	AcceleratorVendor AcceleratorVendor `json:"acceleratorVendor,omitempty"`
+
 	// AcceleratorCount replaces the referenced profile's acceleratorCount.
 	// +optional
 	AcceleratorCount *int32 `json:"acceleratorCount,omitempty"`

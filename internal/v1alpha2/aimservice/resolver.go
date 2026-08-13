@@ -475,6 +475,7 @@ func resolveBySelector(
 	logger := log.FromContext(ctx).WithName("resolver").WithValues(
 		"service", service.Name, "namespace", service.Namespace, "shape", string(res.shape))
 	selector := composeServiceSelector(service)
+	minimumTypeExplicit := serviceHasExplicitMinimumType(service)
 
 	provenance, scope, err := aimprofile.ProvenanceLabelSelector(selector)
 	if err != nil {
@@ -494,7 +495,7 @@ func resolveBySelector(
 	// The user opts out for one reconcile by setting the
 	// constants.AnnotationForceRebind annotation to any non-empty value,
 	// or permanently by leaving the annotation in place.
-	keepNS, keepCluster, sticky := evaluateStickyBinding(ctx, c, service, selector)
+	keepNS, keepCluster, sticky := evaluateStickyBinding(ctx, c, service, selector, !minimumTypeExplicit)
 	if sticky.honored {
 		switch {
 		case keepNS != nil:
@@ -561,6 +562,20 @@ func resolveBySelector(
 		clusterCandidates = filterClusterProfilesBySpec(list.Items, selector)
 	}
 
+	// The implicit optimized floor is the first pass. When the user did not
+	// author minimumType and no optimized candidate survives across either
+	// scope, run a second pass that admits only profiles explicitly marked with
+	// autoSelectionPolicy=any. This keeps lower-tier profiles opt-in while
+	// allowing a platform-provided generic runtime to make onboarding work out
+	// of the box. The pass is global across scopes so a namespace "any" profile
+	// can never displace a matching cluster optimized profile.
+	anyAutoSelectionPass := false
+	if !minimumTypeExplicit && len(nsCandidates) == 0 && len(clusterCandidates) == 0 {
+		nsCandidates = filterNamespaceAnyAutoSelectionProfilesBySpec(nsRaw, selector)
+		clusterCandidates = filterClusterAnyAutoSelectionProfilesBySpec(clusterRaw, selector)
+		anyAutoSelectionPass = len(nsCandidates) > 0 || len(clusterCandidates) > 0
+	}
+
 	// Namespace candidates win over cluster candidates: if both sets are
 	// non-empty, pick the best namespace profile. This mirrors the rest of
 	// the engine (AIMProfileSet, runtimeconfig merge, model resolution) and
@@ -568,6 +583,10 @@ func resolveBySelector(
 	if len(nsCandidates) > 0 {
 		sortNamespaceCandidates(nsCandidates)
 		winner := bestNamespaceCandidate(nsCandidates)
+		if anyAutoSelectionPass {
+			logger.Info("selecting any-tier auto-selection profile after no optimized candidate matched",
+				"profile", winner.Name, "scope", "Namespace")
+		}
 		res.candidates = candidateRefsFromNamespace(nsCandidates)
 		// Ambiguity here means "the ranker had to coin-flip on
 		// alphabetical name to pick a winner", not just "more than
@@ -592,6 +611,10 @@ func resolveBySelector(
 	if len(clusterCandidates) > 0 {
 		sortClusterCandidates(clusterCandidates)
 		winner := bestClusterCandidate(clusterCandidates)
+		if anyAutoSelectionPass {
+			logger.Info("selecting any-tier auto-selection profile after no optimized candidate matched",
+				"profile", winner.Name, "scope", "Cluster")
+		}
 		res.candidates = candidateRefsFromCluster(clusterCandidates)
 		tied := clusterCandidatesTiedWith(winner, clusterCandidates)
 		if len(tied) > 1 {
@@ -706,6 +729,16 @@ func composeServiceSelector(service *aimv1alpha1.AIMService) aimv1alpha1.Profile
 	return selector
 }
 
+// serviceHasExplicitMinimumType distinguishes an authored selection contract
+// from the resolver's implicit optimized default. Fallback-policy profiles may
+// bypass only the implicit floor; an explicit floor is always authoritative.
+func serviceHasExplicitMinimumType(service *aimv1alpha1.AIMService) bool {
+	return service != nil &&
+		service.Spec.Profile != nil &&
+		service.Spec.Profile.Selector != nil &&
+		service.Spec.Profile.Selector.MinimumType != ""
+}
+
 // filterNamespaceProfilesBySpec applies the spec-side selector filters
 // (aimId, precision, acceleratorModel, the minimumType floor, ...) to a
 // label-filtered list and drops overlay profiles. The label filter (role,
@@ -763,6 +796,38 @@ func filterClusterProfilesBySpec(
 			continue
 		}
 		out = append(out, *p)
+	}
+	return out
+}
+
+func filterNamespaceAnyAutoSelectionProfilesBySpec(
+	profiles []aimv1alpha2.AIMProfile,
+	selector aimv1alpha1.ProfileSelector,
+) []aimv1alpha2.AIMProfile {
+	relaxed := selector
+	relaxed.MinimumType = aimv1alpha1.AIMProfileTypeFloorAny
+	candidates := filterNamespaceProfilesBySpec(profiles, relaxed)
+	out := make([]aimv1alpha2.AIMProfile, 0, len(candidates))
+	for i := range candidates {
+		if candidates[i].Spec.AutoSelectionPolicy == aimv1alpha1.AIMProfileAutoSelectionPolicyAny {
+			out = append(out, candidates[i])
+		}
+	}
+	return out
+}
+
+func filterClusterAnyAutoSelectionProfilesBySpec(
+	profiles []aimv1alpha2.AIMClusterProfile,
+	selector aimv1alpha1.ProfileSelector,
+) []aimv1alpha2.AIMClusterProfile {
+	relaxed := selector
+	relaxed.MinimumType = aimv1alpha1.AIMProfileTypeFloorAny
+	candidates := filterClusterProfilesBySpec(profiles, relaxed)
+	out := make([]aimv1alpha2.AIMClusterProfile, 0, len(candidates))
+	for i := range candidates {
+		if candidates[i].Spec.AutoSelectionPolicy == aimv1alpha1.AIMProfileAutoSelectionPolicyAny {
+			out = append(out, candidates[i])
+		}
 	}
 	return out
 }
@@ -1080,6 +1145,7 @@ func evaluateStickyBinding(
 	c client.Client,
 	service *aimv1alpha1.AIMService,
 	selector aimv1alpha1.ProfileSelector,
+	allowAnyAutoSelection bool,
 ) (*aimv1alpha2.AIMProfile, *aimv1alpha2.AIMClusterProfile, stickyBindingDecision) {
 	if service == nil || service.Status.ResolvedProfile == nil {
 		return nil, nil, stickyBindingDecision{}
@@ -1106,7 +1172,7 @@ func evaluateStickyBinding(
 			decision.rebindReason = fmt.Sprintf("could not fetch previously-bound AIMClusterProfile: %v", err)
 			return nil, nil, decision
 		}
-		if !boundClusterStillMatches(&p, selector) {
+		if !boundClusterStillMatches(&p, selector, allowAnyAutoSelection) {
 			decision.rebindReason = "previously-bound profile no longer matches the current selector"
 			return nil, nil, decision
 		}
@@ -1128,7 +1194,7 @@ func evaluateStickyBinding(
 			decision.rebindReason = fmt.Sprintf("could not fetch previously-bound AIMProfile: %v", err)
 			return nil, nil, decision
 		}
-		if !boundNamespaceStillMatches(&p, selector) {
+		if !boundNamespaceStillMatches(&p, selector, allowAnyAutoSelection) {
 			decision.rebindReason = "previously-bound profile no longer matches the current selector"
 			return nil, nil, decision
 		}
@@ -1142,7 +1208,11 @@ func evaluateStickyBinding(
 // selector predicate (including the minimumType floor). Kept as a tiny helper
 // so the sticky path and the freshly-listed path can't drift on what "matches"
 // means.
-func boundNamespaceStillMatches(p *aimv1alpha2.AIMProfile, selector aimv1alpha1.ProfileSelector) bool {
+func boundNamespaceStillMatches(
+	p *aimv1alpha2.AIMProfile,
+	selector aimv1alpha1.ProfileSelector,
+	allowAnyAutoSelection bool,
+) bool {
 	if p == nil {
 		return false
 	}
@@ -1155,10 +1225,23 @@ func boundNamespaceStillMatches(p *aimv1alpha2.AIMProfile, selector aimv1alpha1.
 		Status: p.Status,
 	}
 	ok, err := aimprofile.MatchesProfileCopySelector(candidate, selector)
+	if err == nil && ok {
+		return true
+	}
+	if !allowAnyAutoSelection || p.Spec.AutoSelectionPolicy != aimv1alpha1.AIMProfileAutoSelectionPolicyAny {
+		return false
+	}
+	relaxed := selector
+	relaxed.MinimumType = aimv1alpha1.AIMProfileTypeFloorAny
+	ok, err = aimprofile.MatchesProfileCopySelector(candidate, relaxed)
 	return err == nil && ok
 }
 
-func boundClusterStillMatches(p *aimv1alpha2.AIMClusterProfile, selector aimv1alpha1.ProfileSelector) bool {
+func boundClusterStillMatches(
+	p *aimv1alpha2.AIMClusterProfile,
+	selector aimv1alpha1.ProfileSelector,
+	allowAnyAutoSelection bool,
+) bool {
 	if p == nil {
 		return false
 	}
@@ -1168,6 +1251,15 @@ func boundClusterStillMatches(p *aimv1alpha2.AIMClusterProfile, selector aimv1al
 		Status: p.Status,
 	}
 	ok, err := aimprofile.MatchesProfileCopySelector(candidate, selector)
+	if err == nil && ok {
+		return true
+	}
+	if !allowAnyAutoSelection || p.Spec.AutoSelectionPolicy != aimv1alpha1.AIMProfileAutoSelectionPolicyAny {
+		return false
+	}
+	relaxed := selector
+	relaxed.MinimumType = aimv1alpha1.AIMProfileTypeFloorAny
+	ok, err = aimprofile.MatchesProfileCopySelector(candidate, relaxed)
 	return err == nil && ok
 }
 

@@ -45,7 +45,7 @@ helm install aim-engine-crds oci://docker.io/amdenterpriseai/aim-engine-crds-cha
 Or from a local file:
 
 ```bash
-kubectl apply -f crds.yaml
+kubectl apply --server-side -f crds.yaml
 kubectl wait --for=condition=Established crd --all --timeout=60s
 ```
 
@@ -111,7 +111,7 @@ make crds
 make helm
 
 # Install CRDs
-kubectl apply -f dist/crds.yaml
+kubectl apply --server-side -f dist/crds.yaml
 kubectl wait --for=condition=Established crd --all --timeout=60s
 
 # Install the operator with gateway activation disabled by default.
@@ -125,18 +125,23 @@ This project uses [mise](https://mise.jdx.dev) to manage tool versions (Go, cont
 :::
 ## Common Configuration
 
-### Enable Cluster Runtime Defaults
+### Customize Cluster Runtime Defaults
 
-Set up cluster-wide routing and storage defaults:
+The chart creates `AIMClusterRuntimeConfig/default` by default, including a
+generic NVIDIA vLLM fallback for model-ID onboarding. Add cluster-wide routing
+and storage defaults by overriding its spec:
 
 ```bash
 helm upgrade aim-engine oci://docker.io/amdenterpriseai/aim-engine-chart \
   --namespace aim-system \
-  --set clusterRuntimeConfig.enable=true \
   --set clusterRuntimeConfig.spec.routing.enabled=true \
   --set clusterRuntimeConfig.spec.routing.gatewayRef.name=<gateway-name> \
   --set clusterRuntimeConfig.spec.routing.gatewayRef.namespace=<gateway-namespace>
 ```
+
+If the cluster already has a platform-managed `AIMClusterRuntimeConfig/default`,
+install or upgrade with `--set clusterRuntimeConfig.enable=false` to avoid a
+Helm ownership conflict.
 
 See [Helm Chart Values](../reference/helm-values.md) for all available options.
 

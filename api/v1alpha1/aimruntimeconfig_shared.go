@@ -24,6 +24,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -148,6 +149,118 @@ type AIMModelConfig struct {
 	// When false, discovery is skipped. Discovery failures are non-fatal and reported via conditions.
 	// +optional
 	AutoDiscovery *bool `json:"autoDiscovery,omitempty"`
+
+	// ProfileGeneration configures generic runtime fallbacks used to generate
+	// profiles for v1alpha2 modelId-backed models.
+	// +optional
+	ProfileGeneration *AIMProfileGenerationConfig `json:"profileGeneration,omitempty"`
+}
+
+// AIMProfileGenerationConfig controls profile generation for modelId-backed
+// AIMModel and AIMClusterModel resources.
+type AIMProfileGenerationConfig struct {
+	// Fallbacks are runtime templates selected by observed cluster hardware.
+	// Namespace entries replace cluster entries with the same name.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Fallbacks []AIMProfileGenerationFallback `json:"fallbacks,omitempty"`
+}
+
+// AIMProfileGenerationFallback describes one hardware match and runtime
+// template used to generate a self-contained AIMProfile.
+type AIMProfileGenerationFallback struct {
+	// Name is the stable fallback identity and merge key.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// Priority selects the primary profile when multiple fallbacks match.
+	// Higher values win.
+	// +optional
+	Priority int32 `json:"priority,omitempty"`
+
+	// Type is the optimization tier stamped on the generated profile.
+	// Generated profiles default to "unoptimized" because a generic runtime
+	// template is not tuned for any particular model. AutoSelectionPolicy
+	// controls whether a lower-tier generated profile can serve as an automatic
+	// fallback.
+	// +optional
+	// +kubebuilder:default=unoptimized
+	Type AIMProfileType `json:"type,omitempty"`
+
+	// AutoSelectionPolicy is stamped on the generated profile.
+	//
+	// "optimized" keeps the profile subject to the implicit optimized
+	// minimumType floor. "any" permits it to participate in a second
+	// automatic-selection pass when no optimized candidate matched and the
+	// service did not explicitly set minimumType.
+	// +optional
+	// +kubebuilder:default=optimized
+	AutoSelectionPolicy AIMProfileAutoSelectionPolicy `json:"autoSelectionPolicy,omitempty"`
+
+	// Match constrains the hardware on which this fallback is applicable.
+	Match AIMProfileGenerationMatch `json:"match"`
+
+	// Runtime is copied into the generated profile.
+	Runtime AIMProfileGenerationRuntime `json:"runtime"`
+}
+
+// AIMProfileGenerationMatch identifies compatible accelerator hardware.
+type AIMProfileGenerationMatch struct {
+	// AcceleratorVendor selects the hardware vendor.
+	AcceleratorVendor AcceleratorVendor `json:"acceleratorVendor"`
+
+	// AcceleratorType selects GPU or CPU hardware.
+	AcceleratorType AcceleratorType `json:"acceleratorType"`
+
+	// AcceleratorModel optionally requires an exact detector model label.
+	// +optional
+	AcceleratorModel string `json:"acceleratorModel,omitempty"`
+
+	// AcceleratorPartitioningMode optionally requires a partitioning mode.
+	// +optional
+	AcceleratorPartitioningMode string `json:"acceleratorPartitioningMode,omitempty"`
+}
+
+// AIMProfileGenerationRuntime contains the profile runtime fields controlled by
+// cluster or namespace policy.
+type AIMProfileGenerationRuntime struct {
+	// Image is the serving container image.
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// Engine identifies the inference engine, for example vllm.
+	// +kubebuilder:validation:MinLength=1
+	Engine string `json:"engine"`
+
+	// EngineArgs overrides or extends generated engine CLI arguments.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	// +optional
+	EngineArgs *apiextensionsv1.JSON `json:"engineArgs,omitempty"`
+
+	// EngineEnv contains inference-engine subprocess environment variables.
+	// +optional
+	EngineEnv map[string]string `json:"engineEnv,omitempty"`
+
+	// ContainerEnv contains pod-level environment variables.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	ContainerEnv []corev1.EnvVar `json:"containerEnv,omitempty"`
+
+	// Resources overrides generated Kubernetes resource requirements.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// ImagePullSecrets contains credentials for pulling the serving image.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// ServiceAccountName selects the serving workload service account.
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 }
 
 // AIMArtifactConfig controls artifact-level defaults that are not appropriate for

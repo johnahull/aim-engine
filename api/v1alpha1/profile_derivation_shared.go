@@ -45,13 +45,25 @@ const (
 
 // AcceleratorType distinguishes CPU from GPU accelerators.
 // Used by AIM Engine to determine the resource derivation strategy
-// (e.g., gpu → amd.com/gpu, cpu → cpu).
+// (e.g., gpu → a vendor-specific extended resource, cpu → cpu).
 // +kubebuilder:validation:Enum=gpu;cpu
 type AcceleratorType string
 
 const (
 	AcceleratorTypeCPU AcceleratorType = "cpu"
 	AcceleratorTypeGPU AcceleratorType = "gpu"
+)
+
+// AcceleratorVendor identifies the vendor-specific device-plugin contract for
+// an accelerator. It is intentionally independent of AcceleratorModel so a
+// generic profile can target any GPU from one vendor without enumerating every
+// possible card model.
+// +kubebuilder:validation:Enum=amd;nvidia
+type AcceleratorVendor string
+
+const (
+	AcceleratorVendorAMD    AcceleratorVendor = "amd"
+	AcceleratorVendorNVIDIA AcceleratorVendor = "nvidia"
 )
 
 // ProfileVersionPolicy controls which matched profile versions a derivation request may copy.
@@ -129,7 +141,7 @@ const (
 // AIMModel.spec.profiles.derivedFrom); user-authored profiles are backfilled
 // to `user-authored` by the AIMProfile reconciler when no AIM controller
 // owns them.
-// +kubebuilder:validation:Enum=discovered;derived;user-authored
+// +kubebuilder:validation:Enum=discovered;derived;generated;user-authored
 type ProfileOrigin string
 
 const (
@@ -139,6 +151,9 @@ const (
 	// ProfileOriginDerived indicates the profile was produced by a derivation
 	// flow (AIMModel.spec.profiles.derivedFrom or an AIMProfileSet).
 	ProfileOriginDerived ProfileOrigin = "derived"
+	// ProfileOriginGenerated indicates the profile was generated from a
+	// modelId declaration and a RuntimeConfig fallback.
+	ProfileOriginGenerated ProfileOrigin = "generated"
 	// ProfileOriginUserAuthored indicates the profile was created
 	// independently by a user (no AIM controller owner reference).
 	ProfileOriginUserAuthored ProfileOrigin = "user-authored"
@@ -193,6 +208,10 @@ type ProfileSelector struct {
 	// AcceleratorModel filters by accelerator identifier.
 	// +optional
 	AcceleratorModel string `json:"acceleratorModel,omitempty"`
+
+	// AcceleratorVendor filters by the vendor-specific device-plugin contract.
+	// +optional
+	AcceleratorVendor AcceleratorVendor `json:"acceleratorVendor,omitempty"`
 
 	// AcceleratorPartitioningMode filters candidates by their declared
 	// partitioning mode. Partial-order match (NOT strict equality):
@@ -293,6 +312,10 @@ type ProfileOverrides struct {
 	// +optional
 	AcceleratorModel string `json:"acceleratorModel,omitempty"`
 
+	// AcceleratorVendor replaces the copied profile's acceleratorVendor.
+	// +optional
+	AcceleratorVendor AcceleratorVendor `json:"acceleratorVendor,omitempty"`
+
 	// AcceleratorCount replaces the copied profile's acceleratorCount.
 	// +optional
 	AcceleratorCount *int32 `json:"acceleratorCount,omitempty"`
@@ -333,7 +356,7 @@ type ProfileOverrides struct {
 // when sourceRef is set, the discovery cache itself acts as the source
 // scope and a separate selector is not required.
 //
-// +kubebuilder:validation:XValidation:rule="has(self.sourceRef) || has(self.selector.aimId) || has(self.selector.modelId) || has(self.selector.profileId) || has(self.selector.engine) || has(self.selector.metric) || has(self.selector.precision) || has(self.selector.type) || has(self.selector.acceleratorModel) || has(self.selector.acceleratorType) || has(self.selector.acceleratorCount) || has(self.selector.engineArgs) || has(self.selector.modelRef) || has(self.selector.origin)",message="selector must set at least one matching field, or set sourceRef"
+// +kubebuilder:validation:XValidation:rule="has(self.sourceRef) || has(self.selector.aimId) || has(self.selector.modelId) || has(self.selector.profileId) || has(self.selector.engine) || has(self.selector.metric) || has(self.selector.precision) || has(self.selector.type) || has(self.selector.acceleratorModel) || has(self.selector.acceleratorVendor) || has(self.selector.acceleratorType) || has(self.selector.acceleratorCount) || has(self.selector.engineArgs) || has(self.selector.modelRef) || has(self.selector.origin)",message="selector must set at least one matching field, or set sourceRef"
 // +kubebuilder:validation:XValidation:rule="has(self.version) || (has(self.versionPolicy) && self.versionPolicy != 'pinned')",message="version is required when versionPolicy is pinned"
 // +kubebuilder:validation:XValidation:rule="!has(self.versionPolicy) || (self.versionPolicy != 'latest' && self.versionPolicy != 'all') || !has(self.version)",message="latest/all versionPolicy must not set version"
 // +kubebuilder:validation:XValidation:rule="!(has(self.selector.role) && self.selector.role == 'base') || (!has(self.selector.aimId) && !has(self.selector.modelId) && !has(self.selector.profileId))",message="selector.aimId/modelId/profileId are not allowed when selector.role=base; set overrides.aimId/modelId/profileId instead (base profiles have no source identity to filter on)"

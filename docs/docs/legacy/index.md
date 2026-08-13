@@ -12,7 +12,7 @@ This section preserves the v1alpha1 reference material:
 
 ## What changed
 
-v1alpha2 reorganises model onboarding around three flows and introduces self-contained `AIMProfile` resources. The summary:
+v1alpha2 reorganises model onboarding around image discovery, model-ID generation, and profile derivation flows, and introduces self-contained `AIMProfile` resources. The summary:
 
 | v1alpha1 | v1alpha2 | Notes |
 |---|---|---|

@@ -2,7 +2,7 @@
 #
 # AIMClusterModelSource CEL: spec.filters vs spec.images
 #
-# spec enforces XOR — exactly one of filters or images must be non-empty.
+# filters and images remain mutually exclusive; models may coexist with either.
 #
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
@@ -45,3 +45,45 @@ spec:
               spec:
                 maxModels: 5
                 syncInterval: 1h
+
+    - name: Accept models without registry inputs
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMClusterModelSource
+              metadata:
+                name: test-cel-models-only
+              spec:
+                models:
+                  - modelId: Qwen/Qwen3.5-0.8B
+
+    - name: Accept models alongside images
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMClusterModelSource
+              metadata:
+                name: test-cel-models-and-images
+              spec:
+                images:
+                  - amdenterpriseai/aim-qwen-qwen3-32b:0.8.4
+                models:
+                  - modelId: Qwen/Qwen3.5-0.8B
+
+    - name: Reject duplicate model IDs
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMClusterModelSource
+              metadata:
+                name: test-cel-duplicate-models
+              spec:
+                models:
+                  - modelId: Qwen/Qwen3.5-0.8B
+                  - modelId: Qwen/Qwen3.5-0.8B

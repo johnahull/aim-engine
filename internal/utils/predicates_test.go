@@ -42,7 +42,7 @@ func TestIsGPUKey(t *testing.T) {
 		{"feature.node.kubernetes.io/aim-accelerator.MI300X", true},
 		{"feature.node.kubernetes.io/aim-accelerator.EPYC_9965", true},
 		{"kubernetes.io/hostname", false},
-		{"nvidia.com/gpu", false},
+		{"nvidia.com/gpu", true},
 		{"node.kubernetes.io/instance-type", false},
 		{"", false},
 	}

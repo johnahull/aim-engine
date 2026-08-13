@@ -123,18 +123,45 @@ prometheus:
   # -- Create a Prometheus ServiceMonitor resource
   enable: false
 
-# -- Cluster-wide runtime configuration for AIM resources.
-# Creates an AIMClusterRuntimeConfig CR when enabled.
+# -- Cluster-wide runtime configuration for AIM resources. By default the chart
+# creates `AIMClusterRuntimeConfig/default` with a generic NVIDIA vLLM fallback
+# so v1alpha2 `spec.modelId` onboarding can generate profiles immediately on
+# clusters that advertise NVIDIA GPU resources. Disable this when the cluster
+# already has a platform-managed config with the same name.
 clusterRuntimeConfig:
-  # -- Enable creation of the AIMClusterRuntimeConfig resource
-  enable: false
+  # -- Enable creation of the chart-managed AIMClusterRuntimeConfig resource
+  enable: true
   # -- Name of the AIMClusterRuntimeConfig resource
   name: default
 
   # -- Spec fields for the AIMClusterRuntimeConfig.
-  # See [Runtime Configuration](../../concepts/runtime-config.md) for details.
-  # @default -- `{}` (see examples below)
-  # spec:
+  # See [Runtime Configuration](../concepts/runtime-config.md) for details.
+  # The default fallback intentionally omits CPU and memory requests so profile
+  # generation is gated by the NVIDIA device resource, not a one-size-fits-all
+  # host-resource policy. Override the fallback to match your fleet and model
+  # sizes. Generated profiles remain truthfully `unoptimized`, while
+  # autoSelectionPolicy=any lets AIMServices use this runtime automatically
+  # only when no optimized profile matches.
+  # @default -- NVIDIA vLLM fallback for any NVIDIA GPU
+  spec:
+    model:
+      profileGeneration:
+        fallbacks:
+          - name: nvidia-vllm
+            priority: 10
+            type: unoptimized
+            autoSelectionPolicy: any
+            match:
+              acceleratorVendor: nvidia
+              acceleratorType: gpu
+            runtime:
+              image: vllm/vllm-openai:v0.17.1-cu130
+              engine: vllm
+              engineArgs:
+                max-model-len: 8192
+                gpu-memory-utilization: 0.9
+
+  # Additional examples:
   #   storage:
   #     defaultStorageClassName: "standard"
   #     pvcHeadroomPercent: 10

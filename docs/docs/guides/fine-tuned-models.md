@@ -239,6 +239,6 @@ With `versionPolicy: pinned`, the derivation is locked to a specific upstream ve
 
 - [Custom Models](custom-models.md) — Derive from base-image base profiles when no official model matches your architecture
 - [Deploying Services](deploying-services.md) — Resolution shapes and overlay patterns for `AIMService`
-- [AIM Models](../concepts/models.md) — Full lifecycle of all three model flows
+- [AIM Models](../concepts/models.md) — Full lifecycle of all four model flows
 - [AIM Profile Sets](../concepts/profilesets.md) — The derivation machinery underneath `spec.profiles`
 - [Profiles](../concepts/profiles.md) — Provenance labels, status fields, override semantics

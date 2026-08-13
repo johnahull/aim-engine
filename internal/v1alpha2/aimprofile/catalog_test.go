@@ -26,6 +26,8 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+
+	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 )
 
 // testAimIDCustomTransformer is reused by the custom-model base-profile
@@ -137,6 +139,7 @@ metadata:
   metric: latency
   precision: bf16
   type: unoptimized
+  auto_selection_policy: any
   primary: true
   manual_selection_only: true
   accelerator_model: CPU
@@ -182,6 +185,9 @@ env_vars: {}
 	}
 	if !got.Spec.Primary {
 		t.Fatal("Primary = false, want bound spec (Primary=true)")
+	}
+	if got.Spec.AutoSelectionPolicy != aimv1alpha1.AIMProfileAutoSelectionPolicyAny {
+		t.Fatalf("AutoSelectionPolicy = %q, want any", got.Spec.AutoSelectionPolicy)
 	}
 	if got.Spec.ModelId != "Qwen/Qwen3-0.6B" {
 		t.Fatalf("ModelId = %q, want Qwen/Qwen3-0.6B (bound item)", got.Spec.ModelId)

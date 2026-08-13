@@ -97,6 +97,9 @@ func classifyModelKind(spec *aimv1alpha1.AIMModelSpec) aimv1alpha1.AIMModelKind 
 	if spec.Image != "" {
 		return aimv1alpha1.AIMModelKindImage
 	}
+	if spec.ModelID != "" {
+		return aimv1alpha1.AIMModelKindGenerated
+	}
 	derivation := derivationSpec(spec)
 	if derivation == nil {
 		return ""
@@ -150,6 +153,9 @@ func profilesSpecToProfileSet(profiles *aimv1alpha1.AIMModelProfilesSpec) *aimv1
 // that lands, fine-tuned-no-image v1alpha2 models start working "for free"
 // via the dual-pipeline; no change is needed here.
 func hasLegacyInputs(spec aimv1alpha1.AIMModelSpec) bool {
+	if spec.ModelID != "" {
+		return false
+	}
 	if spec.Image != "" {
 		return true
 	}

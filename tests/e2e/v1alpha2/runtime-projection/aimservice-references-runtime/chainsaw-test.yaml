@@ -1,15 +1,19 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
 #
-# Phase C chain (c): an AIMService references the projected runtime instead of
+# Phase C chain (c): an AIMService automatically selects a profile eligible for
+# any-tier auto-selection, then references the projected runtime instead of
 # inlining the predictor.
 #
-# A namespaced v1alpha2 AIMService references a cluster profile by name. The
-# service emits an InferenceService that sets predictor.model.runtime to the
-# reserved aim-<profile.Name> and carries only the service-specific overlay (no
-# inline predictor image/container). The runtime does not exist eagerly (cluster
-# profile, no eager projection), so the always-on lazy InferenceService-watch
-# projection (slice 04) materializes a complete namespace ServingRuntime (+
-# colocated ConfigMap) cross-scope from the cluster profile, and KServe binds it.
+# A namespaced v1alpha2 AIMService uses an aimId selector with no explicit
+# minimumType. The only matching profile is unoptimized and explicitly marked
+# autoSelectionPolicy=any, exercising the second selection pass in a
+# kind-compatible lane. The service emits an InferenceService that sets
+# predictor.model.runtime to the reserved aim-<profile.Name> and carries only
+# the service-specific overlay (no inline predictor image/container). The
+# runtime does not exist eagerly (cluster profile, no eager projection), so the
+# always-on lazy InferenceService-watch projection (slice 04) materializes a
+# complete namespace ServingRuntime (+ colocated ConfigMap) cross-scope from the
+# cluster profile, and KServe binds it.
 #
 # Pod readiness is intentionally NOT asserted: the placeholder image
 # (registry.example.com) never pulls and the cache download is simulated, so the
@@ -47,12 +51,12 @@ spec:
               status:
                 status: Ready
 
-    - name: Create the AIMService that references the cluster profile
+    - name: Create the AIMService that automatically selects the fallback profile
       try:
         - apply:
             file: service.yaml
 
-    - name: Assert the service resolves the cluster profile
+    - name: Assert the service resolves the fallback cluster profile
       try:
         - assert:
             resource:

@@ -83,10 +83,11 @@ feature.node.kubernetes.io/aim-accelerator.vendor.CPU.AMD: "1"
 
 Like the other labels, the value is the accelerator count and is informational; consumers match on the key via `Exists`. This iteration assumes a single vendor — and a single model — per accelerator type on a given node.
 
-:::{admonition} Published for discovery only (not yet wired to scheduling)
-:class: warning
-
-The vendor label is currently published for discovery and observability. It is **not yet consumed** by the operator: AIM Engine still requests `amd.com/gpu` unconditionally, so deploying a model onto an NVIDIA node does not work end-to-end yet. Wiring the vendor label to the device-plugin resource (`amd.com/gpu` vs `nvidia.com/gpu`) is planned follow-up work. Treat NVIDIA support in this release as **detection only**.
+:::{note}
+`AIMProfile.spec.acceleratorVendor` consumes this label when resolving nodes
+and the device-plugin resource. `amd` selects `amd.com/gpu`; `nvidia` selects
+`nvidia.com/gpu`. A generic NVIDIA profile can omit `acceleratorModel` and
+match any detected NVIDIA GPU node.
 :::
 
 ## GPU Partition Scheme Labels
@@ -205,7 +206,11 @@ acceleratorDetector:
 
 The AMD [k8s-device-plugin Node Labeller](https://github.com/ROCm/k8s-device-plugin) writes GPU labels under `amd.com/gpu.*` (e.g. `amd.com/gpu.device-id=74a1`). The AcceleratorDetector writes a separate set of labels under `feature.node.kubernetes.io/aim-accelerator.*`.
 
-AIM Engine supports both label sets. When AcceleratorDetector labels are present they take precedence, with fallback to `amd.com/gpu.device-id` for backward compatibility. See [GPU Management](../admin/gpu-management.md) for details.
+AIM Engine uses AcceleratorDetector model and vendor labels for profile
+matching. AMD model matching retains fallback support for
+`amd.com/gpu.device-id`; NVIDIA profiles use the detector's NVIDIA vendor/model
+labels together with capacity advertised as `nvidia.com/gpu`. See
+[GPU Management](../admin/gpu-management.md) for details.
 
 ## Verifying Labels
 

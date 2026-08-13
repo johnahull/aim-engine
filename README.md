@@ -34,7 +34,7 @@ git clone -b publish-main https://github.com/amd-enterprise-ai/aim-engine.git ai
 cd aim-engine-deploy
 
 # Install CRDs (distributed separately from Helm chart)
-kubectl apply -f crd/crds.yaml
+kubectl apply --server-side -f crd/crds.yaml
 kubectl wait --for=condition=Established crd --all --timeout=60s
 
 # Install the operator. Gateway activation remains disabled by default.
@@ -57,7 +57,7 @@ make crds
 make helm
 
 # Install CRDs
-kubectl apply -f dist/crds.yaml
+kubectl apply --server-side -f dist/crds.yaml
 kubectl wait --for=condition=Established crd --all --timeout=60s
 
 # Option 1: Install directly with Helm

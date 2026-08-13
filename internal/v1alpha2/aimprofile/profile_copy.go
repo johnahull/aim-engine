@@ -102,6 +102,9 @@ func MatchesProfileCopySelector(candidate ProfileCopyCandidate, selector aimv1al
 	if selector.AcceleratorModel != "" && candidate.Spec.AcceleratorModel != selector.AcceleratorModel {
 		return false, nil
 	}
+	if selector.AcceleratorVendor != "" && candidate.Spec.AcceleratorVendor != selector.AcceleratorVendor {
+		return false, nil
+	}
 	if !matchesPartitioningSelector(selector.AcceleratorPartitioningMode, candidate.Spec.AcceleratorPartitioningMode) {
 		return false, nil
 	}
@@ -321,6 +324,9 @@ func ApplyProfileCopyOverrides(
 	}
 	if overrides.AcceleratorModel != "" {
 		result.AcceleratorModel = overrides.AcceleratorModel
+	}
+	if overrides.AcceleratorVendor != "" {
+		result.AcceleratorVendor = overrides.AcceleratorVendor
 	}
 	if overrides.AcceleratorCount != nil {
 		result.AcceleratorCount = *overrides.AcceleratorCount

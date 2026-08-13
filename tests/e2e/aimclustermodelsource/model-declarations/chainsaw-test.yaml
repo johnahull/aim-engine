@@ -1,0 +1,90 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aimclustermodelsource-model-declarations
+spec:
+  description: Static model declarations create v1alpha2 cluster models and remain append-only
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Materialize append-only model declarations
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMClusterModelSource
+              metadata:
+                name: (join('-', ['declared-models', $namespace]))
+              spec:
+                syncInterval: 1h
+                models:
+                  - modelId: Qwen/Qwen3.5-0.8B
+
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterModel
+              metadata:
+                labels:
+                  aim.eai.amd.com/model-source: (join('-', ['declared-models', $namespace]))
+                  aim.eai.amd.com/origin: auto-generated
+              spec:
+                modelId: Qwen/Qwen3.5-0.8B
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMClusterModelSource
+              metadata:
+                name: (join('-', ['declared-models', $namespace]))
+              status:
+                status: Ready
+                discoveredModels: 1
+
+        - patch:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMClusterModelSource
+              metadata:
+                name: (join('-', ['declared-models', $namespace]))
+              spec:
+                syncInterval: 1h
+                models:
+                  - modelId: acme/qwen-finetune
+                    aimId: Qwen/Qwen3.5-0.8B
+
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterModel
+              metadata:
+                labels:
+                  aim.eai.amd.com/model-source: (join('-', ['declared-models', $namespace]))
+              spec:
+                modelId: Qwen/Qwen3.5-0.8B
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterModel
+              metadata:
+                labels:
+                  aim.eai.amd.com/model-source: (join('-', ['declared-models', $namespace]))
+              spec:
+                modelId: acme/qwen-finetune
+                aimId: Qwen/Qwen3.5-0.8B
+      finally:
+        # Declared cluster models deliberately have an append-only lifecycle
+        # and therefore are not owned by the source. Remove this test's models
+        # explicitly even when an assertion fails. Delete the source first so
+        # its model-deletion watch cannot recreate them during cleanup.
+        - script:
+            content: |
+              kubectl delete aimclustermodelsource \
+                "declared-models-${NAMESPACE}" \
+                --ignore-not-found \
+                --wait=true
+              kubectl delete aimclustermodel \
+                -l "aim.eai.amd.com/model-source=declared-models-${NAMESPACE}" \
+                --ignore-not-found

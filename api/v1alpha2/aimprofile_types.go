@@ -48,6 +48,7 @@ type AIMProfileSpec struct {
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
 // +kubebuilder:printcolumn:name="Origin",type=string,JSONPath=`.status.origin`
 // +kubebuilder:printcolumn:name="Hardware",type=string,JSONPath=`.status.hardwareSummary`
+// +kubebuilder:printcolumn:name="Vendor",type=string,priority=1,JSONPath=`.spec.acceleratorVendor`
 // +kubebuilder:printcolumn:name="Metric",type=string,JSONPath=`.spec.metric`
 // +kubebuilder:printcolumn:name="Precision",type=string,JSONPath=`.spec.precision`
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`

@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
+	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 )
@@ -55,6 +56,10 @@ type ClusterModelSourceFetch struct {
 
 	// existingModels are all AIMClusterModels in the cluster, regardless of creator,
 	// so overlapping sources respect a model that already exists for an image.
+	//
+	// Listed as v1alpha1. v1alpha2 is the storage version, so this returns every
+	// AIMClusterModel including modelId-backed ones — CEL runs on write, not on
+	// read, and both versions project the same AIMModelSpec.
 	existingModels controllerutils.FetchResult[*aimv1alpha1.AIMClusterModelList]
 
 	// filterResults contains per-filter registry query results
@@ -102,7 +107,7 @@ func (fetch ClusterModelSourceFetch) GetComponentHealth() []controllerutils.Comp
 		},
 	)
 
-	filterHealth := composeFilterHealth(fetch.filterResults)
+	filterHealth := composeFilterHealth(fetch.filterResults, len(fetch.source.Spec.Models) > 0)
 
 	return []controllerutils.ComponentHealth{
 		existingModelsHealth,
@@ -111,8 +116,16 @@ func (fetch ClusterModelSourceFetch) GetComponentHealth() []controllerutils.Comp
 }
 
 // composeFilterHealth aggregates filter results into a single ComponentHealth.
-func composeFilterHealth(results []FilterResult) controllerutils.ComponentHealth {
+func composeFilterHealth(results []FilterResult, hasModels bool) controllerutils.ComponentHealth {
 	if len(results) == 0 {
+		if hasModels {
+			return controllerutils.ComponentHealth{
+				Component: "Filters",
+				State:     constants.AIMStatusReady,
+				Reason:    "NoRegistryFilters",
+				Message:   "Only static model declarations are configured",
+			}
+		}
 		return controllerutils.ComponentHealth{
 			Component: "Filters",
 			State:     constants.AIMStatusProgressing,
@@ -163,13 +176,17 @@ type ClusterModelSourceObservation struct {
 	ClusterModelSourceFetch
 
 	// Computed during ComposeState for PlanResources
-	newImages     []RegistryImage
-	existingByURI map[string]*aimv1alpha1.AIMClusterModel
+	newImages        []RegistryImage
+	desiredModels    []*aimv1alpha2.AIMClusterModel
+	newDeclaredCount int
+	existingByURI    map[string]*aimv1alpha1.AIMClusterModel
+	existingByModel  map[string]*aimv1alpha1.AIMClusterModel
 
 	// Computed during ComposeState for DecorateStatus
 	totalFiltered     int
 	totalDiscovered   int
 	filtersWithErrors int
+	buildErr          error
 }
 
 func (r *ClusterModelSourceReconciler) ComposeState(
@@ -180,13 +197,19 @@ func (r *ClusterModelSourceReconciler) ComposeState(
 	obs := ClusterModelSourceObservation{
 		ClusterModelSourceFetch: fetch,
 		existingByURI:           make(map[string]*aimv1alpha1.AIMClusterModel),
+		existingByModel:         make(map[string]*aimv1alpha1.AIMClusterModel),
 	}
 
 	// Build a lookup of images that already have an AIMClusterModel, keyed by image URI.
 	if fetch.existingModels.OK() {
 		for i := range fetch.existingModels.Value.Items {
 			model := &fetch.existingModels.Value.Items[i]
-			obs.existingByURI[model.Spec.Image] = model
+			if model.Spec.Image != "" {
+				obs.existingByURI[model.Spec.Image] = model
+			}
+			if model.Spec.ModelID != "" {
+				obs.existingByModel[model.Spec.ModelID] = model
+			}
 		}
 	}
 
@@ -214,8 +237,36 @@ func (r *ClusterModelSourceReconciler) ComposeState(
 			}
 		}
 	}
+	for _, declaration := range source.Spec.Models {
+		obs.totalFiltered++
+		existing, covered := obs.existingByModel[declaration.ModelID]
+		if covered {
+			coveredCount++
+			// A model materialized by a *different* source (or hand-authored)
+			// is respected, never re-owned — same rule as image discovery.
+			if !isModelOwnedBySource(existing, source.Name) {
+				continue
+			}
+		} else if coveredCount+len(obs.newImages)+obs.newDeclaredCount >= maxModels {
+			continue
+		}
 
-	obs.totalDiscovered = coveredCount + len(obs.newImages)
+		desired, err := buildDeclaredClusterModel(source, declaration)
+		if err != nil {
+			obs.buildErr = err
+			continue
+		}
+		if covered {
+			// Keep syncing the model this source already owns. Declarations are
+			// desired state the user edits here, unlike discovered images.
+			desired.Name = existing.Name
+		} else {
+			obs.newDeclaredCount++
+		}
+		obs.desiredModels = append(obs.desiredModels, desired)
+	}
+
+	obs.totalDiscovered = coveredCount + len(obs.newImages) + obs.newDeclaredCount
 	return obs
 }
 
@@ -231,16 +282,25 @@ func (r *ClusterModelSourceReconciler) PlanResources(
 	logger := log.FromContext(ctx).WithName("plan")
 	source := obs.source
 
-	// Only create models for new images (append-only lifecycle)
 	result := controllerutils.PlanResult{}
+
+	// Discovered images are a snapshot of an external registry, so only images
+	// without a model are planned — an existing model is never re-applied.
 	for _, img := range obs.newImages {
 		model := buildClusterModel(source, img)
 		result.Apply(model)
 	}
+	// Declarations are desired state the user edits in this spec, so models this
+	// source owns are re-applied every reconcile and stay in sync with their
+	// declaration.
+	for _, model := range obs.desiredModels {
+		result.Apply(model)
+	}
 
-	logger.V(1).Info("planning models", "newCount", len(obs.newImages))
+	logger.V(1).Info("planning models", "newImageCount", len(obs.newImages), "declaredCount", len(obs.desiredModels))
 
-	// Never delete - append-only lifecycle
+	// Never delete. Removing a filter or a declaration leaves its model behind
+	// for an operator to remove deliberately.
 	return result
 }
 
@@ -284,6 +344,27 @@ func (r *ClusterModelSourceReconciler) DecorateStatus(
 		cm.Set("MaxModelsLimitReached", metav1.ConditionFalse,
 			"WithinLimit",
 			fmt.Sprintf("Created %d models, within limit", status.DiscoveredModels),
+			controllerutils.AsInfo(),
+		)
+	}
+
+	// A declaration that cannot be turned into a valid model name is a user
+	// configuration error, not a transient one. Surface it rather than silently
+	// dropping the declaration from the plan.
+	if obs.buildErr != nil {
+		cm.Set("ModelDeclarationsValid", metav1.ConditionFalse,
+			"InvalidDeclaration",
+			obs.buildErr.Error(),
+			controllerutils.AsWarning(),
+		)
+	} else {
+		declarationCount := 0
+		if obs.source != nil {
+			declarationCount = len(obs.source.Spec.Models)
+		}
+		cm.Set("ModelDeclarationsValid", metav1.ConditionTrue,
+			"DeclarationsValid",
+			fmt.Sprintf("All %d model declarations are valid", declarationCount),
 			controllerutils.AsInfo(),
 		)
 	}

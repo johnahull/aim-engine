@@ -78,6 +78,123 @@ Only one reference is present — namespace or cluster, never both. When the two
 
 Each resource independently resolves its runtime config and publishes the result.
 
+## Model profile-generation fallbacks
+
+`spec.model.profileGeneration.fallbacks` defines generic serving runtimes for
+v1alpha2 models declared with `spec.modelId`. The Helm chart installs a
+chart-managed `AIMClusterRuntimeConfig/default` with the NVIDIA vLLM fallback
+shown below, so NVIDIA model-ID onboarding works after a default install.
+Set `clusterRuntimeConfig.enable=false` when the cluster already has a
+platform-managed config named `default`, or override
+`clusterRuntimeConfig.spec.model.profileGeneration.fallbacks` to enforce a
+different runtime policy.
+
+```yaml
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMClusterRuntimeConfig
+metadata:
+  name: default
+spec:
+  model:
+    profileGeneration:
+      fallbacks:
+        - name: nvidia-vllm
+          priority: 10
+          type: unoptimized       # default; see "Optimization tier" below
+          autoSelectionPolicy: any
+          match:
+            acceleratorVendor: nvidia
+            acceleratorType: gpu
+          runtime:
+            image: vllm/vllm-openai:v0.17.1-cu130
+            engine: vllm
+            engineArgs:
+              max-model-len: 8192
+              gpu-memory-utilization: 0.9
+```
+
+Each matching fallback creates a self-contained `AIMProfile` or
+`AIMClusterProfile`. Multiple fallbacks may match; the controller generates all
+of them and selects one primary by current hardware availability, priority,
+hardware-match specificity, then fallback name. Profiles are first created only
+while matching hardware exists. Once created, they are retained if that hardware
+temporarily disappears and become unavailable instead of being deleted.
+
+Namespace and cluster fallback lists merge by `name`. A namespace fallback
+replaces the complete same-named cluster entry, adds namespace-only entries,
+and preserves unrelated cluster entries.
+
+The runtime template may set `engineArgs`, `engineEnv`, `containerEnv`,
+`resources`, `imagePullSecrets`, and `serviceAccountName`. Model caching remains
+an AIMService/artifact concern and is not configured on the fallback.
+
+The chart default deliberately omits CPU and memory requests. The generated
+profile still requests the model's accelerator count (one `nvidia.com/gpu` by
+default), while platform operators remain free to add host-resource requests
+appropriate for their nodes and model sizes.
+
+### Optimization tier and auto-selection policy
+
+A fallback is cluster policy — a generic runtime for a class of hardware, not a
+configuration tuned for any particular model. Generated profiles therefore
+default to `type: unoptimized`, which is **below** the AIMService selection
+floor (`minimumType` defaults to `optimized`).
+
+`autoSelectionPolicy` controls which optimization tiers may participate in
+automatic selection when a service leaves `minimumType` implicit:
+
+```yaml
+        - name: nvidia-vllm
+          type: unoptimized
+          autoSelectionPolicy: any
+```
+
+The default policy is `optimized`, which applies the implicit
+`minimumType: optimized` floor. With `any`, the generated profile is considered
+in a second pass only when:
+
+- the service did not explicitly set `spec.profile.selector.minimumType`, and
+- no namespace or cluster profile matched the optimized selection pass.
+
+An explicitly authored `minimumType` always wins. For example,
+`minimumType: optimized` prevents a lower-tier `any` profile from being
+selected,
+while `minimumType: unoptimized` directly admits all profiles at that tier or
+better without requiring `autoSelectionPolicy: any`.
+
+The chart-provided NVIDIA runtime uses `type: unoptimized` with
+`autoSelectionPolicy: any`. This preserves the runtime's honest optimization
+tier while making model-ID onboarding work without per-service selector
+configuration. AMD preview and unoptimized profiles remain protected by the
+default `optimized` policy unless their publisher or platform operator
+explicitly opts them into any-tier auto-selection.
+
+### Hardware shape
+
+The fallback declares which hardware *class* it serves; it does not declare how
+many devices a model needs. That is per-model and lives on
+`AIM(Cluster)Model.spec.accelerator`:
+
+```yaml
+# AIMModel
+spec:
+  modelId: Qwen/Qwen3.5-0.8B
+  accelerator:
+    count: 4              # default 1
+    vendor: nvidia        # optional; narrows which fallbacks apply
+    model: H100           # optional; narrows further, and is stamped on the profile
+    partitioningMode: unpartitioned
+```
+
+`count` sets the generated profile's `acceleratorCount`, which drives both the
+device resource request and the engine's tensor-parallel size. A fallback
+applies when each axis the model requests is either unconstrained on the
+fallback's `match` or equal to it; axes the model leaves empty inherit the
+matched fallback's value.
+
+The same block is available on `AIMClusterModelSource.spec.models[]` so declared
+models can carry their hardware shape.
+
 ## Storage defaults
 
 The most common reason to apply a runtime config: pin the storage class used for cache PVCs.

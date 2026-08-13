@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: v1alpha2-aimmodel-modelid-no-compatible-runtime
+spec:
+  description: A modelId-only AIMModel is admitted and reports NoCompatibleRuntime when no fallback is configured
+  timeouts:
+    assert: 90s
+  steps:
+    - name: Create modelId-only model
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: modelid-no-runtime
+              spec:
+                modelId: Qwen/Qwen3.5-0.8B
+
+    - name: Assert normalized identity and unavailable status
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: modelid-no-runtime
+              status:
+                status: NotAvailable
+                kind: Generated
+                aimId: Qwen/Qwen3.5-0.8B
+                managedProfiles:
+                  total: 0
+                (conditions[?type == 'ManagedProfilesReady']):
+                  - status: "False"
+                    reason: NoCompatibleRuntime
+
+    - name: Assert no generated profile exists
+      try:
+        - error:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/source-model: modelid-no-runtime

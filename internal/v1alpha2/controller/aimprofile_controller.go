@@ -162,7 +162,7 @@ func (r *AIMProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			},
 			"failed to list AIMProfiles for Node event",
 			func(profile *aimv1alpha2.AIMProfile) bool {
-				return aimprofile.HasAcceleratorRequirement(profile.Spec.AcceleratorModel, profile.Spec.AcceleratorCount, profile.Spec.Resources)
+				return aimprofile.HasProfileAcceleratorRequirement(profile.Spec.AIMProfileSpecCommon)
 			},
 		)
 	})

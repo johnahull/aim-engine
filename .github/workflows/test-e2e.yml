@@ -331,7 +331,7 @@ jobs:
         run: make seaweedfs-init-bucket
 
       - name: Install CRDs
-        run: kubectl apply -f dist/crds.yaml
+        run: kubectl apply --server-side -f dist/crds.yaml
 
       - name: Install operator via Helm
         # manager.runtimeProjectionMode is set at install time (deterministic, no

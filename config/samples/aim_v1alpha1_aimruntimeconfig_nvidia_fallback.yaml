@@ -1,0 +1,46 @@
+# Profile-generation fallback for modelId-backed AIMModels on NVIDIA GPUs.
+#
+# There is no implicit fallback: without a config like this, an AIMModel with
+# spec.modelId reports NoCompatibleRuntime and produces no profiles.
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: default
+  namespace: default
+spec:
+  model:
+    profileGeneration:
+      fallbacks:
+        - name: nvidia-vllm
+          priority: 10
+
+          # Keep the generic runtime truthfully marked as unoptimized.
+          # autoSelectionPolicy=any admits it only after no profile satisfies
+          # the service's implicit optimized floor. An explicitly authored
+          # minimumType remains authoritative.
+          type: unoptimized
+          autoSelectionPolicy: any
+
+          match:
+            acceleratorVendor: nvidia
+            acceleratorType: gpu
+
+          runtime:
+            # Pick an image whose vLLM version supports your model family, and a
+            # CUDA variant matching the host driver stack.
+            image: vllm/vllm-openai:v0.17.1-cu130
+            engine: vllm
+
+            # AIM Engine generates the model path, --served-model-name, --host,
+            # --port and --tensor-parallel-size. engineArgs is tuning only.
+            engineArgs:
+              max-model-len: 8192
+              gpu-memory-utilization: 0.9
+
+            resources:
+              requests:
+                cpu: "4"
+                memory: 32Gi
+              limits:
+                cpu: "8"
+                memory: 64Gi

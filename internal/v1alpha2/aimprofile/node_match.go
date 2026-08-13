@@ -24,6 +24,7 @@ package aimprofile
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
+	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/aimimage"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 )
@@ -44,6 +46,12 @@ const (
 	// the operator uses an Exists selector on the key for node affinity. A
 	// single node may have multiple labels (model, architecture, family).
 	AcceleratorLabelPrefix = "feature.node.kubernetes.io/aim-accelerator."
+
+	// AcceleratorVendorLabelPrefix is the per-accelerator-type vendor axis
+	// published by the AcceleratorDetector:
+	//   feature.node.kubernetes.io/aim-accelerator.vendor.GPU.AMD=8
+	//   feature.node.kubernetes.io/aim-accelerator.vendor.GPU.NVIDIA=8
+	AcceleratorVendorLabelPrefix = AcceleratorLabelPrefix + "vendor."
 
 	// PartitioningSchemeLabelPrefix is the single partition axis published by
 	// the AcceleratorDetector. Keys are either the `default` sentinel or a
@@ -64,26 +72,32 @@ const (
 	PartitioningModePartitioned = "partitioned"
 )
 
-// NodeMatchResult holds the result of matching a profile against cluster nodes.
-type NodeMatchResult struct {
-	MatchingNodes int32
-	NodeAffinity  *corev1.NodeAffinity
+const maxRecordedNodeMismatches = 5
+
+// NodeMismatch records why one node did not satisfy a profile's hardware
+// requirements. Reasons follow the same checks used to calculate
+// MatchingNodes, so diagnostics cannot disagree with scheduling affinity.
+type NodeMismatch struct {
+	NodeName string
+	Reasons  []string
 }
 
-// ResolveResources merges accelerator-derived defaults with explicit resources.
-// The accelerator count is translated to a Kubernetes resource name based on type:
+// NodeMatchResult holds the result of matching a profile against cluster nodes.
+type NodeMatchResult struct {
+	MatchingNodes     int32
+	NodeAffinity      *corev1.NodeAffinity
+	NodeMismatches    []NodeMismatch
+	OmittedMismatches int
+}
+
+// ResolveResources merges the accelerator-derived device request with explicit
+// resources using the legacy accelerator contract. Empty vendor preserves the
+// historical AMD whole-GPU resource name.
 //
-//	gpu → constants.DefaultGPUResourceName (amd.com/gpu)
-//	cpu → corev1.ResourceCPU
-//
-// GPU profiles also receive the same per-GPU host CPU and memory defaults used
-// by the v1alpha1 service path. Explicit spec.resources entries win per key.
-//
-// For EPYC CPU profiles (acceleratorModel starts with "EPYC"), memory is derived from
-// the engine env var VLLM_CPU_KVCACHE_SPACE (doubled) to enable Guaranteed QoS pods.
-//
-// If spec.resources already contains the derived resource name, the explicit value wins.
-// Returns nil only when both accelerator count is zero and resources is nil.
+// New profile reconciliation should use ResolveProfileResources so the vendor
+// and partitioning axes participate in resource-name resolution. GPU profiles
+// also receive the host CPU and memory defaults used by the v1alpha1 service
+// path, with explicit resources remaining authoritative per key.
 func ResolveResources(
 	accelType aimv1alpha1.AcceleratorType,
 	accelCount int32,
@@ -91,7 +105,51 @@ func ResolveResources(
 	acceleratorModel string,
 	engineEnv map[string]string,
 ) *corev1.ResourceRequirements {
-	derivedName, derivedQty := acceleratorDeviceRequest(accelType, accelCount)
+	return resolveResources(
+		accelType,
+		"",
+		"",
+		accelCount,
+		resources,
+		acceleratorModel,
+		engineEnv,
+	)
+}
+
+// ResolveProfileResources merges the accelerator-derived device request with
+// explicit resources using all profile hardware axes.
+func ResolveProfileResources(spec aimv1alpha2.AIMProfileSpecCommon) *corev1.ResourceRequirements {
+	return resolveResources(
+		spec.AcceleratorType,
+		spec.AcceleratorVendor,
+		spec.AcceleratorPartitioningMode,
+		spec.AcceleratorCount,
+		spec.Resources,
+		spec.AcceleratorModel,
+		spec.EngineEnv,
+	)
+}
+
+// resolveResources translates accelerator count to a Kubernetes resource name:
+//
+//	gpu → vendor/partition-specific extended resource
+//	cpu → corev1.ResourceCPU
+//
+// For EPYC CPU profiles (acceleratorModel starts with "EPYC"), memory is derived from
+// the engine env var VLLM_CPU_KVCACHE_SPACE (doubled) to enable Guaranteed QoS pods.
+//
+// If spec.resources already contains the derived resource name, the explicit value wins.
+// Returns nil only when both accelerator count is zero and resources is nil.
+func resolveResources(
+	accelType aimv1alpha1.AcceleratorType,
+	acceleratorVendor aimv1alpha1.AcceleratorVendor,
+	partitioningMode string,
+	accelCount int32,
+	resources *corev1.ResourceRequirements,
+	acceleratorModel string,
+	engineEnv map[string]string,
+) *corev1.ResourceRequirements {
+	derivedName, derivedQty := acceleratorDeviceRequest(accelType, acceleratorVendor, partitioningMode, accelCount)
 
 	if derivedName == "" && resources == nil {
 		return nil
@@ -202,20 +260,28 @@ func deriveEPYCMemoryGi(engineEnv map[string]string) int64 {
 // acceleratorDeviceRequest returns the K8s resource name and quantity derived from the
 // accelerator type and count. Returns empty name when no device request can be derived.
 //
-// MIXED-MODE SEAM: under resource_naming_strategy: single (the only supported
-// strategy today) every GPU/partition is advertised as amd.com/gpu, so partition
-// mode does NOT affect the resource name — it only scopes node affinity (see
-// partitionNodeSelectorRequirement). The future mixed/multiple follow-up would
-// branch here on the resolved partition mode to request a mode-specific resource
-// (e.g. amd.com/cpx_nps4). Do not add that branch yet.
-func acceleratorDeviceRequest(accelType aimv1alpha1.AcceleratorType, accelCount int32) (corev1.ResourceName, resource.Quantity) {
+// RESOURCE-NAMING SEAM: gpuResourceName is the only mapping from the profile's
+// vendor/partition contract to a device-plugin resource. Whole-device NVIDIA
+// and AMD are implemented now. Future AMD partition resources such as
+// amd.com/cpx_nps4 belong in that function without changing resource merge,
+// node-capacity, or runtime projection code.
+func acceleratorDeviceRequest(
+	accelType aimv1alpha1.AcceleratorType,
+	acceleratorVendor aimv1alpha1.AcceleratorVendor,
+	partitioningMode string,
+	accelCount int32,
+) (corev1.ResourceName, resource.Quantity) {
 	if accelCount <= 0 {
 		return "", resource.Quantity{}
 	}
 
 	switch accelType {
 	case aimv1alpha1.AcceleratorTypeGPU:
-		return corev1.ResourceName(constants.DefaultGPUResourceName), *resource.NewQuantity(int64(accelCount), resource.DecimalSI)
+		name := gpuResourceName(acceleratorVendor, partitioningMode)
+		if name == "" {
+			return "", resource.Quantity{}
+		}
+		return name, *resource.NewQuantity(int64(accelCount), resource.DecimalSI)
 	case aimv1alpha1.AcceleratorTypeCPU:
 		return corev1.ResourceCPU, *resource.NewQuantity(int64(accelCount), resource.DecimalSI)
 	default:
@@ -223,26 +289,146 @@ func acceleratorDeviceRequest(accelType aimv1alpha1.AcceleratorType, accelCount 
 	}
 }
 
+// gpuResourceName resolves the device-plugin extended resource for one GPU
+// unit. Empty vendor is the backwards-compatible AMD contract.
+func gpuResourceName(vendor aimv1alpha1.AcceleratorVendor, partitioningMode string) corev1.ResourceName {
+	switch vendor {
+	case "", aimv1alpha1.AcceleratorVendorAMD:
+		// Today all AMD partition modes use the single-resource strategy.
+		// When mixed resource naming is enabled, canonicalizePartitioningMode
+		// here and map concrete schemes (for example CPX-NPS4) to resources
+		// such as amd.com/cpx_nps4.
+		_ = partitioningMode
+		return corev1.ResourceName(constants.AMDGPUResourceName)
+	case aimv1alpha1.AcceleratorVendorNVIDIA:
+		return corev1.ResourceName(constants.NVIDIAGPUResourceName)
+	default:
+		return ""
+	}
+}
+
 // MatchNodes checks how many nodes in the list satisfy the accelerator label
 // requirements (model +, for GPU profiles, partition), and the resolved
 // resource capacity requirements of a profile.
 func MatchNodes(nodes []corev1.Node, accelType aimv1alpha1.AcceleratorType, accelModel, partitioningMode string, resolvedResources *corev1.ResourceRequirements) NodeMatchResult {
-	affinity := BuildNodeAffinity(accelType, accelModel, partitioningMode)
+	return matchNodes(nodes, accelType, "", accelModel, partitioningMode, resolvedResources)
+}
+
+// MatchProfileNodes checks node compatibility using all profile hardware axes.
+func MatchProfileNodes(nodes []corev1.Node, spec aimv1alpha2.AIMProfileSpecCommon, resolvedResources *corev1.ResourceRequirements) NodeMatchResult {
+	return matchNodes(
+		nodes,
+		spec.AcceleratorType,
+		spec.AcceleratorVendor,
+		spec.AcceleratorModel,
+		spec.AcceleratorPartitioningMode,
+		resolvedResources,
+	)
+}
+
+func matchNodes(
+	nodes []corev1.Node,
+	accelType aimv1alpha1.AcceleratorType,
+	accelVendor aimv1alpha1.AcceleratorVendor,
+	accelModel, partitioningMode string,
+	resolvedResources *corev1.ResourceRequirements,
+) NodeMatchResult {
+	affinity := buildNodeAffinity(accelType, accelVendor, accelModel, partitioningMode)
+	vendorReq := vendorNodeSelectorRequirement(accelType, accelVendor)
 	partitionReq := partitionNodeSelectorRequirement(accelType, partitioningMode)
 
 	var count int32
+	var resultMismatches []NodeMismatch
+	var omittedMismatches int
 	for i := range nodes {
-		if nodeMatchesAccelerator(&nodes[i], accelModel) &&
-			nodeMatchesPartitioning(&nodes[i], partitionReq) &&
-			nodeHasResourceCapacity(&nodes[i], resolvedResources) {
+		reasons := nodeMismatchReasons(
+			&nodes[i],
+			vendorReq,
+			accelModel,
+			partitionReq,
+			resolvedResources,
+		)
+		if len(reasons) == 0 {
 			count++
+			continue
+		}
+		if len(resultMismatches) < maxRecordedNodeMismatches {
+			resultMismatches = append(resultMismatches, NodeMismatch{
+				NodeName: nodes[i].Name,
+				Reasons:  reasons,
+			})
+		} else {
+			omittedMismatches++
 		}
 	}
 
 	return NodeMatchResult{
-		MatchingNodes: count,
-		NodeAffinity:  affinity,
+		MatchingNodes:     count,
+		NodeAffinity:      affinity,
+		NodeMismatches:    resultMismatches,
+		OmittedMismatches: omittedMismatches,
 	}
+}
+
+func nodeMismatchReasons(
+	node *corev1.Node,
+	vendorReq *corev1.NodeSelectorRequirement,
+	accelModel string,
+	partitionReq *corev1.NodeSelectorRequirement,
+	resolvedResources *corev1.ResourceRequirements,
+) []string {
+	var reasons []string
+	if !nodeMatchesVendor(node, vendorReq) {
+		reasons = append(reasons, fmt.Sprintf("required node label %q is missing", vendorReq.Key))
+	}
+	if !nodeMatchesAccelerator(node, accelModel) {
+		reasons = append(reasons, fmt.Sprintf(
+			"required node label %q is missing",
+			AcceleratorLabelPrefix+accelModel,
+		))
+	}
+	if !nodeMatchesPartitioning(node, partitionReq) {
+		if partitionReq.Operator == corev1.NodeSelectorOpDoesNotExist {
+			reasons = append(reasons, fmt.Sprintf("node label %q must be absent", partitionReq.Key))
+		} else {
+			reasons = append(reasons, fmt.Sprintf("required node label %q is missing", partitionReq.Key))
+		}
+	}
+	reasons = append(reasons, resourceMismatchReasons(node, resolvedResources)...)
+	return reasons
+}
+
+func resourceMismatchReasons(node *corev1.Node, resources *corev1.ResourceRequirements) []string {
+	if resources == nil || len(resources.Requests) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(resources.Requests))
+	for name := range resources.Requests {
+		names = append(names, string(name))
+	}
+	sort.Strings(names)
+
+	var reasons []string
+	for _, rawName := range names {
+		name := corev1.ResourceName(rawName)
+		requested := resources.Requests[name]
+		allocatable, exists := node.Status.Allocatable[name]
+		// Capacity is enforced only when the requested resource is actually
+		// reported in Allocatable. Preserve the existing labels-only behavior
+		// during device-plugin startup races and in synthetic test clusters:
+		// kubelet still prevents a real pod from consuming a missing resource.
+		if !exists || allocatable.Cmp(requested) >= 0 {
+			continue
+		}
+		reasons = append(reasons, fmt.Sprintf(
+			"resource %s requested %s, allocatable %s",
+			name,
+			requested.String(),
+			allocatable.String(),
+		))
+	}
+	return reasons
 }
 
 // BuildNodeAffinity constructs a corev1.NodeAffinity from the accelerator model
@@ -250,18 +436,36 @@ func MatchNodes(nodes []corev1.Node, accelType aimv1alpha1.AcceleratorType, acce
 // single NodeSelectorTerm so the resulting affinity is "model AND partition".
 // Returns nil when no accelerator model is specified.
 func BuildNodeAffinity(accelType aimv1alpha1.AcceleratorType, accelModel, partitioningMode string) *corev1.NodeAffinity {
-	if accelModel == "" {
-		return nil
-	}
+	return buildNodeAffinity(accelType, "", accelModel, partitioningMode)
+}
 
-	exprs := []corev1.NodeSelectorRequirement{
-		{
+// BuildProfileNodeAffinity constructs node affinity using all profile hardware axes.
+func BuildProfileNodeAffinity(spec aimv1alpha2.AIMProfileSpecCommon) *corev1.NodeAffinity {
+	return buildNodeAffinity(spec.AcceleratorType, spec.AcceleratorVendor, spec.AcceleratorModel, spec.AcceleratorPartitioningMode)
+}
+
+func buildNodeAffinity(
+	accelType aimv1alpha1.AcceleratorType,
+	accelVendor aimv1alpha1.AcceleratorVendor,
+	accelModel, partitioningMode string,
+) *corev1.NodeAffinity {
+	var exprs []corev1.NodeSelectorRequirement
+	if req := vendorNodeSelectorRequirement(accelType, accelVendor); req != nil {
+		exprs = append(exprs, *req)
+	}
+	if accelModel != "" {
+		exprs = append(exprs, corev1.NodeSelectorRequirement{
 			Key:      AcceleratorLabelPrefix + accelModel,
 			Operator: corev1.NodeSelectorOpExists,
-		},
+		})
 	}
-	if req := partitionNodeSelectorRequirement(accelType, partitioningMode); req != nil {
-		exprs = append(exprs, *req)
+	if len(exprs) > 0 {
+		if req := partitionNodeSelectorRequirement(accelType, partitioningMode); req != nil {
+			exprs = append(exprs, *req)
+		}
+	}
+	if len(exprs) == 0 {
+		return nil
 	}
 
 	return &corev1.NodeAffinity{
@@ -271,6 +475,32 @@ func BuildNodeAffinity(accelType aimv1alpha1.AcceleratorType, accelModel, partit
 			},
 		},
 	}
+}
+
+// vendorNodeSelectorRequirement maps acceleratorVendor onto the detector's
+// per-type vendor label. Empty vendor preserves legacy model-only matching.
+func vendorNodeSelectorRequirement(
+	accelType aimv1alpha1.AcceleratorType,
+	vendor aimv1alpha1.AcceleratorVendor,
+) *corev1.NodeSelectorRequirement {
+	if vendor == "" || accelType == "" {
+		return nil
+	}
+	return &corev1.NodeSelectorRequirement{
+		Key: AcceleratorVendorLabelPrefix +
+			strings.ToUpper(string(accelType)) + "." +
+			strings.ToUpper(string(vendor)),
+		Operator: corev1.NodeSelectorOpExists,
+	}
+}
+
+// nodeMatchesVendor evaluates a resolved vendor selector against node labels.
+func nodeMatchesVendor(node *corev1.Node, req *corev1.NodeSelectorRequirement) bool {
+	if req == nil {
+		return true
+	}
+	_, exists := node.Labels[req.Key]
+	return exists
 }
 
 // partitionNodeSelectorRequirement is the single seam that maps an
@@ -360,36 +590,6 @@ func nodeMatchesPartitioning(node *corev1.Node, req *corev1.NodeSelectorRequirem
 	return exists
 }
 
-// nodeHasResourceCapacity checks if a node's allocatable resources can satisfy the
-// profile's resource requests. Returns true if resources is nil (no resource constraints).
-//
-// Capacity is enforced only when the requested resource is actually reported in
-// node.Status.Allocatable. If the resource is absent (e.g. on a kind cluster
-// where no device plugin advertises amd.com/gpu, or during an NFD-vs-device-plugin
-// race window at cluster startup), the accelerator label is treated as the
-// authoritative signal that the hardware exists and the node is counted as a
-// match. The kubelet still enforces real capacity at pod admission time, so a
-// lying label can never produce a successfully-running pod — it just shifts the
-// failure surface from profile-Ready to pod-Pending. This mirrors v1alpha1's
-// label-only availability check (see aimservicetemplate.GPUHealthFromResources)
-// and lets v1alpha2 profiles with realistic acceleratorModel values stay Ready
-// on kind clusters that only carry labels, not device-plugin capacity.
-func nodeHasResourceCapacity(node *corev1.Node, resources *corev1.ResourceRequirements) bool {
-	if resources == nil || len(resources.Requests) == 0 {
-		return true
-	}
-	for resourceName, requested := range resources.Requests {
-		allocatable, exists := node.Status.Allocatable[resourceName]
-		if !exists {
-			continue
-		}
-		if allocatable.Cmp(requested) < 0 {
-			return false
-		}
-	}
-	return true
-}
-
 // FormatHardwareSummary builds a human-readable string from the accelerator spec.
 // Examples: "4 x MI300X", "1 x MI300X", "EPYC_9965", "CPU".
 func FormatHardwareSummary(accelModel string, accelCount int32) string {
@@ -402,6 +602,28 @@ func FormatHardwareSummary(accelModel string, accelCount int32) string {
 	}
 
 	return accelModel
+}
+
+// FormatProfileHardwareSummary includes the vendor when a profile intentionally
+// targets a generic accelerator class without naming a concrete model.
+func FormatProfileHardwareSummary(spec aimv1alpha2.AIMProfileSpecCommon) string {
+	if spec.AcceleratorModel != "" {
+		return FormatHardwareSummary(spec.AcceleratorModel, spec.AcceleratorCount)
+	}
+	if spec.AcceleratorType == aimv1alpha1.AcceleratorTypeGPU {
+		name := "GPU"
+		switch spec.AcceleratorVendor {
+		case aimv1alpha1.AcceleratorVendorAMD:
+			name = "AMD GPU"
+		case aimv1alpha1.AcceleratorVendorNVIDIA:
+			name = "NVIDIA GPU"
+		}
+		if spec.AcceleratorCount > 0 {
+			return fmt.Sprintf("%d x %s", spec.AcceleratorCount, name)
+		}
+		return name
+	}
+	return FormatHardwareSummary(spec.AcceleratorModel, spec.AcceleratorCount)
 }
 
 // ExtractVersionFromImage extracts a version tag from a container image
@@ -436,4 +658,11 @@ func HasAcceleratorRequirement(accelModel string, accelCount int32, resources *c
 		}
 	}
 	return false
+}
+
+// HasProfileAcceleratorRequirement reports whether any profile hardware axis
+// requires accelerator-aware matching.
+func HasProfileAcceleratorRequirement(spec aimv1alpha2.AIMProfileSpecCommon) bool {
+	return spec.AcceleratorVendor != "" ||
+		HasAcceleratorRequirement(spec.AcceleratorModel, spec.AcceleratorCount, spec.Resources)
 }

@@ -1,0 +1,30 @@
+runtimeClassName: nvidia
+failOnInitError: true
+migStrategy: none
+deviceListStrategy: envvar
+
+# The device-plugin chart's pinned NFD dependency is intentionally used here.
+# Its PCI source emits feature.node.kubernetes.io/pci-10de.present, which is
+# the placement contract shared by the plugin and AIM's NVIDIA detector.
+nfd:
+  enabled: true
+  master:
+    config:
+      extraLabelNs:
+        - nvidia.com
+  worker:
+    config:
+      core:
+        sleepInterval: 10s
+      sources:
+        pci:
+          deviceClassWhitelist:
+            - "03"
+          deviceLabelFields:
+            - vendor
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        memory: 256Mi

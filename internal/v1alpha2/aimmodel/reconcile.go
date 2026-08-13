@@ -43,6 +43,7 @@ import (
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 	legacyaimmodel "github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimmodel"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimruntimeconfig"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
 )
 
@@ -110,33 +111,36 @@ type ModelFetchResult struct {
 	nodes            controllerutils.FetchResult[[]corev1.Node]
 	existingProfiles controllerutils.FetchResult[[]managedProfile]
 	childProfileSet  controllerutils.FetchResult[*aimv1alpha2.AIMProfileSet]
+	runtimeConfig    controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon]
 	legacyFetch      *legacyaimmodel.ModelFetchResult
 }
 
 type ModelObservation struct {
 	ModelFetchResult
-	Kind                 aimv1alpha1.AIMModelKind
-	ResolvedAimID        string
-	ResolvedBaseImage    string
-	DiscoveryCacheRef    *aimv1alpha1.DiscoveryCacheReference
-	DiscoveredProfiles   aimv1alpha1.DiscoveredProfileCounts
-	ProfileSetRef        *aimv1alpha1.ProfileSetReference
-	ManagedProfiles      aimv1alpha1.ManagedProfileCounts
-	ExistingDesiredCount int32
-	DesiredProfiles      []desiredProfile
-	DesiredCache         *corev1.ConfigMap
-	DesiredJob           *batchv1.Job
-	CompletedJobToDelete *batchv1.Job
-	DesiredProfileSet    *aimv1alpha2.AIMProfileSet
-	DiscoveryState       *aimv1alpha1.ModelDiscoveryState
-	DiscoveryReason      string
-	DiscoveryMessage     string
-	DiscoveryProgressing bool
-	RequeueAfter         time.Duration
-	pruneSafe            bool
-	BuildErr             error
-	componentHealth      []controllerutils.ComponentHealth
-	legacyObservation    *legacyaimmodel.ModelObservation
+	Kind                            aimv1alpha1.AIMModelKind
+	ResolvedAimID                   string
+	ResolvedBaseImage               string
+	DiscoveryCacheRef               *aimv1alpha1.DiscoveryCacheReference
+	DiscoveredProfiles              aimv1alpha1.DiscoveredProfileCounts
+	ProfileSetRef                   *aimv1alpha1.ProfileSetReference
+	ManagedProfiles                 aimv1alpha1.ManagedProfileCounts
+	ExistingDesiredCount            int32
+	DesiredProfiles                 []desiredProfile
+	ProfileGeneration               *aimv1alpha1.AIMModelProfileGenerationStatus
+	ProfileGenerationFailureMessage string
+	DesiredCache                    *corev1.ConfigMap
+	DesiredJob                      *batchv1.Job
+	CompletedJobToDelete            *batchv1.Job
+	DesiredProfileSet               *aimv1alpha2.AIMProfileSet
+	DiscoveryState                  *aimv1alpha1.ModelDiscoveryState
+	DiscoveryReason                 string
+	DiscoveryMessage                string
+	DiscoveryProgressing            bool
+	RequeueAfter                    time.Duration
+	pruneSafe                       bool
+	BuildErr                        error
+	componentHealth                 []controllerutils.ComponentHealth
+	legacyObservation               *legacyaimmodel.ModelObservation
 }
 
 func (obs ModelObservation) GetComponentHealth(_ context.Context, _ kubernetes.Interface) []controllerutils.ComponentHealth {
@@ -150,6 +154,9 @@ func (obs ModelObservation) GetComponentHealth(_ context.Context, _ kubernetes.I
 func (r *ModelReconciler) GetApplyOptions(obs ModelObservation) controllerutils.ApplyOptions {
 	if obs.legacyObservation != nil {
 		return r.legacy().GetApplyOptions(*obs.legacyObservation)
+	}
+	if obs.model != nil && obs.model.Spec.ModelID != "" {
+		return aimruntimeconfig.GetApplyOptions(obs.runtimeConfig.Value)
 	}
 	return controllerutils.ApplyOptions{}
 }
@@ -182,6 +189,9 @@ func (r *ModelReconciler) FetchRemoteState(
 		legacyFetch := r.legacy().FetchRemoteState(ctx, c, controllerutils.ReconcileContext[*aimv1alpha1.AIMModel]{Object: result.legacyModel})
 		result.legacyFetch = &legacyFetch
 	}
+	if model.Spec.ModelID != "" {
+		result.runtimeConfig = aimruntimeconfig.FetchMergedRuntimeConfig(ctx, c, model.Spec.Name, model.Namespace)
+	}
 	// Skip native v1alpha2 discovery for custom and fine-tuned models. They
 	// either bring their own model artifacts via spec.modelSources +
 	// customTemplates, or copy templates from a base by aimId. Their image is
@@ -211,6 +221,8 @@ func (r *ModelReconciler) FetchRemoteState(
 		fetch := FetchDiscoveryState(ctx, c, inputs)
 		result.discovery = DecideDiscovery(ctx, c, inputs, fetch)
 
+	}
+	if model.Spec.Image != "" || model.Spec.ModelID != "" {
 		var nodes corev1.NodeList
 		nodeErr := c.List(ctx, &nodes)
 		result.nodes = controllerutils.FetchResult[[]corev1.Node]{Value: nodes.Items, Error: nodeErr}
@@ -298,6 +310,28 @@ func (r *ModelReconciler) ComposeState(
 					desiredProfilesKnown = obs.BuildErr == nil
 				}
 			}
+		}
+	}
+
+	if fetch.model.Spec.ModelID != "" {
+		obs.ResolvedAimID = effectiveAimID(&fetch.model.Spec)
+		switch {
+		case fetch.runtimeConfig.Error != nil:
+			obs.BuildErr = fetch.runtimeConfig.Error
+		case fetch.nodes.Error != nil:
+			obs.BuildErr = controllerutils.NewInfrastructureError("NodeListFailed", "failed to list cluster nodes", fetch.nodes.Error)
+		default:
+			var generated generatedProfiles
+			generated, obs.BuildErr = buildDesiredGeneratedProfiles(
+				fetch.model,
+				fallbacksFromRuntimeConfig(fetch.runtimeConfig.Value),
+				fetch.nodes.Value,
+				fetch.existingProfiles.Value,
+			)
+			obs.DesiredProfiles = generated.desired
+			obs.ProfileGeneration = generatedProfilesStatus(generated)
+			obs.ProfileGenerationFailureMessage = generated.noCompatibleRuntimeMessage()
+			desiredProfilesKnown = obs.BuildErr == nil
 		}
 	}
 
@@ -416,6 +450,7 @@ func (r *ModelReconciler) DecorateStatus(
 	status.DiscoveredProfiles = obs.DiscoveredProfiles
 	status.ProfileSetRef = obs.ProfileSetRef
 	status.ManagedProfiles = obs.ManagedProfiles
+	status.ProfileGeneration = obs.ProfileGeneration
 	if obs.DiscoveryState != nil {
 		status.Discovery = obs.DiscoveryState
 	}
@@ -454,6 +489,49 @@ func buildModelComponentHealth(obs ModelObservation) []controllerutils.Component
 			DependencyType: controllerutils.DependencyTypeUpstream,
 		})
 		return health
+	}
+	if obs.model.Spec.ModelID != "" {
+		if obs.ManagedProfiles.Total == 0 {
+			message := obs.ProfileGenerationFailureMessage
+			if message == "" {
+				message = "No configured runtime fallback matches available cluster hardware"
+			}
+			return append(health, controllerutils.ComponentHealth{
+				Component: componentProfiles,
+				State:     constants.AIMStatusNotAvailable,
+				Reason:    "NoCompatibleRuntime",
+				Message:   message,
+			})
+		}
+		if obs.ExistingDesiredCount < obs.ManagedProfiles.Total {
+			return append(health, controllerutils.ComponentHealth{
+				Component: componentProfiles,
+				State:     constants.AIMStatusProgressing,
+				Reason:    constants.ReasonCreating,
+				Message:   "Generated profiles are still being created",
+			})
+		}
+		if obs.ManagedProfiles.Ready == obs.ManagedProfiles.Total {
+			return append(health, controllerutils.ComponentHealth{
+				Component: componentProfiles,
+				State:     constants.AIMStatusReady,
+				Reason:    "GeneratedProfilesReady",
+			})
+		}
+		if obs.ManagedProfiles.Ready > 0 {
+			return append(health, controllerutils.ComponentHealth{
+				Component: componentProfiles,
+				State:     constants.AIMStatusDegraded,
+				Reason:    "GeneratedProfilesPartiallyReady",
+				Message:   "Some generated profiles are ready, but others are not available",
+			})
+		}
+		return append(health, controllerutils.ComponentHealth{
+			Component: componentProfiles,
+			State:     constants.AIMStatusNotAvailable,
+			Reason:    "HardwareNotAvailable",
+			Message:   "Generated profiles exist but no compatible hardware is currently available",
+		})
 	}
 	if runNativeDiscovery && obs.model.Spec.Image != "" && obs.DiscoveryCacheRef == nil {
 		health = append(health, controllerutils.ComponentHealth{
@@ -792,11 +870,11 @@ func buildDesiredProfileSet(model *aimv1alpha2.AIMModel, cacheRef *aimv1alpha1.D
 }
 
 func isSupportedProfile(spec aimv1alpha2.AIMProfileSpecCommon, nodes []corev1.Node) bool {
-	if !aimprofile.HasAcceleratorRequirement(spec.AcceleratorModel, spec.AcceleratorCount, spec.Resources) {
+	if !aimprofile.HasProfileAcceleratorRequirement(spec) {
 		return true
 	}
-	resolvedResources := aimprofile.ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, spec.Resources, spec.AcceleratorModel, spec.EngineEnv)
-	return aimprofile.MatchNodes(nodes, spec.AcceleratorType, spec.AcceleratorModel, spec.AcceleratorPartitioningMode, resolvedResources).MatchingNodes > 0
+	resolvedResources := aimprofile.ResolveProfileResources(spec)
+	return aimprofile.MatchProfileNodes(nodes, spec, resolvedResources).MatchingNodes > 0
 }
 
 func summarizeManagedProfiles(desired []desiredProfile, existing []managedProfile) (aimv1alpha1.ManagedProfileCounts, int32) {

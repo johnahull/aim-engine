@@ -40,8 +40,14 @@ type AIMPrecision = aimv1alpha1.AIMPrecision
 // AIMProfileType indicates the optimization level of a profile.
 type AIMProfileType = aimv1alpha1.AIMProfileType
 
+// AIMProfileAutoSelectionPolicy controls automatic lower-tier eligibility.
+type AIMProfileAutoSelectionPolicy = aimv1alpha1.AIMProfileAutoSelectionPolicy
+
 // AcceleratorType distinguishes CPU from GPU accelerators.
 type AcceleratorType = aimv1alpha1.AcceleratorType
+
+// AcceleratorVendor identifies the vendor-specific accelerator resource contract.
+type AcceleratorVendor = aimv1alpha1.AcceleratorVendor
 
 // AIMModelSource describes a downloadable model artifact with optional credentials.
 type AIMModelSource = aimv1alpha1.AIMModelSource
@@ -67,6 +73,12 @@ const (
 	AIMProfileTypeUnoptimized = aimv1alpha1.AIMProfileTypeUnoptimized
 	AIMProfileTypeAny         = aimv1alpha1.AIMProfileTypeAny
 
+	AIMProfileAutoSelectionPolicyOptimized = aimv1alpha1.AIMProfileAutoSelectionPolicyOptimized
+	AIMProfileAutoSelectionPolicyAny       = aimv1alpha1.AIMProfileAutoSelectionPolicyAny
+
 	AcceleratorTypeCPU = aimv1alpha1.AcceleratorTypeCPU
 	AcceleratorTypeGPU = aimv1alpha1.AcceleratorTypeGPU
+
+	AcceleratorVendorAMD    = aimv1alpha1.AcceleratorVendorAMD
+	AcceleratorVendorNVIDIA = aimv1alpha1.AcceleratorVendorNVIDIA
 )

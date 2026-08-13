@@ -1,0 +1,37 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: qwen3-5-0-8b-nvidia-vllm
+spec:
+  aimId: Qwen/Qwen3.5-0.8B
+  modelId: Qwen/Qwen3.5-0.8B
+  engine: vllm
+  type: unoptimized
+  autoSelectionPolicy: any
+  primary: true
+
+  acceleratorVendor: nvidia
+  acceleratorType: gpu
+  acceleratorCount: 1
+
+  # Qwen 3.5 support landed in the vLLM 0.17 line. Use the CUDA 13 variant
+  # with a compatible NVIDIA driver stack.
+  image: vllm/vllm-openai:v0.17.1-cu130
+
+  # AIM Engine generates the model path, --served-model-name, --host, --port,
+  # and --tensor-parallel-size; engineArgs is tuning only.
+  engineArgs:
+    max-model-len: 8192
+    gpu-memory-utilization: 0.9
+
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+    limits:
+      cpu: "8"
+      memory: 64Gi
+
+  modelSources:
+    - modelId: Qwen/Qwen3.5-0.8B
+      sourceUri: hf://Qwen/Qwen3.5-0.8B

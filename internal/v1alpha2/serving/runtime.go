@@ -24,7 +24,6 @@ package serving
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -229,9 +228,8 @@ func BuildNamespaceServingRuntime(input NamespaceRuntimeInput) (*kservev1alpha1.
 	configMap := BuildProfileConfigMap(runtimeName, input.Namespace, labels, filename, yamlBytes)
 	configMap.Annotations = annotations
 
-	// Framework AIM_* env wins over the profile's container env: the
-	// identity-of-the-profile vars belong to the framework, not the user.
-	envVars := upsertEnvVars(spec.ContainerEnv, BuildFrameworkEnvVars(spec, filename))
+	modelReference := resolveVLLMModelReference(spec, input.Cache)
+	envVars := buildRuntimeEnv(spec, filename, modelReference)
 
 	volumes := []corev1.Volume{sharedMemoryVolume(spec.Engine), BuildProfileVolume(runtimeName)}
 	mounts := []corev1.VolumeMount{sharedMemoryMount(), BuildProfileVolumeMount(spec.AimId)}
@@ -239,6 +237,18 @@ func BuildNamespaceServingRuntime(input NamespaceRuntimeInput) (*kservev1alpha1.
 	cacheVolumes, cacheMounts := buildProfileCacheMounts(input.Cache)
 	volumes = append(volumes, cacheVolumes...)
 	mounts = append(mounts, cacheMounts...)
+
+	runtimeSpec, err := buildRuntimeSpec(
+		spec,
+		input.Resources,
+		envVars,
+		volumes,
+		mounts,
+		input.NodeAffinity,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build runtime spec: %w", err)
+	}
 
 	runtime := &kservev1alpha1.ServingRuntime{
 		TypeMeta: metav1.TypeMeta{
@@ -251,7 +261,7 @@ func BuildNamespaceServingRuntime(input NamespaceRuntimeInput) (*kservev1alpha1.
 			Labels:      labels,
 			Annotations: annotations,
 		},
-		Spec: buildRuntimeSpec(spec, input.Resources, envVars, volumes, mounts, input.NodeAffinity),
+		Spec: runtimeSpec,
 	}
 
 	return runtime, configMap, nil
@@ -336,10 +346,23 @@ func BuildClusterServingRuntime(input ClusterRuntimeInput) (*kservev1alpha1.Clus
 	if err != nil {
 		return nil, fmt.Errorf("resolve profile filename: %w", err)
 	}
-	envVars := upsertEnvVars(spec.ContainerEnv, BuildFrameworkEnvVars(spec, filename))
+	modelReference := resolveVLLMModelReference(spec, nil)
+	envVars := buildRuntimeEnv(spec, filename, modelReference)
 
 	volumes := []corev1.Volume{sharedMemoryVolume(spec.Engine)}
 	mounts := []corev1.VolumeMount{sharedMemoryMount()}
+
+	runtimeSpec, err := buildRuntimeSpec(
+		spec,
+		input.Resources,
+		envVars,
+		volumes,
+		mounts,
+		input.NodeAffinity,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build runtime spec: %w", err)
+	}
 
 	return &kservev1alpha1.ClusterServingRuntime{
 		TypeMeta: metav1.TypeMeta{
@@ -351,15 +374,17 @@ func BuildClusterServingRuntime(input ClusterRuntimeInput) (*kservev1alpha1.Clus
 			Labels:      labels,
 			Annotations: annotations,
 		},
-		Spec: buildRuntimeSpec(spec, input.Resources, envVars, volumes, mounts, input.NodeAffinity),
+		Spec: runtimeSpec,
 	}, nil
 }
 
 // buildRuntimeSpec assembles the ServingRuntimeSpec shared by the namespace
 // ServingRuntime and the cluster ClusterServingRuntime: one predictor container
 // (image, env, resources, ports, mounts), the supplied volumes, the standard
-// supportedModelFormat and v2 protocol, and the resolved node affinity when
-// present. autoSelect is always OFF: every projected runtime — per-profile and
+// supportedModelFormat, and the resolved node affinity when present. Legacy
+// AIM runtimes retain their v2 protocol declaration; direct upstream vLLM
+// exposes its native OpenAI API and does not claim KServe protocol v2.
+// autoSelect is always OFF: every projected runtime — per-profile and
 // model-slug primary alike — shares the single RuntimeModelFormat, so enabling
 // autoSelect would make KServe's format-based auto-selection ambiguous across
 // unrelated models (and hijack any co-installed generic huggingface runtime).
@@ -371,7 +396,12 @@ func buildRuntimeSpec(
 	volumes []corev1.Volume,
 	mounts []corev1.VolumeMount,
 	nodeAffinity *corev1.NodeAffinity,
-) kservev1alpha1.ServingRuntimeSpec {
+) (kservev1alpha1.ServingRuntimeSpec, error) {
+	invocation, err := buildEngineInvocation(spec)
+	if err != nil {
+		return kservev1alpha1.ServingRuntimeSpec{}, err
+	}
+
 	container := corev1.Container{
 		Name:            constants.ContainerKServe,
 		Image:           spec.Image,
@@ -386,6 +416,8 @@ func buildRuntimeSpec(
 			},
 		},
 		VolumeMounts: mounts,
+		Command:      invocation.Command,
+		Args:         invocation.Args,
 	}
 
 	runtimeSpec := kservev1alpha1.ServingRuntimeSpec{
@@ -395,19 +427,21 @@ func buildRuntimeSpec(
 				AutoSelect: ptr.To(false),
 			},
 		},
-		ProtocolVersions: []kserveconstants.InferenceServiceProtocol{kserveconstants.ProtocolV2},
 		ServingRuntimePodSpec: kservev1alpha1.ServingRuntimePodSpec{
 			Containers:       []corev1.Container{container},
 			Volumes:          volumes,
 			ImagePullSecrets: utils.CopyPullSecrets(spec.ImagePullSecrets),
 		},
 	}
+	if !usesDirectVLLM(spec) {
+		runtimeSpec.ProtocolVersions = []kserveconstants.InferenceServiceProtocol{kserveconstants.ProtocolV2}
+	}
 
 	if nodeAffinity != nil {
 		runtimeSpec.Affinity = &corev1.Affinity{NodeAffinity: nodeAffinity}
 	}
 
-	return runtimeSpec
+	return runtimeSpec, nil
 }
 
 // sharedMemoryVolume returns the emptyDir-backed /dev/shm volume every predictor
@@ -540,7 +574,7 @@ func buildProfileCacheMounts(cache *aimv1alpha2.AIMProfileCache) ([]corev1.Volum
 			continue
 		}
 
-		volumeName := strings.ReplaceAll(utils.MakeRFC1123Compliant(resolved.Name), ".", "-")
+		volumeName := artifactVolumeName(resolved)
 
 		volumes = append(volumes, corev1.Volume{
 			Name: volumeName,
@@ -551,18 +585,9 @@ func buildProfileCacheMounts(cache *aimv1alpha2.AIMProfileCache) ([]corev1.Volum
 			},
 		})
 
-		mountPath := resolved.MountPoint
-		if mountPath == "" {
-			safeModelName := strings.ReplaceAll(resolved.Model, "..", "")
-			if safeModelName == "" || safeModelName == "." {
-				safeModelName = volumeName
-			}
-			mountPath = filepath.Join(constants.AIMCacheBasePath, safeModelName)
-		}
-
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      volumeName,
-			MountPath: mountPath,
+			MountPath: resolvedArtifactMountPath(resolved, volumeName),
 		})
 	}
 

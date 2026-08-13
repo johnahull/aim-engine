@@ -35,6 +35,7 @@ nodes:
       amd.com/gpu.vram: "192G"
       # v1alpha2 accelerator labels (would be written by AcceleratorDetector at runtime)
       feature.node.kubernetes.io/aim-accelerator.MI300X: "8"
+      feature.node.kubernetes.io/aim-accelerator.vendor.GPU.AMD: "8"
       feature.node.kubernetes.io/aim-accelerator.EPYC_ZEN5: "128"
       # Partition axis: unpartitioned GPU profiles require the default scheme to Exist
       feature.node.kubernetes.io/aim-accelerator.partitioning-scheme.default: "8"
@@ -46,6 +47,7 @@ nodes:
       amd.com/gpu.vram: "288G"
       # v1alpha2 accelerator labels (would be written by AcceleratorDetector at runtime)
       feature.node.kubernetes.io/aim-accelerator.MI350X: "8"
+      feature.node.kubernetes.io/aim-accelerator.vendor.GPU.AMD: "8"
       feature.node.kubernetes.io/aim-accelerator.EPYC_ZEN5: "128"
       # Partition axis: unpartitioned GPU profiles require the default scheme to Exist
       feature.node.kubernetes.io/aim-accelerator.partitioning-scheme.default: "8"

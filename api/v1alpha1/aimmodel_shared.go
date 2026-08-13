@@ -24,6 +24,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
@@ -64,8 +65,8 @@ const (
 // models together as "Custom" — losing the distinction users actually
 // care about. The v1alpha2 controller intentionally does not populate
 // this field on v1alpha2-shaped specs; v1alpha2 consumers should read
-// AIMModelStatus.Kind instead, which is a three-way classifier
-// (Image / Derived / Custom).
+// AIMModelStatus.Kind instead, which classifies Image, Generated, Derived,
+// and Custom onboarding.
 //
 // +kubebuilder:validation:Enum=Image;Custom
 type AIMModelSourceType string
@@ -81,7 +82,7 @@ const (
 // produced this model's profiles. Populated by the v1alpha2 controller
 // during reconciliation from the model's spec shape.
 //
-// The three kinds correspond 1:1 to the "three flows" documented in
+// The four kinds correspond 1:1 to the onboarding flows documented in
 // concepts/models.md:
 //
 //   - Image    — spec.image is set; profiles come from in-cluster image
@@ -96,19 +97,120 @@ const (
 //   - Custom   — spec.profiles.derivedFrom with selector.role=base;
 //     profiles are derived by overlaying BYO weights + target identity
 //     onto a base image's generic base profiles.
+//   - Generated — spec.modelId is set; profiles are generated from matching
+//     RuntimeConfig fallbacks and observed cluster hardware.
 //
 // Empty when the spec hasn't been classified yet (controller hasn't
-// reconciled) or when the spec shape doesn't match any of the three
-// flows (a misconfigured spec the CEL validators didn't catch).
+// reconciled) or when the spec shape doesn't match any onboarding flow
+// (a misconfigured spec the CEL validators didn't catch).
 //
-// +kubebuilder:validation:Enum=Image;Derived;Custom
+// +kubebuilder:validation:Enum=Image;Derived;Custom;Generated
 type AIMModelKind string
 
 const (
-	AIMModelKindImage   AIMModelKind = "Image"
-	AIMModelKindDerived AIMModelKind = "Derived"
-	AIMModelKindCustom  AIMModelKind = "Custom"
+	AIMModelKindImage     AIMModelKind = "Image"
+	AIMModelKindDerived   AIMModelKind = "Derived"
+	AIMModelKindCustom    AIMModelKind = "Custom"
+	AIMModelKindGenerated AIMModelKind = "Generated"
 )
+
+// AIMModelSourceLocation describes the location and optional metadata for a
+// v1alpha2 modelId-backed model. The modelId itself lives on AIMModelSpec so
+// users do not have to repeat it in both the model and source declarations.
+type AIMModelSourceLocation struct {
+	// URI is the location from which model weights are downloaded. When
+	// omitted, modelId-backed models default to hf://<modelId>.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^(hf|s3)://[^ \t\r\n]+$`
+	URI string `json:"uri,omitempty"`
+
+	// Size is the expected model artifact size.
+	// +optional
+	Size *resource.Quantity `json:"size,omitempty"`
+
+	// Precision describes the runtime precision of the source weights.
+	// +optional
+	// +kubebuilder:validation:Enum=fp4;fp8;fp16;fp32;bf16;int4;int8
+	Precision AIMPrecision `json:"precision,omitempty"`
+
+	// Env specifies source-specific credential overrides.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Env []corev1.EnvVar `json:"env,omitempty"`
+}
+
+// ProfileGenerationStrategy names the mechanism that resolved a Generated
+// model's profiles.
+//
+// spec.modelId is one onboarding flow with more than one possible resolution
+// mechanism, so the mechanism is reported here rather than folded into
+// AIMModelKind. Recording it separately means the planned AMD catalog lookup
+// (match modelId against published optimized AIM images) can be added without
+// flipping status.kind on an unchanged spec, and without a fifth kind.
+//
+// RuntimeFallback is the only strategy implemented today.
+// +kubebuilder:validation:Enum=RuntimeFallback
+type ProfileGenerationStrategy string
+
+const (
+	// ProfileGenerationStrategyRuntimeFallback indicates profiles were built
+	// from RuntimeConfig model.profileGeneration.fallbacks matched against
+	// observed cluster hardware.
+	ProfileGenerationStrategyRuntimeFallback ProfileGenerationStrategy = "RuntimeFallback"
+)
+
+// AIMModelProfileGenerationStatus reports the resolution of a Generated model.
+type AIMModelProfileGenerationStatus struct {
+	// Strategy is the mechanism that produced the profiles.
+	// +optional
+	Strategy ProfileGenerationStrategy `json:"strategy,omitempty"`
+
+	// MatchedFallbacks lists the RuntimeConfig fallback names that produced a
+	// profile, in the order the profiles are named. Empty when no fallback
+	// matched the model's hardware request.
+	// +optional
+	MatchedFallbacks []string `json:"matchedFallbacks,omitempty"`
+}
+
+// AIMModelAcceleratorRequest is the per-model hardware request for
+// modelId-backed onboarding. RuntimeConfig fallbacks are cluster policy — they
+// describe which runtime image serves which class of hardware — so the shape of
+// one model's deployment (how many devices it needs, and optionally which card)
+// belongs here rather than on the fallback.
+//
+// Each field plays two roles: it narrows which fallbacks apply (a fallback
+// matches when its own match.* is empty or equal to the request) and it is
+// stamped onto the generated profile. Fields left empty inherit the matched
+// fallback's value.
+//
+// Only valid alongside spec.modelId. Image-backed models get their hardware
+// from discovery, and narrowing which discovered profile a deployment picks is
+// AIMService.spec.profile.selector's job.
+type AIMModelAcceleratorRequest struct {
+	// Vendor requests a specific accelerator vendor.
+	// +optional
+	Vendor AcceleratorVendor `json:"vendor,omitempty"`
+
+	// Model requests an exact detector accelerator model (e.g. "MI300X",
+	// "H100"). Empty matches any model the fallback supports.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	Model string `json:"model,omitempty"`
+
+	// Count is the number of accelerator units the model needs. It drives the
+	// generated profile's acceleratorCount, and therefore both the device
+	// resource request and the engine's tensor-parallel size. Defaults to 1.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Count *int32 `json:"count,omitempty"`
+
+	// PartitioningMode requests a GPU partitioning mode. See
+	// AcceleratorPartitioningMode on AIMProfileSpecCommon for the reserved
+	// values ("unpartitioned", "partitioned", "<C>-<M>").
+	// +optional
+	PartitioningMode string `json:"partitioningMode,omitempty"`
+}
 
 // AIMCustomTemplate defines a custom template configuration for a model.
 // When modelSources are specified directly on AIMModel, customTemplates allow
@@ -229,7 +331,7 @@ type AIMCustomModelSpec struct {
 
 // AIMModelSpec defines the desired state of AIMModel.
 // +kubebuilder:validation:XValidation:rule="!has(self.modelSources) || size(self.modelSources) == 0 || has(self.aimId) || (has(self.custom) && has(self.custom.hardware)) || !has(self.customTemplates) || size(self.customTemplates) == 0 || self.customTemplates.all(t, has(t.hardware) || (has(self.custom) && has(self.custom.hardware)))",message="when using modelSources without aimId, set custom.hardware or set hardware on each customTemplate"
-// +kubebuilder:validation:XValidation:rule="(has(self.image) && size(self.image) > 0) || has(self.profileCopy) || has(self.derivedFrom) || has(self.profiles) || (has(self.aimId) && has(self.custom) && has(self.custom.versionPolicy) && self.custom.versionPolicy != 'pinned')",message="image is required unless aimId is set with versionPolicy latest or any, or profileCopy/derivedFrom/profiles is set"
+// +kubebuilder:validation:XValidation:rule="(has(self.image) && size(self.image) > 0) || (has(self.modelId) && size(self.modelId) > 0) || has(self.profileCopy) || has(self.derivedFrom) || has(self.profiles) || (has(self.aimId) && has(self.custom) && has(self.custom.versionPolicy) && self.custom.versionPolicy != 'pinned')",message="image or modelId is required unless aimId is set with versionPolicy latest or any, or profileCopy/derivedFrom/profiles is set"
 // +kubebuilder:validation:XValidation:rule="!has(self.profileCopy) || (!has(self.discovery) && !has(self.defaultServiceTemplate) && !has(self.custom) && (!has(self.customTemplates) || size(self.customTemplates) == 0) && (!has(self.modelSources) || size(self.modelSources) == 0) && (!has(self.runtimeConfigName) || size(self.runtimeConfigName) == 0) && (!has(self.env) || size(self.env) == 0) && !has(self.imageMetadata))",message="profileCopy cannot be combined with deprecated legacy AIMModel fields"
 //
 // Per-version constraints (v1alpha1 forbids derivedFrom and profiles;
@@ -243,9 +345,17 @@ type AIMModelSpec struct {
 	// Image is the container image URI for this AIM model.
 	// This image is inspected by the operator to select runtime profiles used by templates.
 	// Discovery behavior is controlled by the discovery field and runtime config's AutoDiscovery setting.
-	// Required unless aimId is set with versionPolicy latest or any, or profileCopy is set.
+	// Required unless modelId, an eligible aimId-only flow, or a profile
+	// derivation flow is set.
 	// +optional
 	Image string `json:"image,omitempty"`
+
+	// ModelID is the canonical model identifier for generated-profile
+	// onboarding. The controller combines it with RuntimeConfig profile
+	// generation fallbacks and observed hardware to materialize profiles.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$`
+	ModelID string `json:"modelId,omitempty"`
 
 	// AimId is the AIM product family identifier (e.g., "qwen/qwen3-32b").
 	// When set together with modelSources, enables aimId-based template matching:
@@ -253,6 +363,19 @@ type AIMModelSpec struct {
 	// matches by modelId, and creates copies with the custom weight source.
 	// +optional
 	AimId string `json:"aimId,omitempty"`
+
+	// Source optionally overrides the default hf://<modelId> model source for
+	// modelId-backed onboarding.
+	// +optional
+	Source *AIMModelSourceLocation `json:"source,omitempty"`
+
+	// Accelerator requests the hardware shape for modelId-backed onboarding —
+	// how many accelerator units the model needs and, optionally, which vendor,
+	// card model, or partitioning mode. Narrows which RuntimeConfig fallbacks
+	// apply and is stamped onto the generated profile. Defaults to one unit of
+	// whatever the matched fallback targets.
+	// +optional
+	Accelerator *AIMModelAcceleratorRequest `json:"accelerator,omitempty"`
 
 	// ProfileCopy reuses the AIMProfileSet derivation shape so an AIMModel can
 	// publish derivative AIMProfiles directly. The controller may synthesize a
@@ -492,11 +615,16 @@ type AIMModelStatus struct {
 	SourceType AIMModelSourceType `json:"sourceType,omitempty"`
 
 	// Kind classifies the v1alpha2 onboarding flow that produced this
-	// model's profiles (Image / Derived / Custom). See AIMModelKind for
+	// model's profiles (Image / Generated / Derived / Custom). See AIMModelKind for
 	// the per-value semantics. Populated by the v1alpha2 controller from
 	// the spec shape; left empty by the v1alpha1 controller.
 	// +optional
 	Kind AIMModelKind `json:"kind,omitempty"`
+
+	// ProfileGeneration reports how a Generated model's profiles were
+	// resolved. Empty for every other kind.
+	// +optional
+	ProfileGeneration *AIMModelProfileGenerationStatus `json:"profileGeneration,omitempty"`
 
 	// AimId is the resolved model architecture identifier for this model.
 	// Populated by the v1alpha2 controller from spec.aimId or discovered metadata.

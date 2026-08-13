@@ -60,12 +60,10 @@ HEALTH_FILE = "/tmp/healthy"
 # rather than a single node-wide one. Assumes one vendor (and one model) per
 # accelerator type per node.
 #
-# FUTURE USE: these labels are currently published for discovery/observability
-# only. The intended consumer is a resolver that picks the device-plugin
-# resource (amd.com/gpu vs nvidia.com/gpu) from the vendor without a
-# model->vendor table, but that wiring does NOT exist yet — the operator still
-# requests amd.com/gpu unconditionally (see internal/v1alpha2/aimprofile/
-# node_match.go). Do not assume end-to-end NVIDIA scheduling from these labels.
+# AIMProfile.spec.acceleratorVendor consumes this axis to select both node
+# affinity and the corresponding whole-device resource (amd.com/gpu or
+# nvidia.com/gpu). Partition-specific AMD resource names remain a future
+# extension of that resolver.
 VENDOR_LABEL_INFIX = "vendor"
 DEFAULT_VENDOR = "AMD"
 NVIDIA_VENDOR = "NVIDIA"

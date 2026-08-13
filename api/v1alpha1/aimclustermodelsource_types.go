@@ -49,7 +49,8 @@ type AIMClusterModelSource struct {
 }
 
 // AIMClusterModelSourceSpec defines the desired state of AIMClusterModelSource.
-// +kubebuilder:validation:XValidation:rule="(has(self.filters) && size(self.filters) > 0) != (has(self.images) && size(self.images) > 0)",message="set exactly one of spec.filters or spec.images"
+// +kubebuilder:validation:XValidation:rule="!((has(self.filters) && size(self.filters) > 0) && (has(self.images) && size(self.images) > 0))",message="spec.filters and spec.images are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="(has(self.filters) && size(self.filters) > 0) || (has(self.images) && size(self.images) > 0) || (has(self.models) && size(self.models) > 0)",message="set at least one of spec.filters, spec.images, or spec.models"
 type AIMClusterModelSourceSpec struct {
 	// Registry to sync from (e.g., docker.io, ghcr.io, gcr.io).
 	// Defaults to docker.io if not specified.
@@ -86,6 +87,24 @@ type AIMClusterModelSourceSpec struct {
 	// +optional
 	Images []string `json:"images,omitempty"`
 
+	// Models declares canonical model identifiers to materialize as
+	// v1alpha2 AIMClusterModel resources. Models may be combined with either
+	// Filters or Images.
+	//
+	// Lifecycle differs from registry discovery in one respect. Discovered
+	// images are a snapshot of an external registry, so they are only ever
+	// appended. A declaration is desired state the user edits in this spec, so
+	// models this source owns are kept in sync with their declaration —
+	// editing aimId, source, or accelerator updates the existing model in
+	// place. Neither kind is ever deleted: removing a declaration leaves its
+	// AIMClusterModel behind for an operator to remove deliberately.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=100
+	// +listType=map
+	// +listMapKey=modelId
+	// +optional
+	Models []AIMClusterModelSourceModel `json:"models,omitempty"`
+
 	// SyncInterval defines how often to sync with the registry.
 	// Defaults to 1h. Minimum recommended interval is 15m to avoid rate limiting.
 	// Format: duration string (e.g., "30m", "1h", "2h30m").
@@ -116,6 +135,26 @@ type AIMClusterModelSourceSpec struct {
 	// +kubebuilder:validation:Maximum=10000
 	// +optional
 	MaxModels *int `json:"maxModels,omitempty"`
+}
+
+// AIMClusterModelSourceModel is a modelId-backed cluster model declaration.
+type AIMClusterModelSourceModel struct {
+	// ModelID is the canonical model identifier.
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$`
+	ModelID string `json:"modelId"`
+
+	// AimID optionally overrides the model architecture identifier.
+	// +optional
+	AimID string `json:"aimId,omitempty"`
+
+	// Source optionally overrides the default hf://<modelId> source.
+	// +optional
+	Source *AIMModelSourceLocation `json:"source,omitempty"`
+
+	// Accelerator optionally requests the hardware shape for the generated
+	// model. Mirrors AIMModelSpec.Accelerator.
+	// +optional
+	Accelerator *AIMModelAcceleratorRequest `json:"accelerator,omitempty"`
 }
 
 // ModelSourceFilter defines an explicit image selector for discovery.

@@ -527,6 +527,29 @@ func TestBuildModelComponentHealth_PartialReadinessIsDegraded(t *testing.T) {
 	}
 }
 
+func TestBuildModelComponentHealth_NoCompatibleRuntimeIncludesRejection(t *testing.T) {
+	t.Parallel()
+
+	const diagnostic = `No configured runtime fallback matches available cluster hardware: fallback "nvidia-vllm": node "mainbox": resource nvidia.com/gpu requested 1, allocatable 0`
+	health := buildModelComponentHealth(ModelObservation{
+		ModelFetchResult: ModelFetchResult{
+			model: &aimv1alpha2.AIMModel{
+				Spec: aimv1alpha1.AIMModelSpec{ModelID: "Qwen/Qwen3.5-0.8B"},
+			},
+		},
+		ProfileGenerationFailureMessage: diagnostic,
+	})
+	if len(health) != 1 {
+		t.Fatalf("len(health) = %d, want 1", len(health))
+	}
+	if health[0].Reason != "NoCompatibleRuntime" {
+		t.Fatalf("reason = %q, want NoCompatibleRuntime", health[0].Reason)
+	}
+	if health[0].Message != diagnostic {
+		t.Fatalf("message = %q, want %q", health[0].Message, diagnostic)
+	}
+}
+
 func TestBuildModelComponentHealth_ProfileCopyZeroProfilesIsNotAvailable(t *testing.T) {
 	t.Parallel()
 

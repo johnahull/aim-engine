@@ -306,6 +306,6 @@ If `deployable == 0`, fix the derivation first. If `deployable > 0`, the service
 
 - [Fine-Tuned Models](fine-tuned-models.md) — Derive from existing official AIM profiles instead of base-image base profiles
 - [Deploying Services](deploying-services.md) — Resolution shapes and overlay patterns for `AIMService`
-- [AIM Models](../concepts/models.md) — Full lifecycle of all three model flows
+- [AIM Models](../concepts/models.md) — Full lifecycle of all four model flows
 - [AIM Profile Sets](../concepts/profilesets.md) — The derivation machinery underneath `spec.profiles`
 - [Profiles](../concepts/profiles.md) — Base vs deployable, provenance labels, status fields

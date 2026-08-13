@@ -37,9 +37,10 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 )
 
-const (
-	DefaultRuntimeConfigName = "default"
-)
+// DefaultRuntimeConfigName is an alias of constants.DefaultRuntimeConfigName,
+// kept so callers already importing this package do not need a second import.
+// There is one definition of the value.
+const DefaultRuntimeConfigName = constants.DefaultRuntimeConfigName
 
 // FetchMergedRuntimeConfig fetches and merges namespace and cluster-scoped runtime configs.
 // Returns a FetchResult containing the merged config.
@@ -139,9 +140,12 @@ func mergeRuntimeConfigs(priority, base *aimv1alpha1.AIMRuntimeConfigCommon) *ai
 	}
 
 	// Both exist - merge them with priority taking precedence
+	priorityFallbacks := copyProfileGenerationFallbacks(priority)
+	baseFallbacks := copyProfileGenerationFallbacks(base)
 	merged := aimv1alpha1.AIMRuntimeConfigCommon{}
 	// We can ignore the error as we control the input and their types
 	_ = utils.MergeConfigs(&merged, *base, *priority)
+	mergeProfileGenerationConfig(&merged, priorityFallbacks, baseFallbacks)
 
 	// An S3 connection is a trust boundary, not a bag of independently
 	// inheritable defaults. If the namespace config supplies one, use that
@@ -155,6 +159,52 @@ func mergeRuntimeConfigs(priority, base *aimv1alpha1.AIMRuntimeConfigCommon) *ai
 	}
 
 	return &merged
+}
+
+// mergeProfileGenerationConfig applies list-map semantics to profile
+// generation fallbacks. Generic config merging replaces slices wholesale,
+// while RuntimeConfig fallbacks need namespace entries to replace matching
+// cluster entries by name and preserve unrelated cluster entries.
+func mergeProfileGenerationConfig(
+	merged *aimv1alpha1.AIMRuntimeConfigCommon,
+	priorityFallbacks, baseFallbacks []aimv1alpha1.AIMProfileGenerationFallback,
+) {
+	if len(priorityFallbacks) == 0 && len(baseFallbacks) == 0 {
+		return
+	}
+	if merged.Model == nil {
+		merged.Model = &aimv1alpha1.AIMModelConfig{}
+	}
+	if merged.Model.ProfileGeneration == nil {
+		merged.Model.ProfileGeneration = &aimv1alpha1.AIMProfileGenerationConfig{}
+	}
+
+	byName := make(map[string]aimv1alpha1.AIMProfileGenerationFallback, len(baseFallbacks)+len(priorityFallbacks))
+	order := make([]string, 0, len(baseFallbacks)+len(priorityFallbacks))
+	for _, fallback := range baseFallbacks {
+		if _, exists := byName[fallback.Name]; !exists {
+			order = append(order, fallback.Name)
+		}
+		byName[fallback.Name] = fallback
+	}
+	for _, fallback := range priorityFallbacks {
+		if _, exists := byName[fallback.Name]; !exists {
+			order = append(order, fallback.Name)
+		}
+		byName[fallback.Name] = fallback
+	}
+	mergedFallbacks := make([]aimv1alpha1.AIMProfileGenerationFallback, 0, len(order))
+	for _, name := range order {
+		mergedFallbacks = append(mergedFallbacks, byName[name])
+	}
+	merged.Model.ProfileGeneration.Fallbacks = mergedFallbacks
+}
+
+func copyProfileGenerationFallbacks(config *aimv1alpha1.AIMRuntimeConfigCommon) []aimv1alpha1.AIMProfileGenerationFallback {
+	if config == nil || config.Model == nil || config.Model.ProfileGeneration == nil {
+		return nil
+	}
+	return append([]aimv1alpha1.AIMProfileGenerationFallback(nil), config.Model.ProfileGeneration.Fallbacks...)
 }
 
 // migrateDeprecatedStorageFields migrates deprecated top-level storage fields to the new Storage struct.

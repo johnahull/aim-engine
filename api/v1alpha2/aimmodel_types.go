@@ -47,7 +47,8 @@ import (
 // +kubebuilder:printcolumn:name="Base",type=integer,JSONPath=`.status.managedProfiles.base`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // v1alpha2 onboarding contract: exactly one of spec.image (official
-// discovery) or spec.profiles (fine-tune / custom-model derivation); legacy
+// discovery), spec.modelId (generated profiles), or spec.profiles
+// (fine-tune / custom-model derivation); legacy
 // v1alpha1 onboarding fields and the deprecated flat spec.derivedFrom shape
 // are forbidden on NEW v1alpha2 objects. Each "forbidden" rule uses
 // optionalOldSelf so that objects originally created via v1alpha1 (which
@@ -58,13 +59,16 @@ import (
 // legacy-shaped objects without being blocked by the v1alpha2 schema. Adding
 // a legacy/deprecated field to an object that did not previously have it is
 // still rejected.
-// +kubebuilder:validation:XValidation:rule="(has(self.spec.image) && size(self.spec.image) > 0) != (has(self.spec.profiles) || has(self.spec.derivedFrom)) || (oldSelf.hasValue() && !((has(oldSelf.value().spec.image) && size(oldSelf.value().spec.image) > 0) != (has(oldSelf.value().spec.profiles) || has(oldSelf.value().spec.derivedFrom))))",message="exactly one of spec.image or spec.profiles must be set on v1alpha2",optionalOldSelf=true
+// +kubebuilder:validation:XValidation:rule="((has(self.spec.image) && size(self.spec.image) > 0) ? 1 : 0) + ((has(self.spec.modelId) && size(self.spec.modelId) > 0) ? 1 : 0) + ((has(self.spec.profiles) || has(self.spec.derivedFrom)) ? 1 : 0) == 1 || (oldSelf.hasValue() && (((has(oldSelf.value().spec.image) && size(oldSelf.value().spec.image) > 0) ? 1 : 0) + ((has(oldSelf.value().spec.modelId) && size(oldSelf.value().spec.modelId) > 0) ? 1 : 0) + ((has(oldSelf.value().spec.profiles) || has(oldSelf.value().spec.derivedFrom)) ? 1 : 0) != 1))",message="exactly one of spec.image, spec.modelId, or spec.profiles must be set on v1alpha2",optionalOldSelf=true
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.source) || (has(self.spec.modelId) && size(self.spec.modelId) > 0)",message="spec.source is only valid with spec.modelId"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.accelerator) || (has(self.spec.modelId) && size(self.spec.modelId) > 0)",message="spec.accelerator is only valid with spec.modelId; image-backed profiles declare their own hardware, and AIMService.spec.profile.selector narrows which one is deployed"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.modelId) || (!has(self.spec.discovery) && !has(self.spec.defaultServiceTemplate) && !has(self.spec.env) && !has(self.spec.imageMetadata) && (!has(self.spec.imagePullSecrets) || size(self.spec.imagePullSecrets) == 0) && !has(self.spec.serviceAccountName) && (!has(self.spec.resources) || ((!has(self.spec.resources.requests) || size(self.spec.resources.requests) == 0) && (!has(self.spec.resources.limits) || size(self.spec.resources.limits) == 0) && (!has(self.spec.resources.claims) || size(self.spec.resources.claims) == 0))))",message="spec.modelId cannot be combined with image discovery or model runtime fields; configure the generated profile runtime in RuntimeConfig"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.profileCopy) || (oldSelf.hasValue() && has(oldSelf.value().spec.profileCopy))",message="spec.profileCopy is forbidden on v1alpha2; use spec.profiles",optionalOldSelf=true
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.derivedFrom) || (oldSelf.hasValue() && has(oldSelf.value().spec.derivedFrom))",message="spec.derivedFrom is deprecated on v1alpha2; use spec.profiles",optionalOldSelf=true
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.custom) || (oldSelf.hasValue() && has(oldSelf.value().spec.custom))",message="spec.custom is forbidden on v1alpha2",optionalOldSelf=true
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.customTemplates) || size(self.spec.customTemplates) == 0 || (oldSelf.hasValue() && has(oldSelf.value().spec.customTemplates) && size(oldSelf.value().spec.customTemplates) > 0)",message="spec.customTemplates is forbidden on v1alpha2",optionalOldSelf=true
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.modelSources) || size(self.spec.modelSources) == 0 || (oldSelf.hasValue() && has(oldSelf.value().spec.modelSources) && size(oldSelf.value().spec.modelSources) > 0)",message="spec.modelSources is forbidden on v1alpha2; use spec.profiles.overrides.modelSources",optionalOldSelf=true
-// +kubebuilder:validation:XValidation:rule="(!has(self.spec.profiles) && !has(self.spec.derivedFrom)) || (!has(self.spec.aimId) && !has(self.spec.discovery) && !has(self.spec.defaultServiceTemplate) && !has(self.spec.runtimeConfigName) && !has(self.spec.env) && !has(self.spec.imageMetadata))",message="spec.profiles cannot be combined with spec.aimId, spec.discovery, spec.defaultServiceTemplate, spec.runtimeConfigName, spec.env, or spec.imageMetadata"
+// +kubebuilder:validation:XValidation:rule="(!has(self.spec.profiles) && !has(self.spec.derivedFrom)) || (!has(self.spec.aimId) && !has(self.spec.source) && !has(self.spec.discovery) && !has(self.spec.defaultServiceTemplate) && !has(self.spec.runtimeConfigName) && !has(self.spec.env) && !has(self.spec.imageMetadata))",message="spec.profiles cannot be combined with spec.aimId, spec.source, spec.discovery, spec.defaultServiceTemplate, spec.runtimeConfigName, spec.env, or spec.imageMetadata"
 //
 //nolint:lll // kubebuilder marker; CEL rules cannot be wrapped across lines
 type AIMModel struct {

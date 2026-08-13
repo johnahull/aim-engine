@@ -158,7 +158,7 @@ func (r *AIMClusterProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			},
 			"failed to list AIMClusterProfiles for Node event",
 			func(profile *aimv1alpha2.AIMClusterProfile) bool {
-				return aimprofile.HasAcceleratorRequirement(profile.Spec.AcceleratorModel, profile.Spec.AcceleratorCount, profile.Spec.Resources)
+				return aimprofile.HasProfileAcceleratorRequirement(profile.Spec.AIMProfileSpecCommon)
 			},
 		)
 	})

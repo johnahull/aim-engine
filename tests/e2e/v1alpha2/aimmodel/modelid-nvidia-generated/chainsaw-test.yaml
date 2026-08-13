@@ -1,0 +1,263 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: v1alpha2-modelid-nvidia-generated
+  labels:
+    requires: gpu-nvidia
+spec:
+  description: Generate namespace and cluster NVIDIA vLLM profiles from modelId declarations
+  timeouts:
+    assert: 300s
+  steps:
+    - name: Configure namespace NVIDIA fallback
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMRuntimeConfig
+              metadata:
+                name: default
+              spec:
+                model:
+                  profileGeneration:
+                    fallbacks:
+                      - name: nvidia-vllm
+                        priority: 10
+                        autoSelectionPolicy: any
+                        match:
+                          acceleratorVendor: nvidia
+                          acceleratorType: gpu
+                        runtime:
+                          image: vllm/vllm-openai:v0.17.1-cu130
+                          engine: vllm
+                          engineArgs:
+                            enforce-eager: true
+                            gpu-memory-utilization: 0.6
+                            max-model-len: 512
+                            max-num-seqs: 1
+                          resources:
+                            requests:
+                              cpu: "1"
+                              memory: 3Gi
+                            limits:
+                              cpu: "3"
+                              memory: 8Gi
+
+    - name: Create namespace model
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: nvidia-generated-model
+              spec:
+                modelId: Qwen/Qwen3.5-0.8B
+
+    - name: Assert generated namespace profile
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/source-model: nvidia-generated-model
+                  aim.eai.amd.com/source-model-scope: namespace
+                  aim.eai.amd.com/profile-origin: generated
+              spec:
+                aimId: Qwen/Qwen3.5-0.8B
+                modelId: Qwen/Qwen3.5-0.8B
+                profileId: nvidia-vllm
+                image: vllm/vllm-openai:v0.17.1-cu130
+                engine: vllm
+                type: unoptimized
+                autoSelectionPolicy: any
+                primary: true
+                acceleratorVendor: nvidia
+                acceleratorType: gpu
+                acceleratorCount: 1
+                (acceleratorModel == null || acceleratorModel == ''): true
+                modelSources:
+                  - modelId: Qwen/Qwen3.5-0.8B
+                    sourceUri: hf://Qwen/Qwen3.5-0.8B
+              status:
+                status: Ready
+                origin: generated
+                (resources.requests."nvidia.com/gpu"): "1"
+
+    - name: Assert explicit-model service resolves fallback profile automatically
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMService
+              metadata:
+                name: nvidia-generated-service
+                annotations:
+                  aim.eai.amd.com/reconciler-pipeline: profile
+              spec:
+                model:
+                  name: nvidia-generated-model
+                caching:
+                  mode: Never
+                replicas: 1
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMService
+              metadata:
+                name: nvidia-generated-service
+              status:
+                (resolvedProfile.name != ''): true
+
+    - name: Assert selected NVIDIA fallback creates a ServingRuntime and InferenceService
+      description: |
+        Close the generated-profile integration chain: the automatically
+        selected lower-tier fallback must be projected into a namespace
+        ServingRuntime, and the AIMService must create an InferenceService that
+        references it without inlining the runtime image.
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: nvidia-generated-service
+              spec:
+                predictor:
+                  model:
+                    modelFormat:
+                      name: huggingface
+        - script:
+            timeout: 120s
+            content: |
+              set -eu
+
+              PROFILE=$(kubectl get aimprofile -n "$NAMESPACE" \
+                -l "aim.eai.amd.com/source-model=nvidia-generated-model,aim.eai.amd.com/profile-origin=generated" \
+                -o jsonpath='{.items[0].metadata.name}')
+              test -n "$PROFILE"
+
+              ISVC=$(kubectl get inferenceservice -n "$NAMESPACE" \
+                -l "aim.eai.amd.com/service=nvidia-generated-service" \
+                -o jsonpath='{.items[0].metadata.name}')
+              test -n "$ISVC"
+
+              RUNTIME=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.spec.predictor.model.runtime}')
+              test -n "$RUNTIME"
+
+              RUNTIME_PROFILE=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.metadata.annotations.aim\.eai\.amd\.com/runtime-profile}')
+              if [ "$RUNTIME_PROFILE" != "$PROFILE" ]; then
+                echo "ERROR: InferenceService runtime profile '$RUNTIME_PROFILE' != '$PROFILE'"
+                exit 1
+              fi
+
+              for i in $(seq 1 60); do
+                if kubectl get servingruntime -n "$NAMESPACE" "$RUNTIME" >/dev/null 2>&1; then
+                  break
+                fi
+                if [ "$i" -eq 60 ]; then
+                  echo "ERROR: ServingRuntime '$RUNTIME' was not created"
+                  exit 1
+                fi
+                sleep 2
+              done
+
+              RUNTIME_JSON=$(kubectl get servingruntime -n "$NAMESPACE" "$RUNTIME" -o json)
+              IMAGE=$(printf '%s' "$RUNTIME_JSON" \
+                | jq -r '.spec.containers[] | select(.name == "kserve-container") | .image')
+              GPU=$(printf '%s' "$RUNTIME_JSON" \
+                | jq -r '.spec.containers[] | select(.name == "kserve-container") | .resources.requests["nvidia.com/gpu"]')
+              CPU=$(printf '%s' "$RUNTIME_JSON" \
+                | jq -r '.spec.containers[] | select(.name == "kserve-container") | .resources.requests.cpu')
+              MEMORY=$(printf '%s' "$RUNTIME_JSON" \
+                | jq -r '.spec.containers[] | select(.name == "kserve-container") | .resources.requests.memory')
+              OWNER=$(printf '%s' "$RUNTIME_JSON" \
+                | jq -r '.metadata.ownerReferences[] | select(.kind == "AIMProfile") | .name')
+
+              test "$IMAGE" = "vllm/vllm-openai:v0.17.1-cu130"
+              test "$GPU" = "1"
+              test "$CPU" = "1"
+              test "$MEMORY" = "3Gi"
+              test "$OWNER" = "$PROFILE"
+
+              INLINE_IMAGE=$(kubectl get inferenceservice -n "$NAMESPACE" "$ISVC" \
+                -o jsonpath='{.spec.predictor.model.image}')
+              if [ -n "$INLINE_IMAGE" ]; then
+                echo "ERROR: InferenceService inlined runtime image '$INLINE_IMAGE'"
+                exit 1
+              fi
+
+    - name: Configure cluster NVIDIA fallback
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMClusterRuntimeConfig
+              metadata:
+                name: (join('-', ['nvidia-generated', $namespace]))
+              spec:
+                model:
+                  profileGeneration:
+                    fallbacks:
+                      - name: nvidia-vllm
+                        autoSelectionPolicy: any
+                        match:
+                          acceleratorVendor: nvidia
+                          acceleratorType: gpu
+                        runtime:
+                          image: vllm/vllm-openai:v0.17.1-cu130
+                          engine: vllm
+
+    - name: Create cluster model
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterModel
+              metadata:
+                name: (join('-', ['nvidia-generated', $namespace]))
+              spec:
+                modelId: Qwen/Qwen3.5-0.8B
+                runtimeConfigName: (join('-', ['nvidia-generated', $namespace]))
+
+    - name: Assert cluster profile and projected runtime
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/source-model: (join('-', ['nvidia-generated', $namespace]))
+                  aim.eai.amd.com/source-model-scope: cluster
+                  aim.eai.amd.com/profile-origin: generated
+              spec:
+                acceleratorVendor: nvidia
+                acceleratorType: gpu
+                autoSelectionPolicy: any
+                image: vllm/vllm-openai:v0.17.1-cu130
+              status:
+                status: Ready
+                origin: generated
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+        - script:
+            timeout: 120s
+            content: |
+              MODEL="nvidia-generated-$NAMESPACE"
+              PROFILE=$(kubectl get aimclusterprofile \
+                -l "aim.eai.amd.com/source-model=${MODEL},aim.eai.amd.com/profile-origin=generated" \
+                -o jsonpath='{.items[0].metadata.name}')
+              test -n "$PROFILE"
+              kubectl get clusterservingruntime \
+                -l "aim.eai.amd.com/profile=${PROFILE}" \
+                -o name | grep -q .

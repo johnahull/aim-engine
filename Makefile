@@ -47,6 +47,9 @@ ZOT_AIM_DUMMY_REPO ?= $(ZOT_CLUSTER_REGISTRY)/aim-dummy
 # starts. Override this if the host has a stricter policy or a larger workload.
 ZOT_INOTIFY_MAX_USER_INSTANCES ?= 1024
 
+# NVIDIA Kubernetes dependency versions
+NVIDIA_DEVICE_PLUGIN_VERSION ?= 0.19.3
+
 # --- ttl.sh ephemeral-registry fallback for external GPU clusters ------------
 # AIMModel discovery reads a model image's OCI labels *inside the operator* via
 # go-containerregistry remote.Get (see internal/v1alpha1/aimmodel/inspector.go).
@@ -193,6 +196,11 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
+
+.PHONY: install-nvidia-dependencies
+install-nvidia-dependencies: ## Install the NVIDIA device plugin and its bundled NFD.
+	NVIDIA_DEVICE_PLUGIN_VERSION=$(NVIDIA_DEVICE_PLUGIN_VERSION) \
+		helmfile sync -f hack/nvidia/helmfile.yaml.gotmpl
 
 .PHONY: kind-create
 kind-create: manifests ## Create kind cluster with all dependencies for local development.
@@ -805,7 +813,7 @@ endif
 .PHONY: install
 install: manifests ## Install CRDs into the K8s cluster specified in ~/.kube/config.
 	@out="$$( kustomize build config/crd 2>/dev/null || true )"; \
-	if [ -n "$$out" ]; then echo "$$out" | kubectl apply -f -; else echo "No CRDs to install; skipping."; fi
+	if [ -n "$$out" ]; then echo "$$out" | kubectl apply --server-side -f -; else echo "No CRDs to install; skipping."; fi
 
 .PHONY: uninstall
 uninstall: manifests ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.

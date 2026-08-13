@@ -220,6 +220,8 @@ Set only for the fine-tuned and custom flows (`spec.profiles` set). Mirrors the 
 | `True` | `ManagedProfilesPartiallyReady` | Some profiles ready, others `NotAvailable` (typically missing hardware) |
 | `False` | `ManagedProfilesNotAvailable` | No managed profile is ready and at least one is `NotAvailable` |
 | `False` | `NoSupportedProfiles` | Discovery completed but no supported profiles found |
+| `False` | `NoCompatibleRuntime` | A model-ID declaration has no configured fallback matching available hardware; the message identifies rejected fallbacks and node-level causes such as missing labels or insufficient allocatable resources |
+| `False` | `HardwareNotAvailable` | Generated profiles exist, but their matching hardware is no longer available |
 | `False` | `BuildFailed` | Building the desired profile set failed |
 | `False` | `NodeInventoryAvailable` | Node-inventory snapshot built (intermediate state) |
 

@@ -3,7 +3,7 @@
 :::{admonition} Deprecated
 :class: warning
 
-The v1alpha1 `AIMModel` shape (`spec.custom`, `spec.modelSources`, `spec.customTemplates`, `spec.profileCopy`, ...) is deprecated. New deployments should use [v1alpha2 AIMModel](../concepts/models.md), which expresses the same outcomes through the three flows (official / fine-tuned / custom). See [Migrating to v1alpha2](migrating.md) for conversion recipes.
+The v1alpha1 `AIMModel` shape (`spec.custom`, `spec.modelSources`, `spec.customTemplates`, `spec.profileCopy`, ...) is deprecated. New deployments should use [v1alpha2 AIMModel](../concepts/models.md), which supports official, generated, fine-tuned, and custom flows. See [Migrating to v1alpha2](migrating.md) for conversion recipes.
 :::
 This page documents the legacy `AIMModel` spec fields and their replacements.
 
@@ -16,7 +16,8 @@ v1alpha1 `AIMModel` had a wide spec that supported several overlapping flows:
 - **Profile-copy** — `spec.profileCopy` for replicating a published profile onto custom weights.
 - **Defaults** — `spec.defaultServiceTemplate`, `spec.runtimeConfigName`, `spec.env` to influence downstream resources.
 
-v1alpha2 collapses these into three flows, each driven by exactly one of `spec.image` or `spec.profiles`.
+v1alpha2 replaces these with four flows, each driven by exactly one of
+`spec.image`, `spec.modelId`, or `spec.profiles`.
 
 ## v1alpha1 spec fields
 

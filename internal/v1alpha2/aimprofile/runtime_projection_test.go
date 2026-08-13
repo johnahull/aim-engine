@@ -29,10 +29,12 @@ import (
 
 	kservev1alpha1 "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
@@ -205,6 +207,119 @@ func TestProfilePlanResources_ProjectsNamespaceRuntime(t *testing.T) {
 	// The colocated ConfigMap is also force-applied and named after the runtime.
 	if !hasConfigMap(force, wantName, profile.Namespace) {
 		t.Errorf("expected colocated ConfigMap %q in force bucket", wantName)
+	}
+}
+
+func TestProfileRuntimeProjectionBuildErrorSurfacesInStatusAndSkipsApply(t *testing.T) {
+	spec := gpuSpec()
+	spec.Engine = "vllm"
+	spec.AcceleratorVendor = aimv1alpha1.AcceleratorVendorNVIDIA
+	spec.ModelId = "org/model"
+	spec.ModelSources = []aimv1alpha1.AIMModelSource{{ModelID: "org/model", SourceURI: "hf://org/model"}}
+	spec.EngineArgs = &apiextensionsv1.JSON{Raw: []byte(`{"port": 9000}`)}
+	profile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-vllm", Namespace: "team-a"},
+		Spec:       aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: spec},
+	}
+	obs := ProfileObservation{
+		matchResult:       NodeMatchResult{MatchingNodes: 1},
+		resolvedResources: ResolveProfileResources(spec),
+		deployable:        true,
+		projectable:       true,
+	}
+	obs.profile = profile
+	obs.projectionErr = validateNamespaceRuntimeProjection(
+		aimv1alpha2.RuntimeProjectionModeBoth,
+		profile,
+		obs,
+	)
+	if obs.projectionErr == nil {
+		t.Fatal("expected invalid vLLM arguments to fail runtime construction")
+	}
+
+	r := &ProfileReconciler{ProjectionMode: aimv1alpha2.RuntimeProjectionModeBoth}
+	plan := r.PlanResources(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile},
+		obs,
+	)
+	if got := len(plan.GetToApplyWithForce()); got != 0 {
+		t.Fatalf("invalid runtime must not be applied, got %d force-applied objects", got)
+	}
+
+	status := &aimv1alpha2.AIMProfileStatus{}
+	cm := controllerutils.NewConditionManager(nil)
+	r.DecorateStatus(status, cm, obs)
+	condition := cm.Get(aimv1alpha2.AIMProfileConditionRuntimeProjected)
+	if condition == nil ||
+		condition.Status != metav1.ConditionFalse ||
+		condition.Reason != aimv1alpha2.AIMProfileReasonRuntimeProjectionFailed {
+		t.Fatalf("RuntimeProjected condition = %+v, want False/%s", condition, aimv1alpha2.AIMProfileReasonRuntimeProjectionFailed)
+	}
+	if status.ProjectedRuntimeName != "" || status.ProjectedModelSlugRuntimeName != "" {
+		t.Fatalf("failed first projection must not publish runtime names: %+v", status)
+	}
+
+	staleStatus := &aimv1alpha2.AIMProfileStatus{
+		ProjectedRuntimeName:          serving.RuntimeName(profile.Name),
+		ProjectedModelSlugRuntimeName: serving.ModelSlugRuntimeName(spec.AimId),
+	}
+	r.DecorateStatus(staleStatus, controllerutils.NewConditionManager(nil), obs)
+	if staleStatus.ProjectedRuntimeName == "" || staleStatus.ProjectedModelSlugRuntimeName == "" {
+		t.Fatalf("builder failure must retain discoverability for stale runtimes kept by additive teardown: %+v", staleStatus)
+	}
+
+	health := obs.GetComponentHealth(context.Background(), nil)
+	var projectionHealth *controllerutils.ComponentHealth
+	for i := range health {
+		if health[i].Component == "RuntimeProjection" {
+			projectionHealth = &health[i]
+			break
+		}
+	}
+	if projectionHealth == nil || len(projectionHealth.Errors) != 1 {
+		t.Fatalf("missing runtime projection component health: %+v", health)
+	}
+	if got := controllerutils.CategorizeError(projectionHealth.Errors[0]).Category(); got != controllerutils.ErrorCategoryInvalidSpec {
+		t.Fatalf("projection error category = %v, want InvalidSpec", got)
+	}
+}
+
+func TestClusterProfileRuntimeProjectionBuildErrorSkipsApply(t *testing.T) {
+	spec := gpuSpec()
+	spec.Engine = "vllm"
+	spec.AcceleratorVendor = aimv1alpha1.AcceleratorVendorNVIDIA
+	spec.ModelId = "org/model"
+	spec.ModelSources = []aimv1alpha1.AIMModelSource{{ModelID: "org/model", SourceURI: "hf://org/model"}}
+	spec.EngineArgs = &apiextensionsv1.JSON{Raw: []byte(`{"host": "127.0.0.1"}`)}
+	profile := &aimv1alpha2.AIMClusterProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-vllm"},
+		Spec:       aimv1alpha2.AIMClusterProfileSpec{AIMProfileSpecCommon: spec},
+	}
+	obs := ClusterProfileObservation{
+		matchResult:       NodeMatchResult{MatchingNodes: 1},
+		resolvedResources: ResolveProfileResources(spec),
+		deployable:        true,
+		projectable:       true,
+	}
+	obs.profile = profile
+	obs.projectionErr = validateClusterRuntimeProjection(
+		aimv1alpha2.RuntimeProjectionModeBoth,
+		profile,
+		obs,
+	)
+	if obs.projectionErr == nil {
+		t.Fatal("expected invalid vLLM arguments to fail cluster runtime construction")
+	}
+
+	r := &ClusterProfileReconciler{ProjectionMode: aimv1alpha2.RuntimeProjectionModeBoth}
+	plan := r.PlanResources(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMClusterProfile]{Object: profile},
+		obs,
+	)
+	if got := len(plan.GetToApplyWithForce()); got != 0 {
+		t.Fatalf("invalid cluster runtime must not be applied, got %d force-applied objects", got)
 	}
 }
 

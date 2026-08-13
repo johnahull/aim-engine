@@ -111,6 +111,12 @@ spec:
                       read the base profile to tell whether the meaning actually changed, so it
                       conservatively requires the count be restated.
                     type: string
+                  acceleratorVendor:
+                    description: AcceleratorVendor replaces the copied profile's acceleratorVendor.
+                    enum:
+                    - amd
+                    - nvidia
+                    type: string
                   aimId:
                     description: |-
                       AimId stamps the derived profile's spec.aimId. When set, wins over
@@ -572,6 +578,13 @@ spec:
                     - gpu
                     - cpu
                     type: string
+                  acceleratorVendor:
+                    description: AcceleratorVendor filters by the vendor-specific
+                      device-plugin contract.
+                    enum:
+                    - amd
+                    - nvidia
+                    type: string
                   aimId:
                     description: AimId filters by model architecture identifier (e.g.,
                       "qwen/qwen3-32b").
@@ -647,6 +660,7 @@ spec:
                     enum:
                     - discovered
                     - derived
+                    - generated
                     - user-authored
                     type: string
                   precision:
@@ -721,9 +735,9 @@ spec:
               rule: has(self.sourceRef) || has(self.selector.aimId) || has(self.selector.modelId)
                 || has(self.selector.profileId) || has(self.selector.engine) || has(self.selector.metric)
                 || has(self.selector.precision) || has(self.selector.type) || has(self.selector.acceleratorModel)
-                || has(self.selector.acceleratorType) || has(self.selector.acceleratorCount)
-                || has(self.selector.engineArgs) || has(self.selector.modelRef) ||
-                has(self.selector.origin)
+                || has(self.selector.acceleratorVendor) || has(self.selector.acceleratorType)
+                || has(self.selector.acceleratorCount) || has(self.selector.engineArgs)
+                || has(self.selector.modelRef) || has(self.selector.origin)
             - message: version is required when versionPolicy is pinned
               rule: has(self.version) || (has(self.versionPolicy) && self.versionPolicy
                 != 'pinned')

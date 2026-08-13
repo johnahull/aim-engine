@@ -58,8 +58,9 @@ const (
 	// (e.g., immediately after creation).
 	AnnotationBaseImage = constants.AimLabelDomain + "/base-image"
 
-	ProfileSourceImage = "image"
-	ProfileSourceCopy  = "copy"
+	ProfileSourceImage     = "image"
+	ProfileSourceCopy      = "copy"
+	ProfileSourceGenerated = "generated"
 )
 
 // BaseImageFromProfile returns the base image to record on the profile's
@@ -242,8 +243,8 @@ func sourceModelFromPropagatedLabels(profile client.Object, namespace string) *a
 //     producer) wins, so the AIMProfile reconciler never overrides an explicit
 //     classification.
 //  2. Profiles owned by an AIM(Cluster)Model and marked as image-sourced map
-//     to Discovered.
-//  3. Profiles owned by an AIM(Cluster)Model or carrying the legacy copy
+//     to Discovered; generated-sourced profiles map to Generated.
+//  3. Other profiles owned by an AIM(Cluster)Model or carrying the legacy copy
 //     annotations map to Derived.
 //  4. Everything else falls back to UserAuthored (hand-authored profiles).
 func DeriveProfileOrigin(profile client.Object) aimv1alpha1.ProfileOrigin {
@@ -256,6 +257,8 @@ func DeriveProfileOrigin(profile client.Object) aimv1alpha1.ProfileOrigin {
 			return aimv1alpha1.ProfileOriginDiscovered
 		case aimv1alpha1.ProfileOriginDerived:
 			return aimv1alpha1.ProfileOriginDerived
+		case aimv1alpha1.ProfileOriginGenerated:
+			return aimv1alpha1.ProfileOriginGenerated
 		case aimv1alpha1.ProfileOriginUserAuthored:
 			return aimv1alpha1.ProfileOriginUserAuthored
 		}
@@ -274,6 +277,9 @@ func DeriveProfileOrigin(profile client.Object) aimv1alpha1.ProfileOrigin {
 	}
 	if annotations[AnnotationProfileSource] == ProfileSourceImage && hasAIMOwner {
 		return aimv1alpha1.ProfileOriginDiscovered
+	}
+	if annotations[AnnotationProfileSource] == ProfileSourceGenerated && hasAIMOwner {
+		return aimv1alpha1.ProfileOriginGenerated
 	}
 	if hasAIMOwner || IsCopiedProfile(annotations) {
 		return aimv1alpha1.ProfileOriginDerived

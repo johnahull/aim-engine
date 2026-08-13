@@ -48,6 +48,7 @@ import (
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	discoverylock "github.com/amd-enterprise-ai/aim-engine/internal/discovery/lock"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimruntimeconfig"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimmodel"
 )
 
@@ -194,12 +195,19 @@ func (r *AIMClusterModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}); err != nil {
 		return err
 	}
+	// Indexed under "default" when no config is named, so modelId-backed models
+	// see edits to the default config's profile-generation fallbacks. See the
+	// equivalent index in aimmodel_controller.go for the fan-out this widens.
 	if err := mgr.GetFieldIndexer().IndexField(ctx, &aimv1alpha2.AIMClusterModel{}, aimv1alpha1.ClusterModelRuntimeConfigIndexKey, func(obj client.Object) []string {
 		model, ok := obj.(*aimv1alpha2.AIMClusterModel)
-		if !ok || model.Spec.Name == "" {
+		if !ok {
 			return nil
 		}
-		return []string{model.Spec.Name}
+		name := model.Spec.Name
+		if name == "" {
+			name = aimruntimeconfig.DefaultRuntimeConfigName
+		}
+		return []string{name}
 	}); err != nil {
 		return err
 	}
@@ -348,5 +356,5 @@ func (r *AIMClusterModelReconciler) findClusterModelsForNodeChange(ctx context.C
 }
 
 func clusterModelRequiresNodeReconcile(model *aimv1alpha2.AIMClusterModel) bool {
-	return model != nil && model.Spec.Image != ""
+	return model != nil && (model.Spec.Image != "" || model.Spec.ModelID != "")
 }

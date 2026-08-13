@@ -24,6 +24,7 @@ package aimprofile
 
 import (
 	"context"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -100,7 +101,7 @@ func (r *ProfileReconciler) FetchRemoteState(
 	profile := reconcileCtx.Object
 	result := ProfileFetchResult{profile: profile}
 
-	if HasAcceleratorRequirement(profile.Spec.AcceleratorModel, profile.Spec.AcceleratorCount, profile.Spec.Resources) {
+	if HasProfileAcceleratorRequirement(profile.Spec.AIMProfileSpecCommon) {
 		nodes, err := listNodes(ctx, c)
 		result.nodes = nodes
 		result.nodeErr = err
@@ -127,7 +128,7 @@ func (r *ClusterProfileReconciler) FetchRemoteState(
 	profile := reconcileCtx.Object
 	result := ClusterProfileFetchResult{profile: profile}
 
-	if HasAcceleratorRequirement(profile.Spec.AcceleratorModel, profile.Spec.AcceleratorCount, profile.Spec.Resources) {
+	if HasProfileAcceleratorRequirement(profile.Spec.AIMProfileSpecCommon) {
 		nodes, err := listNodes(ctx, c)
 		result.nodes = nodes
 		result.nodeErr = err
@@ -151,18 +152,17 @@ type ProfileObservation struct {
 	baseImage         string
 	// projectable reports whether a runtime should be projected for this profile
 	// (deployable, has an image, and hardware is available — freshly computed).
-	projectable bool
+	projectable   bool
+	projectionErr error
 }
 
 // GetComponentHealth returns health of all components for automatic status management.
 func (obs ProfileObservation) GetComponentHealth(_ context.Context, _ kubernetes.Interface) []controllerutils.ComponentHealth {
-	spec := obs.profile.Spec.AIMProfileSpecCommon
-	return buildComponentHealth(
-		spec.AcceleratorModel, spec.AcceleratorCount,
-		obs.resolvedResources,
+	return appendProjectionComponentHealth(buildComponentHealth(
+		obs.profile.Spec.AIMProfileSpecCommon,
 		obs.nodeErr,
 		obs.matchResult,
-	)
+	), obs.projectionErr)
 }
 
 // ClusterProfileObservation embeds the fetch result.
@@ -176,18 +176,17 @@ type ClusterProfileObservation struct {
 	baseImage         string
 	// projectable reports whether a runtime should be projected for this profile
 	// (deployable, has an image, and hardware is available — freshly computed).
-	projectable bool
+	projectable   bool
+	projectionErr error
 }
 
 // GetComponentHealth returns health of all components for automatic status management.
 func (obs ClusterProfileObservation) GetComponentHealth(_ context.Context, _ kubernetes.Interface) []controllerutils.ComponentHealth {
-	spec := obs.profile.Spec.AIMProfileSpecCommon
-	return buildComponentHealth(
-		spec.AcceleratorModel, spec.AcceleratorCount,
-		obs.resolvedResources,
+	return appendProjectionComponentHealth(buildComponentHealth(
+		obs.profile.Spec.AIMProfileSpecCommon,
 		obs.nodeErr,
 		obs.matchResult,
-	)
+	), obs.projectionErr)
 }
 
 func (r *ProfileReconciler) ComposeState(
@@ -197,15 +196,16 @@ func (r *ProfileReconciler) ComposeState(
 ) ProfileObservation {
 	obs := ProfileObservation{ProfileFetchResult: fetch}
 	spec := fetch.profile.Spec.AIMProfileSpecCommon
-	obs.resolvedResources = ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, spec.Resources, spec.AcceleratorModel, spec.EngineEnv)
-	if HasAcceleratorRequirement(spec.AcceleratorModel, spec.AcceleratorCount, spec.Resources) {
-		obs.matchResult = MatchNodes(fetch.nodes, spec.AcceleratorType, spec.AcceleratorModel, spec.AcceleratorPartitioningMode, obs.resolvedResources)
+	obs.resolvedResources = ResolveProfileResources(spec)
+	if HasProfileAcceleratorRequirement(spec) {
+		obs.matchResult = MatchProfileNodes(fetch.nodes, spec, obs.resolvedResources)
 	}
 	obs.deployable = IsProfileDeployable(spec)
 	obs.sourceModel = SourceModelFromOwnerRefs(fetch.profile, fetch.profile.Namespace)
 	obs.origin = DeriveProfileOrigin(fetch.profile)
 	obs.baseImage = BaseImageFromProfile(fetch.profile, fetch.profile.Status.BaseImage)
 	obs.projectable = runtimeProjectable(spec, obs.deployable, obs.matchResult)
+	obs.projectionErr = validateNamespaceRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
 	return obs
 }
 
@@ -216,9 +216,9 @@ func (r *ClusterProfileReconciler) ComposeState(
 ) ClusterProfileObservation {
 	obs := ClusterProfileObservation{ClusterProfileFetchResult: fetch}
 	spec := fetch.profile.Spec.AIMProfileSpecCommon
-	obs.resolvedResources = ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, spec.Resources, spec.AcceleratorModel, spec.EngineEnv)
-	if HasAcceleratorRequirement(spec.AcceleratorModel, spec.AcceleratorCount, spec.Resources) {
-		obs.matchResult = MatchNodes(fetch.nodes, spec.AcceleratorType, spec.AcceleratorModel, spec.AcceleratorPartitioningMode, obs.resolvedResources)
+	obs.resolvedResources = ResolveProfileResources(spec)
+	if HasProfileAcceleratorRequirement(spec) {
+		obs.matchResult = MatchProfileNodes(fetch.nodes, spec, obs.resolvedResources)
 	}
 	obs.deployable = IsProfileDeployable(spec)
 	// Cluster profiles have no namespace by definition; SourceModelFromOwnerRefs
@@ -228,6 +228,7 @@ func (r *ClusterProfileReconciler) ComposeState(
 	obs.origin = DeriveProfileOrigin(fetch.profile)
 	obs.baseImage = BaseImageFromProfile(fetch.profile, fetch.profile.Status.BaseImage)
 	obs.projectable = runtimeProjectable(spec, obs.deployable, obs.matchResult)
+	obs.projectionErr = validateClusterRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
 	return obs
 }
 
@@ -263,11 +264,13 @@ func (r *ProfileReconciler) PlanResources(
 		plan.Apply(buildProfileOwnedCache(profile))
 	}
 
-	if r.ProjectionMode.ProjectsPerProfile() {
-		planNamespaceRuntime(ctx, &plan, profile, obs)
-	}
-	if r.ProjectionMode.ProjectsModelSlug() {
-		planNamespaceModelSlugRuntime(ctx, &plan, profile, obs)
+	if obs.projectionErr == nil {
+		if r.ProjectionMode.ProjectsPerProfile() {
+			planNamespaceRuntime(ctx, &plan, profile, obs)
+		}
+		if r.ProjectionMode.ProjectsModelSlug() {
+			planNamespaceModelSlugRuntime(ctx, &plan, profile, obs)
+		}
 	}
 
 	return plan
@@ -289,11 +292,13 @@ func (r *ClusterProfileReconciler) PlanResources(
 	if profile == nil {
 		return plan
 	}
-	if r.ProjectionMode.ProjectsPerProfile() {
-		planClusterRuntime(ctx, &plan, profile, obs)
-	}
-	if r.ProjectionMode.ProjectsModelSlug() {
-		planClusterModelSlugRuntime(ctx, &plan, profile, obs)
+	if obs.projectionErr == nil {
+		if r.ProjectionMode.ProjectsPerProfile() {
+			planClusterRuntime(ctx, &plan, profile, obs)
+		}
+		if r.ProjectionMode.ProjectsModelSlug() {
+			planClusterModelSlugRuntime(ctx, &plan, profile, obs)
+		}
 	}
 	return plan
 }
@@ -313,8 +318,8 @@ func (r *ProfileReconciler) DecorateStatus(
 		obs.resolvedResources, obs.nodeErr, obs.matchResult,
 		obs.deployable, obs.sourceModel, obs.origin, obs.baseImage,
 	)
-	decorateProjectionCondition(cm, r.ProjectionMode, obs.profile.Spec.Primary, obs.projectable, obs.nodeErr)
-	recordProjectedRuntimeNames(status, r.ProjectionMode, obs.profile.Spec.AIMProfileSpecCommon, obs.profile.Name, obs.projectable)
+	decorateProjectionCondition(cm, r.ProjectionMode, obs.profile.Spec.Primary, obs.projectable, obs.nodeErr, obs.projectionErr)
+	recordProjectedRuntimeNames(status, r.ProjectionMode, obs.profile.Spec.AIMProfileSpecCommon, obs.profile.Name, obs.projectable && obs.projectionErr == nil)
 }
 
 func (r *ClusterProfileReconciler) DecorateStatus(
@@ -328,8 +333,8 @@ func (r *ClusterProfileReconciler) DecorateStatus(
 		obs.resolvedResources, obs.nodeErr, obs.matchResult,
 		obs.deployable, obs.sourceModel, obs.origin, obs.baseImage,
 	)
-	decorateProjectionCondition(cm, r.ProjectionMode, obs.profile.Spec.Primary, obs.projectable, obs.nodeErr)
-	recordProjectedRuntimeNames(status, r.ProjectionMode, obs.profile.Spec.AIMProfileSpecCommon, obs.profile.Name, obs.projectable)
+	decorateProjectionCondition(cm, r.ProjectionMode, obs.profile.Spec.Primary, obs.projectable, obs.nodeErr, obs.projectionErr)
+	recordProjectedRuntimeNames(status, r.ProjectionMode, obs.profile.Spec.AIMProfileSpecCommon, obs.profile.Name, obs.projectable && obs.projectionErr == nil)
 }
 
 func decorateProfileStatus(
@@ -345,7 +350,7 @@ func decorateProfileStatus(
 	baseImage string,
 ) {
 	status.Version = ExtractVersionFromImage(spec.Image)
-	status.HardwareSummary = FormatHardwareSummary(spec.AcceleratorModel, spec.AcceleratorCount)
+	status.HardwareSummary = FormatProfileHardwareSummary(spec)
 	status.Resources = resolvedResources
 	status.ResolvedNodeAffinity = matchResult.NodeAffinity
 	status.MatchingNodes = matchResult.MatchingNodes
@@ -368,7 +373,7 @@ func decorateProfileStatus(
 		)
 	}
 
-	if !HasAcceleratorRequirement(spec.AcceleratorModel, spec.AcceleratorCount, spec.Resources) {
+	if !HasProfileAcceleratorRequirement(spec) {
 		cm.MarkTrue(
 			aimv1alpha2.AIMProfileConditionHardwareAvailable,
 			aimv1alpha2.AIMProfileReasonNoAccelerator,
@@ -417,13 +422,11 @@ func listNodes(ctx context.Context, c client.Client) ([]corev1.Node, error) {
 }
 
 func buildComponentHealth(
-	accelModel string,
-	accelCount int32,
-	resolvedResources *corev1.ResourceRequirements,
+	spec aimv1alpha2.AIMProfileSpecCommon,
 	nodeErr error,
 	matchResult NodeMatchResult,
 ) []controllerutils.ComponentHealth {
-	if !HasAcceleratorRequirement(accelModel, accelCount, resolvedResources) {
+	if !HasProfileAcceleratorRequirement(spec) {
 		return nil
 	}
 
@@ -456,4 +459,26 @@ func buildComponentHealth(
 			Message:   "No cluster nodes match accelerator labels and resource requests",
 		},
 	}
+}
+
+func appendProjectionComponentHealth(
+	health []controllerutils.ComponentHealth,
+	projectionErr error,
+) []controllerutils.ComponentHealth {
+	if projectionErr == nil {
+		return health
+	}
+	return append(health, controllerutils.ComponentHealth{
+		Component: "RuntimeProjection",
+		State:     constants.AIMStatusFailed,
+		Reason:    aimv1alpha2.AIMProfileReasonRuntimeProjectionFailed,
+		Message:   fmt.Sprintf("Failed to build projected runtime: %v", projectionErr),
+		Errors: []error{
+			controllerutils.NewInvalidSpecError(
+				aimv1alpha2.AIMProfileReasonRuntimeProjectionFailed,
+				"Failed to build projected runtime",
+				projectionErr,
+			),
+		},
+	})
 }

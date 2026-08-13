@@ -504,6 +504,77 @@ func TestFetchRuntimeConfig_ModelConfig(t *testing.T) {
 	}
 }
 
+func TestMergeRuntimeConfigs_ProfileGenerationFallbacksByName(t *testing.T) {
+	t.Parallel()
+
+	base := &aimv1alpha1.AIMRuntimeConfigCommon{
+		Model: &aimv1alpha1.AIMModelConfig{
+			ProfileGeneration: &aimv1alpha1.AIMProfileGenerationConfig{
+				Fallbacks: []aimv1alpha1.AIMProfileGenerationFallback{
+					{
+						Name: "nvidia-vllm",
+						Runtime: aimv1alpha1.AIMProfileGenerationRuntime{
+							Image:  "cluster/vllm:1",
+							Engine: "vllm",
+						},
+					},
+					{
+						Name: "cluster-only",
+						Runtime: aimv1alpha1.AIMProfileGenerationRuntime{
+							Image:  "cluster/other:1",
+							Engine: "vllm",
+						},
+					},
+				},
+			},
+		},
+	}
+	priority := &aimv1alpha1.AIMRuntimeConfigCommon{
+		Model: &aimv1alpha1.AIMModelConfig{
+			ProfileGeneration: &aimv1alpha1.AIMProfileGenerationConfig{
+				Fallbacks: []aimv1alpha1.AIMProfileGenerationFallback{
+					{
+						Name: "nvidia-vllm",
+						Runtime: aimv1alpha1.AIMProfileGenerationRuntime{
+							Image:  "namespace/vllm:2",
+							Engine: "vllm",
+						},
+					},
+					{
+						Name: "namespace-only",
+						Runtime: aimv1alpha1.AIMProfileGenerationRuntime{
+							Image:  "namespace/other:2",
+							Engine: "vllm",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	merged := mergeRuntimeConfigs(priority, base)
+	if merged == nil || merged.Model == nil || merged.Model.ProfileGeneration == nil {
+		t.Fatal("merged profile generation config is nil")
+	}
+	got := make(map[string]string)
+	for _, fallback := range merged.Model.ProfileGeneration.Fallbacks {
+		got[fallback.Name] = fallback.Runtime.Image
+	}
+	want := map[string]string{
+		"nvidia-vllm":    "namespace/vllm:2",
+		"cluster-only":   "cluster/other:1",
+		"namespace-only": "namespace/other:2",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("merged fallbacks = %#v, want %#v", got, want)
+	}
+	for name, image := range want {
+		if got[name] != image {
+			t.Fatalf("fallback %q image = %q, want %q", name, got[name], image)
+		}
+	}
+}
+
 func TestMergeRuntimeConfigs_NilStorageOverride(t *testing.T) {
 	priority := &aimv1alpha1.AIMRuntimeConfigCommon{
 		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{

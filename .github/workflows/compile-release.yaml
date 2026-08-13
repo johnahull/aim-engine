@@ -556,6 +556,12 @@ jobs:
       - name: Set per-run kubeconfig path
         run: echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_ENV}"
 
+      - name: Set per-run Helmfile cache
+        run: |
+          HELMFILE_CACHE="${RUNNER_TEMP}/helmfile-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "HELMFILE_CACHE_HOME=${HELMFILE_CACHE}" >> "${GITHUB_ENV}"
+          mkdir -p "${HELMFILE_CACHE}"
+
       - name: Create Kind cluster
         run: kind create cluster --name "${KIND_CLUSTER}" --config hack/kind/config.yaml
 
