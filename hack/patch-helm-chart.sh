@@ -46,8 +46,8 @@ fi
 # --health-probe-bind-address line followed by a range over .Values.manager.args,
 # so anchor on that fixed line and splice the flag right after it (preserving the
 # line's indentation). Guarded so an empty value renders no arg (the operator then
-# falls back to its compiled-in Exhaustive default); the shipped default value
-# keeps projection in Exhaustive mode.
+# falls back to its compiled-in Both default); the shipped default value keeps
+# projection in Both mode.
 # ------------------------------------------------------------------------------
 echo "  - Wiring runtimeProjectionMode to --runtime-projection-mode arg..."
 if [[ -f "${MANAGER_YAML}" ]]; then

@@ -52,7 +52,7 @@ const (
 
 	// RuntimeProjectionModeDefault is the projection mode used when none is
 	// configured.
-	RuntimeProjectionModeDefault = RuntimeProjectionModeExhaustive
+	RuntimeProjectionModeDefault = RuntimeProjectionModeBoth
 )
 
 // ParseRuntimeProjectionMode validates a configured projection mode string,

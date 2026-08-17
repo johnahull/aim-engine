@@ -1,10 +1,11 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
 #
-# Eager per-profile runtime gains a service-driven Shared cache mount (Exhaustive).
+# Eager per-profile runtime gains a service-driven Shared cache mount.
 #
 # This is the regression guard for the mode-dependent Shared-cache mount. Under
-# the default Exhaustive mode the profile controller eagerly projects a complete
-# namespace ServingRuntime for a projectable namespace profile. That eager runtime
+# the default Both mode the profile controller's Exhaustive branch eagerly
+# projects a complete namespace ServingRuntime for a projectable namespace
+# profile. That eager runtime
 # must mount a Shared AIMProfileCache created out-of-band (as an AIMService in the
 # default Shared caching mode does) even though the profile never set
 # caching.enabled and the cache carries a hashed object name, not the profile

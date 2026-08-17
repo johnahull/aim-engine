@@ -1,5 +1,5 @@
 # Primary, deployable, no-accelerator cluster profile for the Reduced
-# projection-mode smoke test. See mode-exhaustive/cluster-profile.yaml for the
+# projection-mode smoke test. See mode-both/cluster-profile.yaml for the
 # shared rationale; the aimId + name are unique per lane so the cluster-scoped
 # objects never collide with the other mode smokes.
 apiVersion: aim.eai.amd.com/v1alpha2

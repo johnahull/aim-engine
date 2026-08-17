@@ -340,14 +340,13 @@ CHAINSAW_CONFIG_DIR := tests/chainsaw/config
 # opt in through a dedicated target or by overriding the selector.
 CHAINSAW_NEEDS_SECRET_EXCLUDE := needs-secret notin (hf_token,dockerhub_pull_secret)
 
-# reduced-mode gates the eager-runtime-projection-mode tests, which only pass
-# against an operator started with a non-default --runtime-projection-mode
-# (Reduced). The default lanes run the operator in Exhaustive, so these are
-# excluded from every selector; run them via `make set-projection-mode MODE=...`
-# then point CHAINSAW_TEST_DIR at the specific mode dir with the selector cleared
-# (see docs/docs/contributing/testing.md). Both mode has no dedicated e2e leg: it
-# is the additive union of Exhaustive + Reduced (covered by those legs plus the
-# Both-mode unit tests), so there is no both-mode gate.
+# reduced-mode gates eager-runtime-projection tests whose mutually-exclusive
+# assertions only pass against an operator started in Reduced. The default lanes
+# run the operator in Both, so these are excluded from every selector; run them
+# via `make set-projection-mode MODE=...` then point CHAINSAW_TEST_DIR at the
+# specific mode dir with the selector cleared (see
+# docs/docs/contributing/testing.md). The ungated mode-both smoke runs in the
+# default suite and asserts that both projection outputs coexist.
 CHAINSAW_PROJECTION_MODE_EXCLUDE := reduced-mode
 
 # The mode-gated projection tests all live under one tree. The

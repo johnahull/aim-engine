@@ -1,6 +1,6 @@
 # Namespace-scoped mirror of cluster-profile.yaml for the same gate-flip
 # scenario. Projectable in this MI300X vcluster, so the AIMProfile
-# reconciler (Exhaustive, the operator default) eagerly projects a complete
+# reconciler (the Exhaustive branch of default Both mode) eagerly projects a complete
 # ServingRuntime named aim-<profile.Name> (+ its colocated profile ConfigMap).
 # Applied into the ephemeral chainsaw namespace.
 #

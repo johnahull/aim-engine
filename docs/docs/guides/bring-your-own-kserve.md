@@ -101,9 +101,9 @@ An administrator selects how many runtimes get projected via the operator flag `
 
 | Mode | What is projected | Tradeoff |
 |---|---|---|
-| `Exhaustive` (default) | One per-profile runtime for every deployable profile | Maximum addressability; more runtime objects |
+| `Exhaustive` | One per-profile runtime for every deployable profile | Maximum addressability; more runtime objects |
 | `Reduced` | One readable model-slug primary per model (`autoSelect` on) | Fewer objects, one stable handle per model; individual profiles aren't separately addressable |
-| `Both` | Per-profile runtimes **and** the model-slug primary | Most objects; both addressing styles available |
+| `Both` (default) | Per-profile runtimes **and** the model-slug primary | Most objects; both addressing styles available |
 
 Check the active mode on the running operator:
 

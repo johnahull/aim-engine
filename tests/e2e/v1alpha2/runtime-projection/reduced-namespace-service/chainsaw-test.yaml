@@ -24,7 +24,7 @@
 # materialization owned by the namespace profile, and KServe binding — all
 # decided at render time, independent of a live pod.
 #
-# OPT-IN: gated `requires: reduced-mode`, so the default (Exhaustive) lane skips
+# OPT-IN: gated `requires: reduced-mode`, so the default (Both) lane skips
 # it — its assertions only hold against an operator started in Reduced. Run it
 # with:
 #   make set-projection-mode MODE=Reduced

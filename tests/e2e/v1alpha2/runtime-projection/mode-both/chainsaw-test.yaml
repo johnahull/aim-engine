@@ -1,0 +1,112 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Projection-mode smoke (Both). Locks the default eager output of the profile
+# reconcilers when the operator runs with --runtime-projection-mode=Both. Both
+# projects one runtime per projectable profile, named aim-<profile.Name>, and
+# the readable model-slug primary. Every projected runtime keeps autoSelect off.
+#
+# Assertions:
+#   1. per-profile CSR aim-mode-both-primary-827b04ef present,
+#   2. model-slug CSR aim-mode-test-both present,
+#   3. both runtimes garbage-collected on profile delete.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-projection-mode-both
+spec:
+  timeouts:
+    assert: 120s
+  steps:
+    - name: Apply the primary cluster profile and wait for Ready
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: mode-both-primary
+              status:
+                status: Ready
+                projectedRuntimeName: aim-mode-both-primary-827b04ef
+                projectedModelSlugRuntimeName: aim-mode-test-both
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+                    reason: RuntimeProjected
+
+    - name: Assert the per-profile ClusterServingRuntime is projected
+      description: |
+        The Exhaustive branch of Both names the runtime aim-<profile.Name>,
+        carries the correlator labels, references the profile image, and leaves
+        autoSelect off.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-both-primary-827b04ef
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: mode-both-primary
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: mode-both-primary
+              spec:
+                supportedModelFormats:
+                  - name: huggingface
+                    autoSelect: false
+                containers:
+                  - name: kserve-container
+                    image: registry.example.com/aim-cpu-base:0.12.0
+
+    - name: Assert the model-slug ClusterServingRuntime is projected
+      description: |
+        The Reduced branch of Both publishes the readable aim-<model-slug>
+        primary for native KServe references, also with autoSelect off.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-test-both
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  app.kubernetes.io/component: inference
+                  aim.eai.amd.com/profile: mode-both-primary
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: mode-both-primary
+              spec:
+                supportedModelFormats:
+                  - name: huggingface
+                    autoSelect: false
+                containers:
+                  - name: kserve-container
+                    image: registry.example.com/aim-cpu-base:0.12.0
+
+    - name: Delete the profile and assert both runtimes are garbage-collected
+      try:
+        - delete:
+            ref:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              name: mode-both-primary
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-both-primary-827b04ef
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ClusterServingRuntime
+              metadata:
+                name: aim-mode-test-both

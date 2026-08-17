@@ -163,8 +163,45 @@ func (r *AIMClusterProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		)
 	})
 
+	// Keep the cluster model-slug election converged when a same-aimId
+	// candidate changes rank/status or is deleted. The primary For watch handles
+	// the changed object; this secondary same-kind watch enqueues only its peers.
+	modelSlugElectionHandler := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		if !r.ProjectionMode.ProjectsModelSlug() {
+			return nil
+		}
+		profile, ok := obj.(*aimv1alpha2.AIMClusterProfile)
+		if !ok || profile.Spec.AimId == "" {
+			return nil
+		}
+
+		var peers aimv1alpha2.AIMClusterProfileList
+		if err := r.List(
+			ctx,
+			&peers,
+			client.MatchingFields{aimv1alpha2.ProfileAimIdIndexKey: profile.Spec.AimId},
+		); err != nil {
+			ctrl.LoggerFrom(ctx).Error(err, "failed to list AIMClusterProfile peers for runtime projection election",
+				"aimId", profile.Spec.AimId)
+			return nil
+		}
+
+		requests := make([]reconcile.Request, 0, len(peers.Items))
+		for i := range peers.Items {
+			peer := &peers.Items[i]
+			if peer.Name == profile.Name {
+				continue
+			}
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(peer)})
+		}
+		return requests
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&aimv1alpha2.AIMClusterProfile{}).
+		// Re-elect the model-slug owner when a same-model candidate changes or
+		// disappears. This same-kind secondary watch fans the event out to peers.
+		Watches(&aimv1alpha2.AIMClusterProfile{}, modelSlugElectionHandler).
 		// Own the projected ClusterServingRuntime so drift (hand-edits) and
 		// node-inventory changes (via the Node watch) self-heal through reconcile.
 		Owns(&kservev1alpha1.ClusterServingRuntime{}).

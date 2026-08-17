@@ -1,0 +1,24 @@
+# Primary, deployable, no-accelerator cluster profile for the Both
+# projection-mode smoke test. Being primary + carrying an aimId means it is a
+# candidate for BOTH the per-profile runtime (aim-<profile.Name>) and the
+# model-slug primary (aim-<model-slug>). Both mode must publish both outputs.
+#
+# The image is a placeholder (registry.example.com): the smoke asserts the
+# projection contract, not that a pod serves. No accelerator + no cache, so it
+# reaches the contract in any cluster.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: mode-both-primary
+spec:
+  aimId: mode-test/both
+  modelId: mode-test/both
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: general
+  primary: true
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: mode-test/both
+      sourceUri: hf://mode-test/both

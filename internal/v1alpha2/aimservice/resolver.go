@@ -25,7 +25,6 @@ package aimservice
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -39,7 +38,6 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
-	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
 )
 
@@ -837,19 +835,11 @@ func filterClusterAnyAutoSelectionProfilesBySpec(
 // alphabetical name is the final tie-break for the deterministic-winner
 // guarantee.
 func sortNamespaceCandidates(profiles []aimv1alpha2.AIMProfile) {
-	sort.SliceStable(profiles, func(i, j int) bool {
-		return profileLess(&profiles[i].Spec.AIMProfileSpecCommon, &profiles[j].Spec.AIMProfileSpecCommon,
-			profiles[i].Status.Version, profiles[j].Status.Version,
-			profiles[i].Name, profiles[j].Name)
-	})
+	aimprofile.SortNamespaceProfiles(profiles)
 }
 
 func sortClusterCandidates(profiles []aimv1alpha2.AIMClusterProfile) {
-	sort.SliceStable(profiles, func(i, j int) bool {
-		return profileLess(&profiles[i].Spec.AIMProfileSpecCommon, &profiles[j].Spec.AIMProfileSpecCommon,
-			profiles[i].Status.Version, profiles[j].Status.Version,
-			profiles[i].Name, profiles[j].Name)
-	})
+	aimprofile.SortClusterProfiles(profiles)
 }
 
 // profileLess returns true when a should rank ahead of b. Used by the
@@ -882,10 +872,7 @@ func sortClusterCandidates(profiles []aimv1alpha2.AIMClusterProfile) {
 //  8. Version           — higher semver wins; empty ties low.
 //  9. Name              — alphabetical, deterministic last resort.
 func profileLess(a, b *aimv1alpha2.AIMProfileSpecCommon, aVer, bVer, aName, bName string) bool {
-	if cmp := profileRankCompareIgnoringName(a, b, aVer, bVer); cmp != 0 {
-		return cmp < 0
-	}
-	return aName < bName
+	return aimprofile.ProfileLess(a, b, aVer, bVer, aName, bName)
 }
 
 // profileRankCompareIgnoringName returns -1 / 0 / +1 reflecting whether
@@ -901,128 +888,15 @@ func profileLess(a, b *aimv1alpha2.AIMProfileSpecCommon, aVer, bVer, aName, bNam
 // because the selector happened to match multiple profiles that the
 // ranker then separated cleanly.
 func profileRankCompareIgnoringName(a, b *aimv1alpha2.AIMProfileSpecCommon, aVer, bVer string) int {
-	if a.Primary != b.Primary {
-		if a.Primary {
-			return -1
-		}
-		return 1
-	}
-	if rank := profileTypeRank(a.Type) - profileTypeRank(b.Type); rank != 0 {
-		return signOf(rank)
-	}
-	if rank := acceleratorModelRank(a.AcceleratorModel) - acceleratorModelRank(b.AcceleratorModel); rank != 0 {
-		return signOf(rank)
-	}
-	if rank := metricRank(a.Metric) - metricRank(b.Metric); rank != 0 {
-		return signOf(rank)
-	}
-	if rank := precisionRank(a.Precision) - precisionRank(b.Precision); rank != 0 {
-		return signOf(rank)
-	}
-	if a.AcceleratorCount != b.AcceleratorCount {
-		// Zero treated as "no explicit requirement"; loses to any
-		// concrete count so a well-specified profile beats an
-		// unspecified one on tie.
-		switch {
-		case a.AcceleratorCount == 0:
-			return 1
-		case b.AcceleratorCount == 0:
-			return -1
-		case a.AcceleratorCount < b.AcceleratorCount:
-			return -1
-		default:
-			return 1
-		}
-	}
-	if a.AcceleratorType != b.AcceleratorType {
-		switch {
-		case a.AcceleratorType == aimv1alpha1.AcceleratorTypeGPU:
-			return -1
-		case b.AcceleratorType == aimv1alpha1.AcceleratorTypeGPU:
-			return 1
-		}
-	}
-	if cmp := compareProfileVersions(aVer, bVer); cmp != 0 {
-		return -cmp // compareProfileVersions returns +1 when a>b (preferred), invert for the ahead/behind convention.
-	}
-	return 0
-}
-
-func signOf(n int) int {
-	switch {
-	case n < 0:
-		return -1
-	case n > 0:
-		return 1
-	default:
-		return 0
-	}
-}
-
-// acceleratorModelRank returns the rank index of an accelerator model
-// in the shared utils.AcceleratorModelPreferenceOrder list. Unknown or
-// empty values return a large sentinel so they tie at the bottom and
-// fall through to the next ranking tier.
-func acceleratorModelRank(model string) int {
-	return utils.PreferenceScore(model, acceleratorModelPrefMap)
-}
-
-func metricRank(metric aimv1alpha1.AIMMetric) int {
-	return utils.PreferenceScore(string(metric), metricPrefMap)
-}
-
-func precisionRank(precision aimv1alpha1.AIMPrecision) int {
-	return utils.PreferenceScore(string(precision), precisionPrefMap)
-}
-
-// Cached preference maps. Built once at package init from the shared
-// lists in internal/utils so v1alpha2 picks up edits there without
-// duplication.
-var (
-	acceleratorModelPrefMap = utils.MakePreferenceMap(utils.AcceleratorModelPreferenceOrder)
-	metricPrefMap           = utils.MakePreferenceMap(utils.MetricPreferenceOrder)
-	precisionPrefMap        = utils.MakePreferenceMap(utils.PrecisionPreferenceOrder)
-)
-
-// profileTypeRank delegates to aimprofile.ProfileTypeRank so the ranking tier
-// order (used here) and the minimumType floor (used by the selector matcher)
-// can never drift. An empty/unset type ranks as unoptimized (the lowest real
-// tier), so an untyped profile sorts last and is excluded by the default
-// optimized floor — the conservative choice for a profile that doesn't declare
-// its optimization level.
-func profileTypeRank(t aimv1alpha1.AIMProfileType) int {
-	return aimprofile.ProfileTypeRank(t)
-}
-
-// compareProfileVersions returns 1 if a>b, -1 if a<b, 0 on tie. Empty
-// versions sort to the bottom so any usable version is preferred over the
-// unknown.
-func compareProfileVersions(a, b string) int {
-	switch {
-	case a == b:
-		return 0
-	case a == "":
-		return -1
-	case b == "":
-		return 1
-	default:
-		if a > b {
-			return 1
-		}
-		return -1
-	}
+	return aimprofile.CompareProfileRankIgnoringName(a, b, aVer, bVer)
 }
 
 func bestNamespaceCandidate(profiles []aimv1alpha2.AIMProfile) *aimv1alpha2.AIMProfile {
-	return utils.SelectBestPtr(profiles, func(p *aimv1alpha2.AIMProfile) constants.AIMStatus {
-		return p.Status.GetAIMStatus()
-	})
+	return aimprofile.SelectBestNamespaceProfile(profiles)
 }
 
 func bestClusterCandidate(profiles []aimv1alpha2.AIMClusterProfile) *aimv1alpha2.AIMClusterProfile {
-	return utils.SelectBestPtr(profiles, func(p *aimv1alpha2.AIMClusterProfile) constants.AIMStatus {
-		return p.Status.GetAIMStatus()
-	})
+	return aimprofile.SelectBestClusterProfile(profiles)
 }
 
 func candidateRefsFromNamespace(profiles []aimv1alpha2.AIMProfile) []candidateRef {

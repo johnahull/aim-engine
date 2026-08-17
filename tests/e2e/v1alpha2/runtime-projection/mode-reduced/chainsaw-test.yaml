@@ -6,7 +6,7 @@
 # aim-<model-slug> (derived from spec.aimId) with autoSelect OFF (native KServe
 # references it by name), and does NOT project the per-profile runtime.
 #
-# OPT-IN: gated `requires: reduced-mode`, so the default (Exhaustive) lane skips
+# OPT-IN: gated `requires: reduced-mode`, so the default (Both) lane skips
 # it — its assertions only hold against an operator started in Reduced. Run it
 # with:
 #   make set-projection-mode MODE=Reduced

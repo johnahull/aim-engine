@@ -44,8 +44,8 @@ import (
 // AIMProfileCache (hashed name, not the profile name), must still have that cache
 // mounted on the eagerly-projected per-profile ServingRuntime. Before the fix the
 // eager path only looked up a cache named after the profile gated on
-// caching.enabled, so the Shared cache went unmounted in the default Exhaustive
-// mode and the pod cold-pulled its weights.
+// caching.enabled, so the Shared cache went unmounted from the eagerly projected
+// per-profile runtime and the pod cold-pulled its weights.
 func TestEagerProjection_MountsServiceDrivenSharedCache(t *testing.T) {
 	profile := &aimv1alpha2.AIMProfile{
 		ObjectMeta: metav1.ObjectMeta{Name: "qwen3-32b-cpu", Namespace: "team-a"},
@@ -142,5 +142,22 @@ func newProfileTestClient(t *testing.T, objs ...client.Object) client.Client {
 			t.Fatalf("AddToScheme() error = %v", err)
 		}
 	}
-	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		WithIndex(&aimv1alpha2.AIMProfile{}, aimv1alpha2.ProfileAimIdIndexKey, func(obj client.Object) []string {
+			profile := obj.(*aimv1alpha2.AIMProfile)
+			if profile.Spec.AimId == "" {
+				return nil
+			}
+			return []string{profile.Spec.AimId}
+		}).
+		WithIndex(&aimv1alpha2.AIMClusterProfile{}, aimv1alpha2.ProfileAimIdIndexKey, func(obj client.Object) []string {
+			profile := obj.(*aimv1alpha2.AIMClusterProfile)
+			if profile.Spec.AimId == "" {
+				return nil
+			}
+			return []string{profile.Spec.AimId}
+		}).
+		Build()
 }

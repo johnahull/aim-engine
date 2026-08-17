@@ -19,7 +19,7 @@
 #   5. Delete the profiles → the runtimes are garbage-collected via ownerRef,
 #      which is the ONLY removal path.
 #
-# Runs under the default Exhaustive projection mode — no special lane needed.
+# Runs under the default Both projection mode — no special lane needed.
 # Requires MI300X nodes (GPU vcluster); the GPU chainsaw selector applies.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test

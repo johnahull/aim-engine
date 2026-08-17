@@ -167,8 +167,48 @@ func (r *AIMProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		)
 	})
 
+	// A model-slug runtime is elected across every primary profile sharing an
+	// aimId. Reconcile the peers when one candidate changes or is deleted so a
+	// rank/status transition immediately converges on the new winner. The
+	// primary For watch already enqueues the changed profile itself; this map
+	// intentionally returns only its peers.
+	modelSlugElectionHandler := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		if !r.ProjectionMode.ProjectsModelSlug() {
+			return nil
+		}
+		profile, ok := obj.(*aimv1alpha2.AIMProfile)
+		if !ok || profile.Spec.AimId == "" {
+			return nil
+		}
+
+		var peers aimv1alpha2.AIMProfileList
+		if err := r.List(
+			ctx,
+			&peers,
+			client.InNamespace(profile.Namespace),
+			client.MatchingFields{aimv1alpha2.ProfileAimIdIndexKey: profile.Spec.AimId},
+		); err != nil {
+			ctrl.LoggerFrom(ctx).Error(err, "failed to list AIMProfile peers for runtime projection election",
+				"namespace", profile.Namespace, "aimId", profile.Spec.AimId)
+			return nil
+		}
+
+		requests := make([]reconcile.Request, 0, len(peers.Items))
+		for i := range peers.Items {
+			peer := &peers.Items[i]
+			if peer.Name == profile.Name {
+				continue
+			}
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(peer)})
+		}
+		return requests
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&aimv1alpha2.AIMProfile{}).
+		// Re-elect the model-slug owner when a same-model candidate changes or
+		// disappears. This same-kind secondary watch fans the event out to peers.
+		Watches(&aimv1alpha2.AIMProfile{}, modelSlugElectionHandler).
 		// Own the projected ServingRuntime so drift (hand-edits) and
 		// node-inventory changes (via the Node watch) self-heal through reconcile.
 		Owns(&kservev1alpha1.ServingRuntime{}).

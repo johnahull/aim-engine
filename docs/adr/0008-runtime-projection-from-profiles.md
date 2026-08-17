@@ -50,6 +50,11 @@ Designing the implementation surfaced two facts that reshape that proposal:
   unrelated models (and hijack any co-installed generic `huggingface` runtime) in
   KServe's format-based auto-selection. Native consumers reference the model-slug
   primary explicitly by name, which works regardless of `autoSelect`.
+  When several same-scope profiles for one `aimId` are marked `primary`, the
+  profile reconcilers run the same deterministic ranker used by AIMService
+  selection and only the winner may project the shared model-slug runtime.
+  Peer profile events fan out reconciliation so rank/status changes and winner
+  deletion promptly re-elect the owner.
 - **Lazy projection (always on, mode-independent).** An `InferenceService` watch
   materializes a **complete** namespace `ServingRuntime` (+ colocated ConfigMap) in
   the ISVC's namespace when the referenced runtime isn't already complete there.
@@ -281,7 +286,7 @@ Coverage: `internal/v1alpha2/aimservice/reconcile_test.go`
 (`TestPlanResources_LegacyProfileConfigMapCleanup`, incl. the false-positive
 negative cases) and the render-time chainsaw
 `tests/e2e/v1alpha2/runtime-projection/service-upgrade-migration/` (default
-`Exhaustive`/kind lane), which stands up a pre-upgrade inline ISVC + orphan
+`Both`/kind lane), which stands up a pre-upgrade inline ISVC + orphan
 ConfigMap and asserts the reference rewrite, the KServe runtime binding, the
 projected-ConfigMap mount, and the orphan deletion.
 
@@ -358,7 +363,7 @@ Coverage: `internal/v1alpha2/serving/runtime_test.go`
 round-trip, incl. the assertion that it is independent of the hashed runtime
 object name) and the render-time chainsaw
 `tests/e2e/v1alpha2/runtime-projection/bare-csr-before-shadow/` (default
-`Exhaustive`/kind lane), which applies the cluster profile + a bare CSR carrying
+`Both`/kind lane), which applies the cluster profile + a bare CSR carrying
 the dangling `AIM_PROFILE_ID`, then a native ISVC, and asserts the shadow SR +
 ConfigMap materialize, the ISVC binds the **namespace** SR with the profile file
 mounted, and the shadow's `AIM_PROFILE_ID` matches the ConfigMap data key.

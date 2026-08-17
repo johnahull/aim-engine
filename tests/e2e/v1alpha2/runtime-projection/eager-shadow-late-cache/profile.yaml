@@ -1,5 +1,5 @@
-# A deployable, namespace-scoped AIMProfile. Under the default Exhaustive
-# projection mode the profile controller eagerly projects a complete namespace
+# A deployable, namespace-scoped AIMProfile. Under the default Both projection
+# mode the profile controller eagerly projects a complete namespace
 # ServingRuntime (aim-<profile>-<hash>) + colocated ConfigMap for it. It declares
 # modelSources (so the framework redirect env AIM_CACHE_PATH / AIM_MODEL_ID /
 # AIM_ID="" is emitted) but has NO caching block of its own — the Shared cache is

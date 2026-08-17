@@ -373,10 +373,11 @@ func TestProfilePlanResources_StampsEagerProjectionMarker(t *testing.T) {
 			}
 			affinity := BuildNodeAffinity(aimv1alpha2.AcceleratorTypeGPU, "MI300X", "unpartitioned")
 			obs := ProfileObservation{
-				matchResult:       NodeMatchResult{MatchingNodes: 3, NodeAffinity: affinity},
-				resolvedResources: ResolveResources(tc.spec.AcceleratorType, tc.spec.AcceleratorCount, nil, tc.spec.AcceleratorModel, nil),
-				deployable:        true,
-				projectable:       true,
+				ProfileFetchResult: ProfileFetchResult{modelSlugWinner: tc.mode.ProjectsModelSlug()},
+				matchResult:        NodeMatchResult{MatchingNodes: 3, NodeAffinity: affinity},
+				resolvedResources:  ResolveResources(tc.spec.AcceleratorType, tc.spec.AcceleratorCount, nil, tc.spec.AcceleratorModel, nil),
+				deployable:         true,
+				projectable:        true,
 			}
 			obs.profile = profile
 
@@ -629,10 +630,11 @@ func TestProfilePlanResources_ReducedModelSlugPrimary(t *testing.T) {
 	}
 	affinity := BuildNodeAffinity(aimv1alpha2.AcceleratorTypeGPU, "MI300X", "unpartitioned")
 	obs := ProfileObservation{
-		matchResult:       NodeMatchResult{MatchingNodes: 3, NodeAffinity: affinity},
-		resolvedResources: ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
-		deployable:        true,
-		projectable:       true,
+		ProfileFetchResult: ProfileFetchResult{modelSlugWinner: true},
+		matchResult:        NodeMatchResult{MatchingNodes: 3, NodeAffinity: affinity},
+		resolvedResources:  ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
+		deployable:         true,
+		projectable:        true,
 	}
 	obs.profile = profile
 
@@ -661,8 +663,8 @@ func TestProfilePlanResources_ReducedModelSlugPrimary(t *testing.T) {
 }
 
 // TestProfilePlanResources_ReducedSkipsNonPrimaryAndNonProjectable pins the
-// thin primary-selection rule: Reduced publishes nothing for a non-primary
-// profile, and nothing for a primary profile that is not projectable.
+// post-election gates: Reduced publishes nothing for a non-primary profile, and
+// nothing for an elected primary that is not projectable.
 func TestProfilePlanResources_ReducedSkipsNonPrimaryAndNonProjectable(t *testing.T) {
 	cases := map[string]struct {
 		primary     bool
@@ -680,7 +682,11 @@ func TestProfilePlanResources_ReducedSkipsNonPrimaryAndNonProjectable(t *testing
 				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
 				Spec:       aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: spec},
 			}
-			obs := ProfileObservation{deployable: true, projectable: tc.projectable}
+			obs := ProfileObservation{
+				ProfileFetchResult: ProfileFetchResult{modelSlugWinner: tc.primary},
+				deployable:         true,
+				projectable:        tc.projectable,
+			}
 			obs.profile = profile
 
 			r := &ProfileReconciler{ProjectionMode: aimv1alpha2.RuntimeProjectionModeReduced}
@@ -704,10 +710,11 @@ func TestClusterProfilePlanResources_ReducedModelSlugPrimary(t *testing.T) {
 	}
 	affinity := BuildNodeAffinity(aimv1alpha2.AcceleratorTypeGPU, "MI300X", "unpartitioned")
 	obs := ClusterProfileObservation{
-		matchResult:       NodeMatchResult{MatchingNodes: 3, NodeAffinity: affinity},
-		resolvedResources: ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
-		deployable:        true,
-		projectable:       true,
+		ClusterProfileFetchResult: ClusterProfileFetchResult{modelSlugWinner: true},
+		matchResult:               NodeMatchResult{MatchingNodes: 3, NodeAffinity: affinity},
+		resolvedResources:         ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
+		deployable:                true,
+		projectable:               true,
 	}
 	obs.profile = profile
 
@@ -741,10 +748,11 @@ func TestProfilePlanResources_BothModeNoAmbiguity(t *testing.T) {
 	}
 	affinity := BuildNodeAffinity(aimv1alpha2.AcceleratorTypeGPU, "MI300X", "unpartitioned")
 	obs := ProfileObservation{
-		matchResult:       NodeMatchResult{MatchingNodes: 3, NodeAffinity: affinity},
-		resolvedResources: ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
-		deployable:        true,
-		projectable:       true,
+		ProfileFetchResult: ProfileFetchResult{modelSlugWinner: true},
+		matchResult:        NodeMatchResult{MatchingNodes: 3, NodeAffinity: affinity},
+		resolvedResources:  ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
+		deployable:         true,
+		projectable:        true,
 	}
 	obs.profile = profile
 
@@ -1057,10 +1065,11 @@ func TestProfileDecorateStatus_ReducedRecordsModelSlugName(t *testing.T) {
 		Spec:       aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: spec},
 	}
 	obs := ProfileObservation{
-		matchResult:       NodeMatchResult{MatchingNodes: 3},
-		resolvedResources: ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
-		deployable:        true,
-		projectable:       true,
+		ProfileFetchResult: ProfileFetchResult{modelSlugWinner: true},
+		matchResult:        NodeMatchResult{MatchingNodes: 3},
+		resolvedResources:  ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
+		deployable:         true,
+		projectable:        true,
 	}
 	obs.profile = profile
 
@@ -1087,10 +1096,11 @@ func TestProfileDecorateStatus_BothRecordsBothNames(t *testing.T) {
 		Spec:       aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: spec},
 	}
 	obs := ProfileObservation{
-		matchResult:       NodeMatchResult{MatchingNodes: 3},
-		resolvedResources: ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
-		deployable:        true,
-		projectable:       true,
+		ProfileFetchResult: ProfileFetchResult{modelSlugWinner: true},
+		matchResult:        NodeMatchResult{MatchingNodes: 3},
+		resolvedResources:  ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
+		deployable:         true,
+		projectable:        true,
 	}
 	obs.profile = profile
 

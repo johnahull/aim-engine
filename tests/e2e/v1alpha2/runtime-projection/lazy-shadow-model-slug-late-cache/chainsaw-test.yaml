@@ -26,8 +26,8 @@
 # The cache is frozen to Ready (apply-with-status.sh) with a fabricated PVC, so
 # no real download or storage class is needed and it runs in any cluster.
 #
-# OPT-IN: gated `requires: reduced-mode`, so the default (Exhaustive) lane skips
-# it — its assertions only hold against an operator started in Reduced (or Both).
+# OPT-IN: gated `requires: reduced-mode`, so the default (Both) lane skips it and
+# it runs with the rest of the Reduced/model-slug-specific coverage.
 # Run it with:
 #   make set-projection-mode MODE=Reduced
 #   make test-chainsaw \

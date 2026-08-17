@@ -23,7 +23,7 @@
 # computed hashed runtime name aim-flip-ns-profile-bba2ad9c
 # (serving.RuntimeName("flip-ns-profile")).
 #
-# OPT-IN: gated `requires: reduced-mode`, so the default (Exhaustive) lane skips
+# OPT-IN: gated `requires: reduced-mode`, so the default (Both) lane skips
 # it (CHAINSAW_PROJECTION_MODE_EXCLUDE). The Reduced CI leg picks it up. It is
 # `concurrent: false` so it runs isolated: Go's testing model runs non-parallel
 # tests BEFORE the parallel ones, so it flips + asserts + RESTORES the mode to

@@ -88,31 +88,25 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 60
     # Matrix on the operator's eager runtime-projection mode. The default
-    # `Exhaustive` leg is the full kind suite exactly as before (mode-gated tests
-    # stay excluded via CHAINSAW_PROJECTION_MODE_EXCLUDE). The `Reduced` leg
+    # `Both` leg is the full kind suite (mode-gated tests stay excluded via
+    # CHAINSAW_PROJECTION_MODE_EXCLUDE). The `Reduced` leg
     # exists because the Reduced/model-slug projection paths
     # (planClusterModelSlugRuntime / planNamespaceModelSlugRuntime, the scope-aware
-    # lazy resolver, model-slug lazy completion) are otherwise CI-dark: no CI job
-    # ever starts the operator in a non-default mode, which is exactly how the
-    # Reduced-only bugs in the first review round shipped undetected. It starts an
-    # operator in that mode (Helm value) and runs ONLY the matching mode-gated
-    # tests. `slug` is the lowercase form used in resource / artifact names that
-    # must differ per leg.
+    # lazy resolver, model-slug lazy completion) also need their mutually
+    # exclusive Reduced behavior covered. It starts an operator in that mode
+    # (Helm value) and runs ONLY the matching mode-gated tests. `slug` is the
+    # lowercase form used in resource / artifact names that must differ per leg.
     #
-    # `Both` is intentionally NOT a matrix leg: it is the pure additive union of
-    # Exhaustive + Reduced (no Both-only code path — the per-profile and model-slug
-    # plan branches fire independently), so a dedicated cluster leg would only
-    # re-run branches these two legs already cover. Its one unique property (both
-    # runtimes coexist) is pinned cheaply by the Both-mode unit tests in
-    # internal/v1alpha2/aimprofile/runtime_projection_test.go. The Exhaustive and
-    # Reduced legs additionally assert the mutually-exclusive absence of the other
-    # mode's runtime, which a Both leg structurally cannot.
+    # `Exhaustive` has no dedicated cluster leg: Both exercises its per-profile
+    # branch alongside the model-slug branch, while Exhaustive's unique property
+    # (absence of the model-slug runtime) is pinned by unit tests. The default
+    # lane's mode-both smoke asserts that both runtimes coexist.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - mode: Exhaustive
-            slug: exhaustive
+          - mode: Both
+            slug: both
           - mode: Reduced
             slug: reduced
     concurrency:
@@ -427,17 +421,17 @@ jobs:
           kubectl get crds | grep aim || true
 
       - name: Require Hugging Face token for trusted live tests
-        if: matrix.mode == 'Exhaustive' && github.event.pull_request.head.repo.full_name == github.repository
+        if: matrix.mode == 'Both' && github.event.pull_request.head.repo.full_name == github.repository
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: test -n "${HF_TOKEN}" || { echo "HF_TOKEN repository secret is required"; exit 1; }
 
       - name: Run Chainsaw tests
-        # DEFAULT lane (Exhaustive). Builds aim-dummy, pushes it through a
+        # DEFAULT lane (Both). Builds aim-dummy, pushes it through a
         # TLS-valid localhost port-forward into the Kind-local Zot registry,
         # kind-loads the exact in-cluster refs, and runs against a throwaway copy
         # of tests/e2e with only the registry/repository prefix rewritten.
-        if: matrix.mode == 'Exhaustive'
+        if: matrix.mode == 'Both'
         env:
           MISE_OVERRIDE_CONFIG_FILENAMES: "mise.toml"
           # Empty on fork PRs; public-model tests then exercise anonymous access.
@@ -449,7 +443,7 @@ jobs:
         # (selector flipped to INCLUDE requires in (<mode>-mode)) against the
         # operator started in this mode above. These paths are otherwise CI-dark;
         # they need no aim-dummy/ttl rewrite (they reference no aim-dummy image).
-        if: matrix.mode != 'Exhaustive'
+        if: matrix.mode != 'Both'
         run: make test-chainsaw-projection-mode ENV=kind MODE=${{ matrix.mode }}
 
       # Dump the poller's accumulated time-series (TS-marked metric snapshots).

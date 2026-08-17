@@ -1,11 +1,11 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
 #
-# Phase D chain (a): eager Exhaustive projection of an AIMClusterProfile into a
+# Phase D chain (a): eager per-profile projection of an AIMClusterProfile into a
 # ClusterServingRuntime.
 #
 # Apply a deployable, no-accelerator AIMClusterProfile. The cluster profile
-# reconciler (RuntimeProjectionMode=Exhaustive, the operator default) projects a
-# bare ClusterServingRuntime named aim-<profile.Name>, owner-ref'd by the
+# reconciler (the Exhaustive branch of the default Both mode) projects a bare
+# ClusterServingRuntime named aim-<profile.Name>, owner-ref'd by the
 # profile, force-applied (reserved aim- prefix), with the correlator labels and
 # autoSelect off. Deleting the profile garbage-collects the CSR via the owner
 # reference.

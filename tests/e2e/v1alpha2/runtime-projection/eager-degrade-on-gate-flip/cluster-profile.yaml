@@ -2,7 +2,7 @@
 # teardown is additive). It carries a GPU accelerator requirement
 # (acceleratorModel: MI300X) so it is projectable in this MI300X vcluster:
 # deployable (aimId + modelSources) && image != "" && matchingNodes > 0. The
-# AIMClusterProfile reconciler (Exhaustive, the operator default) eagerly
+# AIMClusterProfile reconciler (the Exhaustive branch of default Both mode) eagerly
 # projects a bare ClusterServingRuntime named aim-<profile.Name>.
 #
 # The test then patches acceleratorModel to an unsatisfiable value so

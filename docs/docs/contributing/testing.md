@@ -172,11 +172,11 @@ make test-chainsaw \
   CHAINSAW_ARGS="--namespace aim-testing"
 ```
 
-### Runtime projection mode tests (`Reduced`)
+### Runtime projection mode tests (`Both` and `Reduced`)
 
-Eager runtime projection is governed by the operator flag `--runtime-projection-mode` (`Exhaustive` default / `Reduced` / `Both`; see [ADR 0008](../../adr/0008-runtime-projection-from-profiles.md)). The default lane always runs the operator in `Exhaustive`, so tests whose assertions only hold in a non-default mode are gated with `requires: reduced-mode` (Reduced) and excluded from both ENV selectors.
+Eager runtime projection is governed by the operator flag `--runtime-projection-mode` (`Exhaustive` / `Reduced` / `Both` default; see [ADR 0008](../../adr/0008-runtime-projection-from-profiles.md)). The default lane runs the operator in `Both`. Tests whose mutually-exclusive assertions only hold in `Reduced` are gated with `requires: reduced-mode` and excluded from the normal ENV selectors.
 
-`Both` mode has no dedicated e2e coverage of its own: it is the pure additive union of Exhaustive + Reduced (there is no `Both`-only code path — the per-profile and model-slug plan branches fire independently), so the `Exhaustive` and `Reduced` legs already exercise both projection outputs, and each additionally asserts the mutually-exclusive *absence* of the other mode's runtime — something a `Both` run structurally cannot. `Both`'s one unique property (both runtimes coexist for a single profile) is pinned cheaply by the Both-mode unit tests in `internal/v1alpha2/aimprofile/runtime_projection_test.go`.
+The default `mode-both` smoke asserts that the per-profile and model-slug runtimes coexist. `Exhaustive` has no dedicated cluster lane because its per-profile branch is already exercised by `Both`; its unique property (absence of the model-slug runtime) remains covered by unit tests. The `Reduced` lane additionally asserts the complementary shape: the model-slug runtime exists and the per-profile runtime does not.
 
 To run the Reduced tests, first redeploy the operator in Reduced (no rebuild needed — the flag is compiled in), then point `CHAINSAW_TEST_DIR` at the specific mode directory with the selector cleared:
 
@@ -188,16 +188,16 @@ make test-chainsaw \
   CHAINSAW_ENV_SELECTOR=
 
 # Restore the operator to the default when finished
-make set-projection-mode MODE=Exhaustive
+make set-projection-mode MODE=Both
 ```
 
-`make set-projection-mode` patches the in-cluster operator Deployment's `--runtime-projection-mode` arg and waits for the rollout, so it works against a kustomize/Tilt dev deploy as well as a Helm install (override `OPERATOR_NAMESPACE` / `OPERATOR_DEPLOYMENT` if they differ). Point `CHAINSAW_TEST_DIR` at exactly one mode directory: the `mode-reduced` fixture asserts the Reduced shape and only passes against a Reduced operator. The `mode-exhaustive` smoke needs no gate and runs in the default lane.
+`make set-projection-mode` patches the in-cluster operator Deployment's `--runtime-projection-mode` arg and waits for the rollout, so it works against a kustomize/Tilt dev deploy as well as a Helm install (override `OPERATOR_NAMESPACE` / `OPERATOR_DEPLOYMENT` if they differ). Point `CHAINSAW_TEST_DIR` at exactly one mode directory: the `mode-reduced` fixture asserts the Reduced shape and only passes against a Reduced operator. The `mode-both` smoke needs no gate and runs in the default lane.
 
 For a Helm install, set the equivalent value instead: `--set manager.runtimeProjectionMode=Reduced`.
 
 To run **all** the gated tests for the mode in one shot (instead of pointing `CHAINSAW_TEST_DIR` at each directory), use `make test-chainsaw-projection-mode MODE=Reduced`. It is the inverse of the default lanes' exclusion: it points at `tests/e2e/v1alpha2/runtime-projection` and flips the selector to *include* `requires in (reduced-mode)`, so only the matching gated tests load. Set the operator to that mode first (Helm value or `make set-projection-mode`).
 
-CI exercises these otherwise-CI-dark paths: `.github/workflows/test-e2e.yml` runs the e2e job as a matrix over `runtime-projection-mode: [Exhaustive, Reduced]`. The `Exhaustive` leg is the full default suite (gated tests excluded); the `Reduced` leg installs the operator with `manager.runtimeProjectionMode` set, asserts the live arg, and runs only the mode-gated tests via `make test-chainsaw-projection-mode`.
+CI exercises both shapes: `.github/workflows/test-e2e.yml` runs the e2e job as a matrix over `runtime-projection-mode: [Both, Reduced]`. The `Both` leg is the full default suite (gated tests excluded); the `Reduced` leg installs the operator with `manager.runtimeProjectionMode` set, asserts the live arg, and runs only the mode-gated tests via `make test-chainsaw-projection-mode`.
 
 ### Test Reports
 

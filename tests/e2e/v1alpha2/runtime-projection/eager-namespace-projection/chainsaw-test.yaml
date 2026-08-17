@@ -1,10 +1,10 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
 #
-# Phase D chain (b): eager Exhaustive projection of an AIMProfile into a complete
-# ServingRuntime (+ colocated profile ConfigMap).
+# Phase D chain (b): eager per-profile projection of an AIMProfile into a
+# complete ServingRuntime (+ colocated profile ConfigMap).
 #
 # Apply a deployable, no-accelerator namespace AIMProfile. The profile reconciler
-# (RuntimeProjectionMode=Exhaustive, the operator default) projects a complete
+# (the Exhaustive branch of the default Both mode) projects a complete
 # ServingRuntime named aim-<profile.Name> plus its colocated ConfigMap of the
 # same name, both owner-ref'd by the profile and force-applied (reserved aim-
 # prefix). The runtime mounts the colocated ConfigMap as the aim-profile volume.

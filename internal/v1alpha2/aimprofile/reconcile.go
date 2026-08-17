@@ -74,6 +74,11 @@ type ProfileFetchResult struct {
 	nodes   []corev1.Node
 	nodeErr error
 
+	// modelSlugWinner is true only for the deterministic winner among
+	// same-namespace primary profiles sharing this profile's aimId.
+	modelSlugWinner      bool
+	modelSlugElectionErr error
+
 	// profileCache is the Ready, profile-owned (Shared) AIMProfileCache backing
 	// this profile — whether created by the profile (caching.enabled) or by an
 	// AIMService in Shared mode. Contributes the cache mount on the projected
@@ -87,6 +92,11 @@ type ClusterProfileFetchResult struct {
 	profile *aimv1alpha2.AIMClusterProfile
 	nodes   []corev1.Node
 	nodeErr error
+
+	// modelSlugWinner is true only for the deterministic winner among
+	// cluster primary profiles sharing this profile's aimId.
+	modelSlugWinner      bool
+	modelSlugElectionErr error
 }
 
 // ============================================================================
@@ -105,6 +115,10 @@ func (r *ProfileReconciler) FetchRemoteState(
 		nodes, err := listNodes(ctx, c)
 		result.nodes = nodes
 		result.nodeErr = err
+	}
+
+	if r.ProjectionMode.ProjectsModelSlug() {
+		result.modelSlugWinner, result.modelSlugElectionErr = electNamespaceModelSlugWinner(ctx, c, profile)
 	}
 
 	// The cache mount is needed by both the per-profile runtime and the model-slug
@@ -134,6 +148,10 @@ func (r *ClusterProfileReconciler) FetchRemoteState(
 		result.nodeErr = err
 	}
 
+	if r.ProjectionMode.ProjectsModelSlug() {
+		result.modelSlugWinner, result.modelSlugElectionErr = electClusterModelSlugWinner(ctx, c, profile)
+	}
+
 	return result
 }
 
@@ -158,11 +176,13 @@ type ProfileObservation struct {
 
 // GetComponentHealth returns health of all components for automatic status management.
 func (obs ProfileObservation) GetComponentHealth(_ context.Context, _ kubernetes.Interface) []controllerutils.ComponentHealth {
-	return appendProjectionComponentHealth(buildComponentHealth(
+	health := buildComponentHealth(
 		obs.profile.Spec.AIMProfileSpecCommon,
 		obs.nodeErr,
 		obs.matchResult,
-	), obs.projectionErr)
+	)
+	health = appendRuntimeProjectionElectionHealth(health, obs.modelSlugElectionErr)
+	return appendProjectionComponentHealth(health, obs.projectionErr)
 }
 
 // ClusterProfileObservation embeds the fetch result.
@@ -182,11 +202,13 @@ type ClusterProfileObservation struct {
 
 // GetComponentHealth returns health of all components for automatic status management.
 func (obs ClusterProfileObservation) GetComponentHealth(_ context.Context, _ kubernetes.Interface) []controllerutils.ComponentHealth {
-	return appendProjectionComponentHealth(buildComponentHealth(
+	health := buildComponentHealth(
 		obs.profile.Spec.AIMProfileSpecCommon,
 		obs.nodeErr,
 		obs.matchResult,
-	), obs.projectionErr)
+	)
+	health = appendRuntimeProjectionElectionHealth(health, obs.modelSlugElectionErr)
+	return appendProjectionComponentHealth(health, obs.projectionErr)
 }
 
 func (r *ProfileReconciler) ComposeState(
@@ -318,8 +340,17 @@ func (r *ProfileReconciler) DecorateStatus(
 		obs.resolvedResources, obs.nodeErr, obs.matchResult,
 		obs.deployable, obs.sourceModel, obs.origin, obs.baseImage,
 	)
-	decorateProjectionCondition(cm, r.ProjectionMode, obs.profile.Spec.Primary, obs.projectable, obs.nodeErr, obs.projectionErr)
-	recordProjectedRuntimeNames(status, r.ProjectionMode, obs.profile.Spec.AIMProfileSpecCommon, obs.profile.Name, obs.projectable && obs.projectionErr == nil)
+	decorateProjectionCondition(cm, r.ProjectionMode, obs.modelSlugWinner, obs.projectable, obs.nodeErr, obs.projectionErr)
+	if obs.projectionErr == nil {
+		recordProjectedRuntimeNames(
+			status,
+			r.ProjectionMode,
+			obs.profile.Spec.AIMProfileSpecCommon,
+			obs.profile.Name,
+			obs.projectable,
+			obs.modelSlugWinner,
+		)
+	}
 }
 
 func (r *ClusterProfileReconciler) DecorateStatus(
@@ -333,8 +364,17 @@ func (r *ClusterProfileReconciler) DecorateStatus(
 		obs.resolvedResources, obs.nodeErr, obs.matchResult,
 		obs.deployable, obs.sourceModel, obs.origin, obs.baseImage,
 	)
-	decorateProjectionCondition(cm, r.ProjectionMode, obs.profile.Spec.Primary, obs.projectable, obs.nodeErr, obs.projectionErr)
-	recordProjectedRuntimeNames(status, r.ProjectionMode, obs.profile.Spec.AIMProfileSpecCommon, obs.profile.Name, obs.projectable && obs.projectionErr == nil)
+	decorateProjectionCondition(cm, r.ProjectionMode, obs.modelSlugWinner, obs.projectable, obs.nodeErr, obs.projectionErr)
+	if obs.projectionErr == nil {
+		recordProjectedRuntimeNames(
+			status,
+			r.ProjectionMode,
+			obs.profile.Spec.AIMProfileSpecCommon,
+			obs.profile.Name,
+			obs.projectable,
+			obs.modelSlugWinner,
+		)
+	}
 }
 
 func decorateProfileStatus(
@@ -459,6 +499,20 @@ func buildComponentHealth(
 			Message:   "No cluster nodes match accelerator labels and resource requests",
 		},
 	}
+}
+
+func appendRuntimeProjectionElectionHealth(
+	health []controllerutils.ComponentHealth,
+	err error,
+) []controllerutils.ComponentHealth {
+	if err == nil {
+		return health
+	}
+	return append(health, controllerutils.ComponentHealth{
+		Component:      "RuntimeProjectionElection",
+		Errors:         []error{err},
+		DependencyType: controllerutils.DependencyTypeUpstream,
+	})
 }
 
 func appendProjectionComponentHealth(
