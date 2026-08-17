@@ -43,6 +43,7 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	v1alpha1service "github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimservice"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
 
@@ -426,11 +427,12 @@ func TestBuildInferenceServiceFromProfile_StampsRuntimeProfile(t *testing.T) {
 }
 
 // TestBuildInferenceServiceFromProfile_ServiceResourceOverrideOnModel pins that
-// a service-level resource override is the one resource knob carried by the
-// overlay (KServe merges it over the runtime container by name).
+// a service-level resource override carries the fully merged, valid resource
+// block. KServe preserves omitted runtime keys, so sending only requests.memory
+// could otherwise retain a smaller runtime limits.memory.
 func TestBuildInferenceServiceFromProfile_ServiceResourceOverrideOnModel(t *testing.T) {
 	override := &corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("16Gi")},
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Gi")},
 	}
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
@@ -439,21 +441,129 @@ func TestBuildInferenceServiceFromProfile_ServiceResourceOverrideOnModel(t *test
 			Resources: override,
 		},
 	}
+	profileStatus := &aimv1alpha2.AIMProfileStatus{
+		Status: constants.AIMStatusReady,
+		Resources: &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("4"),
+				corev1.ResourceMemory: resource.MustParse("32Gi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("48Gi"),
+			},
+		},
+	}
 	obs := ServiceObservation{
 		ServiceFetchResult:    ServiceFetchResult{service: service},
 		resolvedProfileSpec:   sampleProfileSpec(),
-		resolvedProfileStatus: &aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+		resolvedProfileStatus: profileStatus,
 		profileName:           testProfileA,
 		profileScope:          aimv1alpha1.AIMResolutionScopeNamespace,
 	}
+	obs.effectiveResources = effectiveResourcesForService(service, obs.resolvedProfileSpec, profileStatus)
 	(&ProfileServiceReconciler{}).composeDerivedNames(context.Background(), &obs)
 
 	isvc := buildInferenceServiceFromProfile(service, obs)
 	if isvc == nil {
 		t.Fatalf("expected non-nil ISVC")
 	}
-	if got := isvc.Spec.Predictor.Model.Resources.Requests.Memory(); got.Cmp(resource.MustParse("16Gi")) != 0 {
-		t.Errorf("service resource override not carried on model: got %v, want 16Gi", got)
+	if got := isvc.Spec.Predictor.Model.Resources.Requests.Memory(); got.Cmp(resource.MustParse("64Gi")) != 0 {
+		t.Errorf("service resource override not carried on model: got %v, want 64Gi", got)
+	}
+	if got := isvc.Spec.Predictor.Model.Resources.Limits.Memory(); got.Cmp(resource.MustParse("64Gi")) != 0 {
+		t.Errorf("omitted memory limit must be raised to the request: got %v, want 64Gi", got)
+	}
+	if got := isvc.Spec.Predictor.Model.Resources.Requests.Cpu(); got.Cmp(resource.MustParse("4")) != 0 {
+		t.Errorf("profile CPU request was not preserved: got %v, want 4", got)
+	}
+}
+
+func TestPlanResources_serviceOverrideRescuesProfileReadiness(t *testing.T) {
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
+			Resources: &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("16Gi")},
+			},
+		},
+	}
+	profileSpec := sampleProfileSpec()
+	profileStatus := &aimv1alpha2.AIMProfileStatus{
+		Status:     constants.AIMStatusNotAvailable,
+		Deployable: true,
+		Resources: &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceName("amd.com/gpu"): resource.MustParse("1"),
+				corev1.ResourceCPU:                 resource.MustParse("4"),
+				corev1.ResourceMemory:              resource.MustParse("32Gi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceName("amd.com/gpu"): resource.MustParse("1"),
+				corev1.ResourceMemory:              resource.MustParse("48Gi"),
+			},
+		},
+	}
+	profile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: testProfileA, Namespace: "ns"},
+		Spec: aimv1alpha2.AIMProfileSpec{
+			AIMProfileSpecCommon: *profileSpec,
+		},
+		Status: *profileStatus,
+	}
+	node := corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "smaller-node",
+			Labels: map[string]string{
+				aimprofile.AcceleratorLabelPrefix + "MI300X": "1",
+				aimprofile.PartitioningSchemeLabelPrefix +
+					aimprofile.PartitioningSchemeDefault: "1",
+			},
+		},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceName("amd.com/gpu"): resource.MustParse("1"),
+				corev1.ResourceCPU:                 resource.MustParse("8"),
+				corev1.ResourceMemory:              resource.MustParse("24Gi"),
+			},
+		},
+	}
+	reconciler := &ProfileServiceReconciler{}
+	obs := reconciler.ComposeState(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha1.AIMService]{Object: service},
+		ServiceFetchResult{
+			service:            service,
+			profile:            controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+			resourceMatchNodes: []corev1.Node{node},
+		},
+	)
+	if obs.serviceResourceMatch.MatchingNodes != 1 {
+		t.Fatalf("service resource match = %d, want 1", obs.serviceResourceMatch.MatchingNodes)
+	}
+
+	plan := reconciler.PlanResources(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha1.AIMService]{Object: service},
+		obs,
+	)
+
+	var sawInferenceService bool
+	for _, obj := range plan.GetToApply() {
+		if _, ok := obj.(*servingv1beta1.InferenceService); ok {
+			sawInferenceService = true
+		}
+	}
+	if !sawInferenceService {
+		t.Fatal("service override matching a node must allow InferenceService planning")
+	}
+	if health := obs.getProfileHealth(); health.State != constants.AIMStatusReady {
+		t.Errorf("profile health = %s, want Ready; message=%q", health.State, health.Message)
+	}
+
+	obs.resolvedProfileStatus.Status = constants.AIMStatusProgressing
+	if obs.profileReadyForService() {
+		t.Fatal("service override must not bypass a profile that has not completed hardware observation")
 	}
 }
 
@@ -1519,6 +1629,79 @@ func TestResolveEffectiveResourcesFromProfile_ServiceOverrideWins(t *testing.T) 
 	if got.Requests.Memory().Cmp(resource.MustParse("16Gi")) != 0 {
 		t.Errorf("service override should win; got %v, want 16Gi", got.Requests.Memory())
 	}
+}
+
+func TestMergeResourceRequirements_oneSidedOverrideKeepsValidPair(t *testing.T) {
+	base := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("32Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("48Gi")},
+	}
+
+	t.Run("larger request raises inherited limit", func(t *testing.T) {
+		got := mergeResourceRequirements(base, &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Gi")},
+		})
+		if got.Requests.Memory().Cmp(resource.MustParse("64Gi")) != 0 {
+			t.Errorf("request = %s, want 64Gi", got.Requests.Memory().String())
+		}
+		if got.Limits.Memory().Cmp(resource.MustParse("64Gi")) != 0 {
+			t.Errorf("limit = %s, want 64Gi", got.Limits.Memory().String())
+		}
+	})
+
+	t.Run("smaller limit lowers inherited request", func(t *testing.T) {
+		got := mergeResourceRequirements(base, &corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("16Gi")},
+		})
+		if got.Requests.Memory().Cmp(resource.MustParse("16Gi")) != 0 {
+			t.Errorf("request = %s, want 16Gi", got.Requests.Memory().String())
+		}
+		if got.Limits.Memory().Cmp(resource.MustParse("16Gi")) != 0 {
+			t.Errorf("limit = %s, want 16Gi", got.Limits.Memory().String())
+		}
+	})
+
+	t.Run("incompatible explicit pair is rejected", func(t *testing.T) {
+		got := mergeResourceRequirements(base, &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Gi")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("48Gi")},
+		})
+		if err := validateResourceRequirements(&got); err == nil {
+			t.Fatal("expected incompatible explicit request and limit to be rejected")
+		}
+	})
+
+	t.Run("one-sided extended resource request is mirrored", func(t *testing.T) {
+		device := corev1.ResourceName("amd.com/gpu")
+		got := mergeResourceRequirements(
+			&corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{device: resource.MustParse("4")},
+				Limits:   corev1.ResourceList{device: resource.MustParse("4")},
+			},
+			&corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{device: resource.MustParse("2")},
+			},
+		)
+		request := got.Requests[device]
+		if request.Cmp(resource.MustParse("2")) != 0 {
+			t.Errorf("GPU request = %s, want 2", request.String())
+		}
+		limit := got.Limits[device]
+		if limit.Cmp(resource.MustParse("2")) != 0 {
+			t.Errorf("GPU limit = %s, want 2", limit.String())
+		}
+	})
+
+	t.Run("unequal explicit extended resource pair is rejected", func(t *testing.T) {
+		device := corev1.ResourceName("amd.com/gpu")
+		got := mergeResourceRequirements(nil, &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{device: resource.MustParse("1")},
+			Limits:   corev1.ResourceList{device: resource.MustParse("2")},
+		})
+		if err := validateResourceRequirements(&got); err == nil {
+			t.Fatal("expected unequal explicit GPU request and limit to be rejected")
+		}
+	})
 }
 
 func TestPlanProfileCache_DedicatedHonorsServiceCachingMode(t *testing.T) {

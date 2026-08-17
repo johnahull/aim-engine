@@ -222,7 +222,9 @@ spec:
       memory: 128Gi
 ```
 
-Service-level resources are merged on top of the resolved profile's `status.resources`. Service values win where both set the same key.
+Service-level resources are merged on top of the resolved profile's `status.resources`. Service values win where both set the same key. The controller writes the fully merged block to KServe, so a one-sided override cannot retain an incompatible request or limit from the profile runtime.
+
+Node matching uses that same merged service footprint. A smaller service override can therefore deploy from a profile whose own generated defaults do not fit a node; the base profile can remain `NotAvailable` while the service reports `ProfileReady=True`. If the merged service resources do not fit any node matching the profile's accelerator labels and partition mode, service planning remains gated.
 
 ## Image pull secrets
 

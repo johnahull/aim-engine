@@ -265,7 +265,15 @@ The profile itself does not need `spec.caching`. An `AIMService` selecting the p
 
 The vendor resolver is also the extension point for partition-specific device-plugin resources. In the current implementation, AMD partition modes still derive `amd.com/gpu`; a later resource-naming strategy can map a concrete mode such as `CPX-NPS4` to `amd.com/cpx_nps4` without changing profile selection or runtime projection.
 
-Until that mapping is enabled, a cluster that advertises a partition-specific resource can override the derived device resource explicitly:
+For recognized AMD compute partition modes, generated host CPU and memory
+defaults scale with slice density: SPX=1, DPX=2, QPX=4, and CPX=8 slices per
+physical GPU. For example, eight `CPX-NPS4` accelerator units receive the same
+aggregate host defaults as one unpartitioned GPU. The geometry-agnostic
+`partitioned` value and unknown schemes do not receive host defaults; specify
+`resources` explicitly for those profiles.
+
+Until partition-specific resource mapping is enabled, a cluster that advertises
+such a resource can override the derived device resource explicitly:
 
 ```yaml
 spec:

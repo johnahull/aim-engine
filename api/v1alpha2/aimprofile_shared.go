@@ -179,7 +179,11 @@ type AIMProfileSpecCommon struct {
 	// For AcceleratorType=gpu, the per-unit interpretation depends on
 	// AcceleratorPartitioningMode: under "unpartitioned" (default) one unit is
 	// one whole GPU; under "partitioned" or a specific scheme one unit is one
-	// partition slice (e.g. CPX-NPS4 = 1/8 of a GPU).
+	// partition slice (e.g. CPX-NPS4 = 1/8 of a GPU). Host CPU and memory
+	// defaults are scaled by the recognized compute partition density
+	// (SPX=1, DPX=2, QPX=4, CPX=8). Geometry-agnostic "partitioned" and unknown
+	// schemes require explicit host resources because a safe scale cannot be
+	// inferred.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AcceleratorCount int32 `json:"acceleratorCount,omitempty"`
@@ -217,6 +221,8 @@ type AIMProfileSpecCommon struct {
 	// Resources is an optional override for K8s resource requests/limits.
 	// When set, merged on top of the defaults that AIM Engine computes from
 	// AcceleratorType, AcceleratorCount, and cluster-level configuration.
+	// Generated values account for an explicit opposite-side value so partial
+	// overrides cannot produce a request above its limit.
 	// The resolved result is written to status.resources.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`

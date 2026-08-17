@@ -210,6 +210,13 @@ func newWatchTestClient(t *testing.T, scheme *runtime.Scheme, objs ...client.Obj
 			}
 			return []string{svc.Spec.Profile.Selector.AimId}
 		}).
+		WithIndex(&aimv1alpha1.AIMService{}, ServiceResourceNodeMatchIndex, func(obj client.Object) []string {
+			svc, ok := obj.(*aimv1alpha1.AIMService)
+			if !ok || svc.Spec.Resources == nil || !usesProfilePipeline(svc) {
+				return nil
+			}
+			return []string{serviceResourceNodeMatchIndexValue}
+		}).
 		WithIndex(&aimv1alpha1.AIMService{}, aimv1alpha1.AIMServiceAdapterArtifactIndexKey, func(obj client.Object) []string {
 			svc, ok := obj.(*aimv1alpha1.AIMService)
 			if !ok {
@@ -238,6 +245,140 @@ func newWatchTestClient(t *testing.T, scheme *runtime.Scheme, objs ...client.Obj
 			return artifact.Spec.CompatibleWith
 		}).
 		Build()
+}
+
+func TestServiceResourceNodeChangePredicate(t *testing.T) {
+	pred := serviceResourceNodeChangePredicate()
+	base := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node",
+			Labels: map[string]string{
+				"feature.node.kubernetes.io/aim-accelerator.MI300X": "1",
+				"kubernetes.io/hostname":                            "node",
+			},
+		},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("8"),
+				corev1.ResourceMemory: resource.MustParse("24Gi"),
+			},
+		},
+	}
+
+	if !pred.Create(event.CreateEvent{Object: base}) {
+		t.Fatal("Node creation must trigger service resource matching")
+	}
+	if !pred.Delete(event.DeleteEvent{Object: base}) {
+		t.Fatal("Node deletion must trigger service resource matching")
+	}
+
+	t.Run("accelerator label change", func(t *testing.T) {
+		updated := base.DeepCopy()
+		updated.Labels["feature.node.kubernetes.io/aim-accelerator.MI300X"] = "2"
+		if !pred.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: updated}) {
+			t.Fatal("accelerator label change must trigger")
+		}
+	})
+
+	t.Run("memory allocatable change", func(t *testing.T) {
+		updated := base.DeepCopy()
+		updated.Status.Allocatable[corev1.ResourceMemory] = resource.MustParse("32Gi")
+		if !pred.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: updated}) {
+			t.Fatal("allocatable resource change must trigger")
+		}
+	})
+
+	t.Run("unrelated label change", func(t *testing.T) {
+		updated := base.DeepCopy()
+		updated.Labels["kubernetes.io/hostname"] = "renamed"
+		if pred.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: updated}) {
+			t.Fatal("unrelated label change must be filtered")
+		}
+	})
+}
+
+func TestFindServicesForResourceNodeChange(t *testing.T) {
+	scheme := newWatchTestScheme(t)
+	resources := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("16Gi")},
+	}
+
+	profileService := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: "profile", Namespace: "alpha"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile:   &aimv1alpha1.AIMServiceProfileConfig{Name: "p"},
+			Resources: resources,
+		},
+	}
+	forcedProfileService := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "forced-profile",
+			Namespace: "beta",
+			Annotations: map[string]string{
+				constants.AnnotationReconcilerPipeline: constants.ReconcilerPipelineProfile,
+			},
+		},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Model:     &aimv1alpha1.AIMServiceModel{Name: ptr.To("model")},
+			Resources: resources,
+		},
+	}
+	noOverride := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: "no-override", Namespace: "alpha"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: "p"},
+		},
+	}
+	templateService := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: "template", Namespace: "alpha"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Template:  &aimv1alpha1.AIMServiceTemplateConfig{Name: "template"},
+			Resources: resources,
+		},
+	}
+	forcedTemplateService := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "forced-template",
+			Namespace: "alpha",
+			Annotations: map[string]string{
+				constants.AnnotationReconcilerPipeline: constants.ReconcilerPipelineTemplate,
+			},
+		},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile:   &aimv1alpha1.AIMServiceProfileConfig{Name: "p"},
+			Resources: resources,
+		},
+	}
+
+	c := newWatchTestClient(
+		t,
+		scheme,
+		profileService,
+		forcedProfileService,
+		noOverride,
+		templateService,
+		forcedTemplateService,
+	)
+	requests := findServicesForResourceNodeChange(c)(
+		context.Background(),
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node"}},
+	)
+
+	got := map[types.NamespacedName]struct{}{}
+	for _, request := range requests {
+		got[request.NamespacedName] = struct{}{}
+	}
+	for _, want := range []types.NamespacedName{
+		{Name: "profile", Namespace: "alpha"},
+		{Name: "forced-profile", Namespace: "beta"},
+	} {
+		if _, exists := got[want]; !exists {
+			t.Errorf("missing Node-event enqueue for %s", want)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("Node event enqueued unexpected services: %#v", got)
+	}
 }
 
 // TestFindServicesForProfile_FansOutByNameModelAndAimId exercises the three

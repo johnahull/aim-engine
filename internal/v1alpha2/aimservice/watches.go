@@ -24,6 +24,7 @@ package aimservice
 
 import (
 	"context"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -41,6 +42,7 @@ import (
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
 )
 
 // isNotFoundLike treats both API-server 404s and cache-Lister
@@ -84,6 +86,14 @@ const (
 	// transition has to re-queue the service so the resolver can
 	// promote `needsAutoModel=true` into a resolved profile.
 	ServiceModelImageIndex = ".spec.model.image"
+
+	// ServiceResourceNodeMatchIndex selects profile-pipeline services whose
+	// spec.resources must be re-evaluated directly against Nodes. The profile's
+	// own status may remain NotAvailable when a smaller service override starts
+	// or stops fitting, so a profile event cannot reliably provide this wakeup.
+	ServiceResourceNodeMatchIndex = ".spec.resources.profileNodeMatch"
+
+	serviceResourceNodeMatchIndexValue = "true"
 )
 
 // RegisterWatches installs the field indexers and watches that feed the
@@ -96,8 +106,10 @@ const (
 //   - ServiceModelNameIndex: spec.model.name shortcut.
 //   - ServiceSelectorModelRefIndex: explicit selector.modelRef.name.
 //   - ServiceSelectorAimIdIndex: selector.aimId.
+//   - ServiceResourceNodeMatchIndex: profile services with spec.resources.
 //
 // Watch sources:
+//   - Node -> services whose merged service resources need node matching
 //   - AIMProfile  -> namespace profile events (name + source-model label + spec.aimId)
 //   - AIMClusterProfile -> cluster profile events fan out across all namespaces
 //   - AIMProfileCache -> downstream cache state
@@ -109,6 +121,11 @@ func RegisterWatches(ctx context.Context, mgr manager.Manager, b *builder.Builde
 	}
 
 	return b.
+		Watches(
+			&corev1.Node{},
+			handler.EnqueueRequestsFromMapFunc(findServicesForResourceNodeChange(c)),
+			builder.WithPredicates(serviceResourceNodeChangePredicate()),
+		).
 		Watches(
 			&aimv1alpha1.AIMArtifact{},
 			handler.EnqueueRequestsFromMapFunc(findServicesForAdapterArtifact(c)),
@@ -186,6 +203,13 @@ func registerServiceIndexes(ctx context.Context, mgr manager.Manager) error {
 			}
 			return []string{*svc.Spec.Model.Image}
 		}},
+		{ServiceResourceNodeMatchIndex, func(obj client.Object) []string {
+			svc, ok := obj.(*aimv1alpha1.AIMService)
+			if !ok || svc.Spec.Resources == nil || !usesProfilePipeline(svc) {
+				return nil
+			}
+			return []string{serviceResourceNodeMatchIndexValue}
+		}},
 		// Index services by the names of the adapter artifacts they reference so
 		// an adapter artifact event fans out to its consuming services.
 		{aimv1alpha1.AIMServiceAdapterArtifactIndexKey, func(obj client.Object) []string {
@@ -209,6 +233,90 @@ func registerServiceIndexes(ctx context.Context, mgr manager.Manager) error {
 		}
 	}
 	return nil
+}
+
+// usesProfilePipeline mirrors the top-level AIMService dispatch rule without
+// importing internal/controller (which would introduce a package cycle).
+func usesProfilePipeline(service *aimv1alpha1.AIMService) bool {
+	if override, ok := service.GetAnnotations()[constants.AnnotationReconcilerPipeline]; ok {
+		switch override {
+		case constants.ReconcilerPipelineProfile:
+			return true
+		case constants.ReconcilerPipelineTemplate:
+			return false
+		}
+	}
+	return service.Spec.Profile != nil
+}
+
+// serviceResourceNodeChangePredicate fires only when data consumed by
+// aimprofile.MatchNodes changes: accelerator/partition labels or allocatable
+// resources. Create/delete events always matter because they change the set of
+// candidate nodes. Routine Node heartbeat and unrelated metadata updates are
+// ignored.
+func serviceResourceNodeChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			_, ok := e.Object.(*corev1.Node)
+			return ok
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			_, ok := e.Object.(*corev1.Node)
+			return ok
+		},
+		GenericFunc: func(_ event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldNode, oldOK := e.ObjectOld.(*corev1.Node)
+			newNode, newOK := e.ObjectNew.(*corev1.Node)
+			if !oldOK || !newOK {
+				return false
+			}
+			return acceleratorNodeLabelsChanged(oldNode.Labels, newNode.Labels) ||
+				!equality.Semantic.DeepEqual(oldNode.Status.Allocatable, newNode.Status.Allocatable)
+		},
+	}
+}
+
+func acceleratorNodeLabelsChanged(oldLabels, newLabels map[string]string) bool {
+	for key, oldValue := range oldLabels {
+		if !strings.HasPrefix(key, aimprofile.AcceleratorLabelPrefix) {
+			continue
+		}
+		if newValue, exists := newLabels[key]; !exists || newValue != oldValue {
+			return true
+		}
+	}
+	for key, newValue := range newLabels {
+		if !strings.HasPrefix(key, aimprofile.AcceleratorLabelPrefix) {
+			continue
+		}
+		if oldValue, exists := oldLabels[key]; !exists || oldValue != newValue {
+			return true
+		}
+	}
+	return false
+}
+
+// findServicesForResourceNodeChange maps a cluster-scoped Node event to every
+// profile-pipeline service carrying spec.resources. The field index keeps the
+// fan-out proportional to services that actually perform service-specific node
+// matching rather than to every AIMService in the cluster.
+func findServicesForResourceNodeChange(c client.Client) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		if _, ok := obj.(*corev1.Node); !ok {
+			return nil
+		}
+		requests := map[types.NamespacedName]struct{}{}
+		collectServicesByField(
+			ctx,
+			c,
+			requests,
+			ServiceResourceNodeMatchIndex,
+			serviceResourceNodeMatchIndexValue,
+			"",
+		)
+		return requestsFromSet(requests)
+	}
 }
 
 // profileRelevantChangePredicate fires on events that can change the ISVC the

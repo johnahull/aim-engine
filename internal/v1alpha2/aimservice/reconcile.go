@@ -100,6 +100,12 @@ type ServiceFetchResult struct {
 
 	mergedRuntimeConfig controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon]
 
+	// resourceMatchNodes are fetched only when spec.resources overrides an
+	// accelerator-backed profile. They let the service evaluate its effective
+	// footprint independently of the base profile's default-resource readiness.
+	resourceMatchNodes   []corev1.Node
+	resourceMatchNodeErr error
+
 	// adapterDeps holds the per-adapter artifacts, staging Jobs, and resolved
 	// base-model artifact for spec.adapters. Populated only when the service
 	// declares adapters. See internal/aimadapter.
@@ -127,6 +133,14 @@ type ServiceObservation struct {
 
 	hasModelSources   bool
 	profileCacheReady bool
+
+	// effectiveResources is the profile's resolved resource block with
+	// AIMService.spec.resources merged on top. serviceResourceMatch evaluates
+	// that exact footprint against nodes, allowing a smaller service override
+	// to rescue a base profile whose generated defaults do not fit.
+	effectiveResources            *corev1.ResourceRequirements
+	serviceResourceMatch          aimprofile.NodeMatchResult
+	serviceResourceMatchEvaluated bool
 
 	// Pre-computed names and profile artefacts, produced once in ComposeState
 	// so the InferenceService name and the profile YAML filename wired into the
@@ -375,10 +389,27 @@ func (obs ServiceObservation) getProfileHealth() controllerutils.ComponentHealth
 			)
 			return health
 		}
-		if obs.resolvedProfileStatus != nil && obs.resolvedProfileStatus.Status == constants.AIMStatusReady {
+		if obs.profileReadyForService() {
 			health.State = constants.AIMStatusReady
 			health.Reason = aimv1alpha1.AIMServiceReasonProfileResolved
-			health.Message = fmt.Sprintf("Profile %s is ready", obs.profileName)
+			if obs.serviceResourceMatchEvaluated {
+				health.Message = fmt.Sprintf("Profile %s matches nodes with the service resource override", obs.profileName)
+			} else {
+				health.Message = fmt.Sprintf("Profile %s is ready", obs.profileName)
+			}
+			return health
+		}
+		if obs.serviceResourceMatchEvaluated && obs.serviceResourceMatch.MatchingNodes == 0 {
+			health.State = constants.AIMStatusNotAvailable
+			health.Reason = aimv1alpha1.AIMServiceReasonProfileNotReady
+			health.Message = fmt.Sprintf("No cluster nodes match profile %s with the service resource override", obs.profileName)
+			return health
+		}
+		if obs.resourceMatchNodeErr != nil {
+			health.State = constants.AIMStatusFailed
+			health.Reason = "NodeListFailed"
+			health.Message = "Failed to list cluster nodes for service resource matching"
+			health.Errors = []error{obs.resourceMatchNodeErr}
 			return health
 		}
 		health.State = constants.AIMStatusProgressing
@@ -490,12 +521,14 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 	// onto the overlay) and the AIMProfileCache feeding the runtime.
 	seedObs := ServiceObservation{ServiceFetchResult: result}
 	seedObs.resolveFetchedProfile()
+	resourceMatchSpec := seedObs.resolvedProfileSpec
 	if seedObs.resolvedProfileSpec != nil {
 		cacheProfileName := seedObs.profileName
 		cacheProfileScope := seedObs.profileScope
 		if hasProfileOverrides(service.Spec.ProfileOverrides) {
-			overlay, _, err := buildServiceOverlayProfile(service, seedObs)
+			overlay, overlaySpec, err := buildServiceOverlayProfile(service, seedObs)
 			if err == nil {
+				resourceMatchSpec = &overlaySpec
 				cacheProfileName = overlay.Name
 				// Overlays are always namespace-scoped AIMProfiles in
 				// the service's own namespace, regardless of the
@@ -508,6 +541,20 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 			}
 		}
 		result.profileCache = fetchProfileCache(ctx, c, service, cacheProfileName, cacheProfileScope)
+	}
+
+	// Profile status reflects the profile's own defaults, but service resources
+	// are a documented per-key overlay. Fetch nodes here so ComposeState can
+	// evaluate the final service footprint and avoid letting an oversized base
+	// default block a smaller, valid service.
+	if service.Spec.Resources != nil && resourceMatchSpec != nil &&
+		aimprofile.HasProfileAcceleratorRequirement(*resourceMatchSpec) {
+		var nodeList corev1.NodeList
+		if err := c.List(ctx, &nodeList); err != nil {
+			result.resourceMatchNodeErr = err
+		} else {
+			result.resourceMatchNodes = nodeList.Items
+		}
 	}
 
 	// Fetch merged runtime config. Needed for routing (HTTPRoute) and label
@@ -585,6 +632,25 @@ func (r *ProfileServiceReconciler) ComposeState(
 		obs.hasModelSources = len(obs.resolvedProfileSpec.ModelSources) > 0
 	}
 
+	if obs.resolvedProfileSpec != nil && fetch.service.Spec.Resources != nil {
+		obs.effectiveResources = effectiveResourcesForService(
+			fetch.service,
+			obs.resolvedProfileSpec,
+			obs.resolvedProfileStatus,
+		)
+		if err := validateResourceRequirements(obs.effectiveResources); err != nil {
+			obs.configErr = fmt.Errorf("invalid service resources: %w", err)
+		} else if aimprofile.HasProfileAcceleratorRequirement(*obs.resolvedProfileSpec) &&
+			fetch.resourceMatchNodeErr == nil {
+			obs.serviceResourceMatch = aimprofile.MatchProfileNodes(
+				fetch.resourceMatchNodes,
+				*obs.resolvedProfileSpec,
+				obs.effectiveResources,
+			)
+			obs.serviceResourceMatchEvaluated = true
+		}
+	}
+
 	if obs.hasModelSources && fetch.profileCache.OK() && fetch.profileCache.Value != nil {
 		obs.profileCacheReady = fetch.profileCache.Value.Status.Status == constants.AIMStatusReady
 	}
@@ -623,6 +689,24 @@ func (obs *ServiceObservation) isDeployable() bool {
 		return true
 	}
 	return aimprofile.IsProfileDeployable(*obs.resolvedProfileSpec)
+}
+
+// profileReadyForService reports whether the resolved profile can back this
+// service. Without a service resource override, the profile controller remains
+// authoritative. With one, the service's fully merged footprint is authoritative
+// for node capacity, so a matching override can rescue a NotAvailable profile.
+func (obs *ServiceObservation) profileReadyForService() bool {
+	if obs.resolvedProfileSpec == nil || obs.resolvedProfileStatus == nil {
+		return false
+	}
+	if obs.service != nil && obs.service.Spec.Resources != nil &&
+		aimprofile.HasProfileAcceleratorRequirement(*obs.resolvedProfileSpec) {
+		return (obs.resolvedProfileStatus.Status == constants.AIMStatusReady ||
+			obs.resolvedProfileStatus.Status == constants.AIMStatusNotAvailable) &&
+			obs.serviceResourceMatchEvaluated &&
+			obs.serviceResourceMatch.MatchingNodes > 0
+	}
+	return obs.resolvedProfileStatus.Status == constants.AIMStatusReady
 }
 
 func (obs *ServiceObservation) resolveFetchedProfile() {
@@ -747,7 +831,7 @@ func (r *ProfileServiceReconciler) PlanResources(
 		planResult.Apply(obs.desiredOverlayProfile)
 	}
 
-	if obs.resolvedProfileStatus == nil || obs.resolvedProfileStatus.Status != constants.AIMStatusReady {
+	if !obs.profileReadyForService() {
 		logger.V(1).Info("Profile not ready, skipping resource planning", "profile", obs.profileName)
 		return planResult
 	}
@@ -919,8 +1003,7 @@ func (r *ProfileServiceReconciler) DecorateStatus(
 		podItemCount(obs.inferenceServicePods),
 	)
 
-	if obs.profileName != "" && obs.resolvedProfileStatus != nil &&
-		obs.resolvedProfileStatus.Status == constants.AIMStatusReady {
+	if obs.profileName != "" && obs.profileReadyForService() {
 		status.ResolvedProfile = &aimv1alpha1.AIMResolvedReference{
 			Name:  obs.profileName,
 			Scope: obs.profileScope,

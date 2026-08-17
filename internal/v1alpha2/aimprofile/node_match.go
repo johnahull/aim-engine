@@ -105,10 +105,35 @@ func ResolveResources(
 	acceleratorModel string,
 	engineEnv map[string]string,
 ) *corev1.ResourceRequirements {
+	return ResolveResourcesForPartition(
+		accelType,
+		accelCount,
+		resources,
+		acceleratorModel,
+		engineEnv,
+		PartitioningModeUnpartitioned,
+	)
+}
+
+// ResolveResourcesForPartition is ResolveResources with partition-aware GPU
+// host defaults under the legacy empty-vendor contract. AcceleratorCount
+// remains the number of schedulable device units requested. For a recognized
+// AMD compute partition scheme, host CPU and memory defaults are divided by
+// the number of slices per physical GPU. Generic "partitioned" and unknown
+// schemes omit host defaults because their slice geometry cannot be inferred
+// safely.
+func ResolveResourcesForPartition(
+	accelType aimv1alpha1.AcceleratorType,
+	accelCount int32,
+	resources *corev1.ResourceRequirements,
+	acceleratorModel string,
+	engineEnv map[string]string,
+	partitioningMode string,
+) *corev1.ResourceRequirements {
 	return resolveResources(
 		accelType,
 		"",
-		"",
+		partitioningMode,
 		accelCount,
 		resources,
 		acceleratorModel,
@@ -172,8 +197,16 @@ func resolveResources(
 	}
 
 	if derivedName != "" {
-		if _, exists := resolved.Requests[derivedName]; !exists {
-			resolved.Requests[derivedName] = derivedQty
+		requestQty, requestExists := resolved.Requests[derivedName]
+		limitQty, limitExists := resolved.Limits[derivedName]
+		if !requestExists {
+			requestQty = derivedQty
+			if limitExists {
+				if accelType == aimv1alpha1.AcceleratorTypeGPU || limitQty.Cmp(requestQty) < 0 {
+					requestQty = limitQty.DeepCopy()
+				}
+			}
+			resolved.Requests[derivedName] = requestQty
 		}
 		// Mirror requests into limits for both GPU and CPU accelerator types.
 		// GPU device resources are non-overcommitable (K8s enforces requests==limits).
@@ -183,14 +216,14 @@ func resolveResources(
 			if resolved.Limits == nil {
 				resolved.Limits = make(corev1.ResourceList)
 			}
-			if _, exists := resolved.Limits[derivedName]; !exists {
-				resolved.Limits[derivedName] = derivedQty
+			if !limitExists {
+				resolved.Limits[derivedName] = requestQty.DeepCopy()
 			}
 		}
 	}
 
 	if accelType == aimv1alpha1.AcceleratorTypeGPU && accelCount > 0 {
-		applyDefaultGPUResources(resolved, int64(accelCount))
+		applyDefaultGPUResources(resolved, int64(accelCount), partitioningMode)
 	}
 
 	// EPYC CPU profiles: derive memory from VLLM_CPU_KVCACHE_SPACE to enable
@@ -213,33 +246,100 @@ func resolveResources(
 
 // applyDefaultGPUResources fills host CPU and memory defaults for GPU profiles.
 // Existing entries are preserved so profile and service overrides remain
-// authoritative per resource key. CPU intentionally has no default limit.
-func applyDefaultGPUResources(resources *corev1.ResourceRequirements, gpuCount int64) {
+// authoritative per resource key. A generated request never exceeds an
+// explicit limit, and a generated memory limit is never below an explicit
+// request. CPU intentionally has no generated default limit.
+func applyDefaultGPUResources(resources *corev1.ResourceRequirements, acceleratorCount int64, partitioningMode string) {
+	slicesPerGPU := gpuSlicesPerPhysicalGPU(partitioningMode)
+	if slicesPerGPU == 0 {
+		return
+	}
+
 	if resources.Requests == nil {
 		resources.Requests = make(corev1.ResourceList)
 	}
 	if _, exists := resources.Requests[corev1.ResourceCPU]; !exists {
-		resources.Requests[corev1.ResourceCPU] = *resource.NewQuantity(
-			gpuCount*constants.DefaultCPURequestPerGPU,
+		defaultCPU := resource.NewMilliQuantity(
+			divideRoundUp(acceleratorCount*constants.DefaultCPURequestPerGPU*1000, slicesPerGPU),
 			resource.DecimalSI,
+		)
+		resources.Requests[corev1.ResourceCPU] = quantityAtMostExplicitLimit(
+			*defaultCPU,
+			resources.Limits,
+			corev1.ResourceCPU,
 		)
 	}
 	if _, exists := resources.Requests[corev1.ResourceMemory]; !exists {
-		resources.Requests[corev1.ResourceMemory] = resource.MustParse(fmt.Sprintf(
+		defaultMemory := resource.MustParse(fmt.Sprintf(
 			"%dGi",
-			gpuCount*constants.DefaultMemoryRequestGiPerGPU,
+			acceleratorCount*constants.DefaultMemoryRequestGiPerGPU/slicesPerGPU,
 		))
+		resources.Requests[corev1.ResourceMemory] = quantityAtMostExplicitLimit(
+			defaultMemory,
+			resources.Limits,
+			corev1.ResourceMemory,
+		)
 	}
 
 	if resources.Limits == nil {
 		resources.Limits = make(corev1.ResourceList)
 	}
 	if _, exists := resources.Limits[corev1.ResourceMemory]; !exists {
-		resources.Limits[corev1.ResourceMemory] = resource.MustParse(fmt.Sprintf(
+		defaultMemoryLimit := resource.MustParse(fmt.Sprintf(
 			"%dGi",
-			gpuCount*constants.DefaultMemoryLimitGiPerGPU,
+			acceleratorCount*constants.DefaultMemoryLimitGiPerGPU/slicesPerGPU,
 		))
+		if request, exists := resources.Requests[corev1.ResourceMemory]; exists && request.Cmp(defaultMemoryLimit) > 0 {
+			defaultMemoryLimit = request.DeepCopy()
+		}
+		resources.Limits[corev1.ResourceMemory] = defaultMemoryLimit
 	}
+}
+
+// gpuSlicesPerPhysicalGPU returns the number of logical accelerator units
+// exposed by one physical GPU for a recognized AMD compute partition mode.
+// The memory mode does not change the logical-device count. Zero means the
+// geometry is not known well enough to derive host defaults safely.
+func gpuSlicesPerPhysicalGPU(partitioningMode string) int64 {
+	mode := strings.ToUpper(strings.TrimSpace(partitioningMode))
+	switch mode {
+	case "", strings.ToUpper(PartitioningModeUnpartitioned):
+		return 1
+	case strings.ToUpper(PartitioningModePartitioned):
+		return 0
+	}
+
+	computeMode, _, hasMemoryMode := strings.Cut(mode, "-")
+	if !hasMemoryMode {
+		return 0
+	}
+	switch computeMode {
+	case "SPX":
+		return 1
+	case "DPX":
+		return 2
+	case "QPX":
+		return 4
+	case "CPX":
+		return 8
+	default:
+		return 0
+	}
+}
+
+func quantityAtMostExplicitLimit(
+	defaultQty resource.Quantity,
+	limits corev1.ResourceList,
+	name corev1.ResourceName,
+) resource.Quantity {
+	if limit, exists := limits[name]; exists && limit.Cmp(defaultQty) < 0 {
+		return limit.DeepCopy()
+	}
+	return defaultQty
+}
+
+func divideRoundUp(value, divisor int64) int64 {
+	return (value + divisor - 1) / divisor
 }
 
 const defaultEPYCMemoryGi int64 = 120

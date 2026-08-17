@@ -225,23 +225,21 @@ See [Model Caching](caching.md) for the full hierarchy (AIMProfileCache → AIMA
 | `replicas` | Fixed replica count. Default `1`. |
 | `minReplicas` / `maxReplicas` | Enables KEDA-driven autoscaling between the bounds. |
 | `autoScaling` | Custom metric configuration (typically vLLM OTEL metrics). See [Scaling and Autoscaling](../guides/scaling-and-autoscaling.md). |
-| `resources` | Optional replacement for the predictor model container's resources. When set, restate every required request/limit, including accelerator resources such as `amd.com/gpu`; omitted accelerator entries are not inherited from the runtime profile. |
+| `resources` | Optional per-key override for container resources. Fully merged on top of the resolved profile's `status.resources`; the merged footprint is used for node matching and can make a service deployable even when the profile's larger defaults are unavailable. |
 | `imagePullSecrets` | Service-level secrets, merged with the profile's. |
 | `serviceAccountName` | Pod service account for the inference workload. |
 | `priorityClassName` | Pod priority class. |
 
-For example, a one-GPU service that overrides CPU or memory must retain the GPU
-request and limit:
+For example, a one-GPU service can override CPU and memory while inheriting the
+profile's accelerator request and limit:
 
 ```yaml
 spec:
   resources:
     requests:
-      amd.com/gpu: "1"
       cpu: "8"
       memory: 64Gi
     limits:
-      amd.com/gpu: "1"
       cpu: "16"
       memory: 128Gi
 ```

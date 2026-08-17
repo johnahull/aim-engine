@@ -602,7 +602,7 @@ func TestResolveResources(t *testing.T) {
 			wantGPU:         "1",
 			wantCPU:         "8",
 			wantMemory:      "64Gi",
-			wantMemoryLimit: "48Gi",
+			wantMemoryLimit: "64Gi",
 		},
 		{
 			name:       "explicit GPU memory limit preserves override",
@@ -869,6 +869,148 @@ func TestMatchProfileNodes_ReportsResourceAndLabelMismatches(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result.NodeMismatches[0].Reasons, want) {
 		t.Fatalf("Reasons = %#v, want %#v", result.NodeMismatches[0].Reasons, want)
+	}
+}
+
+func TestResolveResources_generatedValuesRespectExplicitOppositeSide(t *testing.T) {
+	tests := []struct {
+		name      string
+		accelType aimv1alpha1.AcceleratorType
+		count     int32
+		resources *corev1.ResourceRequirements
+		resource  corev1.ResourceName
+		wantReq   string
+		wantLimit string
+	}{
+		{
+			name:      "explicit GPU request is mirrored into generated limit",
+			accelType: aimv1alpha1.AcceleratorTypeGPU,
+			count:     4,
+			resources: &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceName("amd.com/gpu"): resource.MustParse("2")},
+			},
+			resource:  corev1.ResourceName("amd.com/gpu"),
+			wantReq:   "2",
+			wantLimit: "2",
+		},
+		{
+			name:      "explicit CPU limit caps generated CPU request",
+			accelType: aimv1alpha1.AcceleratorTypeGPU,
+			count:     1,
+			resources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+			},
+			resource:  corev1.ResourceCPU,
+			wantReq:   "2",
+			wantLimit: "2",
+		},
+		{
+			name:      "explicit memory request raises generated memory limit",
+			accelType: aimv1alpha1.AcceleratorTypeGPU,
+			count:     1,
+			resources: &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Gi")},
+			},
+			resource:  corev1.ResourceMemory,
+			wantReq:   "64Gi",
+			wantLimit: "64Gi",
+		},
+		{
+			name:      "explicit memory limit caps generated memory request",
+			accelType: aimv1alpha1.AcceleratorTypeGPU,
+			count:     1,
+			resources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("16Gi")},
+			},
+			resource:  corev1.ResourceMemory,
+			wantReq:   "16Gi",
+			wantLimit: "16Gi",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveResources(tt.accelType, tt.count, tt.resources, "", nil)
+			if got == nil {
+				t.Fatal("ResolveResources returned nil")
+			}
+			if request := got.Requests[tt.resource]; request.String() != tt.wantReq {
+				t.Errorf("request = %s, want %s", request.String(), tt.wantReq)
+			}
+			if limit := got.Limits[tt.resource]; limit.String() != tt.wantLimit {
+				t.Errorf("limit = %s, want %s", limit.String(), tt.wantLimit)
+			}
+		})
+	}
+}
+
+func TestResolveResourcesForPartition_scalesGPUHostDefaults(t *testing.T) {
+	tests := []struct {
+		name       string
+		count      int32
+		mode       string
+		wantCPU    string
+		wantMemory string
+		wantLimit  string
+	}{
+		{
+			name:       "eight CPX slices equal one whole GPU of host defaults",
+			count:      8,
+			mode:       "CPX-NPS4",
+			wantCPU:    "4",
+			wantMemory: "32Gi",
+			wantLimit:  "48Gi",
+		},
+		{
+			name:       "one CPX slice receives one eighth of host defaults",
+			count:      1,
+			mode:       "CPX-NPS4",
+			wantCPU:    "500m",
+			wantMemory: "4Gi",
+			wantLimit:  "6Gi",
+		},
+		{
+			name:  "generic partitioned mode omits geometry-dependent host defaults",
+			count: 1,
+			mode:  "partitioned",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveResourcesForPartition(
+				aimv1alpha1.AcceleratorTypeGPU,
+				tt.count,
+				nil,
+				"MI300X",
+				nil,
+				tt.mode,
+			)
+			if got == nil {
+				t.Fatal("ResolveResourcesForPartition returned nil")
+			}
+			if tt.wantCPU == "" {
+				if qty, exists := got.Requests[corev1.ResourceCPU]; exists {
+					t.Errorf("unexpected CPU default: %s", qty.String())
+				}
+				if qty, exists := got.Requests[corev1.ResourceMemory]; exists {
+					t.Errorf("unexpected memory request default: %s", qty.String())
+				}
+				if qty, exists := got.Limits[corev1.ResourceMemory]; exists {
+					t.Errorf("unexpected memory limit default: %s", qty.String())
+				}
+				return
+			}
+			if cpu := got.Requests[corev1.ResourceCPU]; cpu.String() != tt.wantCPU {
+				t.Errorf("cpu = %s, want %s", cpu.String(), tt.wantCPU)
+			}
+			if memory := got.Requests[corev1.ResourceMemory]; memory.String() != tt.wantMemory {
+				t.Errorf("memory request = %s, want %s", memory.String(), tt.wantMemory)
+			}
+			if limit := got.Limits[corev1.ResourceMemory]; limit.String() != tt.wantLimit {
+				t.Errorf("memory limit = %s, want %s", limit.String(), tt.wantLimit)
+			}
+		})
 	}
 }
 
