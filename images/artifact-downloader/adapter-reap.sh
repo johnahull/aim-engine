@@ -23,9 +23,10 @@
 
 # adapter-reap.sh reclaims per-service adapter subtrees on a shared adapter disk
 # whose owning AIMService is no longer live, plus crash-orphaned .staging/.aside
-# entries. Adapter subtrees are not Kubernetes objects, so owner-ref GC cannot
-# reclaim them; the aim-engine controller periodically launches this reaper Job
-# (the sole RW writer alongside staging Jobs).
+# entries and atomically-unloaded bytes under .unload-tmp. Adapter subtrees are
+# not Kubernetes objects, so owner-ref GC cannot reclaim them; the aim-engine
+# controller periodically launches this reaper Job (the sole RW writer alongside
+# staging and subtree-sync Jobs).
 #
 # Contract (env):
 #   ADAPTER_PVC_ROOT  Mount path of the adapter-disk PVC (mounted RW at its root).
@@ -75,6 +76,17 @@ is_kept() {
     return 1
 }
 
+# Cleanup is retryable garbage collection. A failed removal must not stop later
+# entries from being attempted or fail the Job; the next periodic sweep retries.
+remove_best_effort() {
+    description="$1"
+    path="$2"
+    echo "$description"
+    if ! rm -rf "$path"; then
+        echo "Warning: failed to remove ${path}; a later reaper will retry" >&2
+    fi
+}
+
 echo "Reaping adapter disk at ${ADAPTER_PVC_ROOT}; keep=[${KEEP}]"
 
 # Reap live-tree service subtrees: any top-level dir that is not a control dir
@@ -84,7 +96,7 @@ for dir in "$ADAPTER_PVC_ROOT"/*; do
     [ -d "$dir" ] || continue
     base=$(basename "$dir")
     case "$base" in
-        .staging|.aside|lost+found) continue ;;
+        .staging|.aside|.unload-tmp|lost+found) continue ;;
     esac
     if is_kept "$base"; then
         continue
@@ -93,8 +105,7 @@ for dir in "$ADAPTER_PVC_ROOT"/*; do
         echo "Skipping recently-modified subtree (grace guard): ${base}"
         continue
     fi
-    echo "Reaping stale service subtree: ${base}"
-    rm -rf "$dir"
+    remove_best_effort "Reaping stale service subtree: ${base}" "$dir"
 done
 
 # Reap crash-orphaned staging/aside subtrees for dead services.
@@ -111,9 +122,28 @@ for ctrl in .staging .aside; do
             echo "Skipping recently-modified ${ctrl} subtree (grace guard): ${base}"
             continue
         fi
-        echo "Reaping orphaned ${ctrl} subtree: ${base}"
-        rm -rf "$dir"
+        remove_best_effort "Reaping orphaned ${ctrl} subtree: ${base}" "$dir"
     done
 done
+
+# Reap atomically-unloaded adapter slots last. Unlike .staging/.aside, every
+# entry here is garbage even when its service is still live. Apply the age guard
+# per slot so a stale reaper snapshot cannot race a subtree-sync move.
+unload_root="${ADAPTER_PVC_ROOT}/.unload-tmp"
+if [ -d "$unload_root" ]; then
+    for service_dir in "$unload_root"/*; do
+        [ -d "$service_dir" ] || continue
+        for slot in "$service_dir"/*; do
+            [ -e "$slot" ] || continue
+            if is_too_young "$slot"; then
+                echo "Skipping recently-unloaded adapter (grace guard): ${slot}"
+                continue
+            fi
+            remove_best_effort "Reaping unloaded adapter bytes: ${slot}" "$slot"
+        done
+        rmdir "$service_dir" 2>/dev/null || true
+    done
+    rmdir "$unload_root" 2>/dev/null || true
+fi
 
 echo "Reap complete"

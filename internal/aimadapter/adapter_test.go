@@ -60,6 +60,22 @@ func succeededJob(name string) *batchv1.Job {
 	}
 }
 
+func failedJob(name, reason, message string) *batchv1.Job {
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{
+					Type:    batchv1.JobFailed,
+					Status:  corev1.ConditionTrue,
+					Reason:  reason,
+					Message: message,
+				},
+			},
+		},
+	}
+}
+
 // withSyncedSubtree marks the per-service subtree-sync Job as succeeded so
 // Compose reports SubtreeReady (the ISVC mount gate).
 func withSyncedSubtree(deps Dependencies, svc *aimv1alpha1.AIMService) Dependencies {
@@ -590,6 +606,56 @@ func TestNotMountableWithoutSubtree(t *testing.T) {
 	}
 	if st.Adapters[0].State != aimv1alpha1.AdapterStateDownloaded {
 		t.Errorf("adapter state = %q, want Downloaded", st.Adapters[0].State)
+	}
+}
+
+func TestComposeFailedStagingJob(t *testing.T) {
+	svc := serviceWithAdapters("lora-a")
+	deps := withSyncedSubtree(
+		depsWith(modelParent(testAdapterPVC), map[string]*aimv1alpha1.AIMArtifact{
+			"lora-a": adapterArtifact("lora-a", "base"),
+		}),
+		svc,
+	)
+	deps.StagingJobs["lora-a"] = controllerutils.FetchResult[*batchv1.Job]{
+		Value: failedJob(
+			StagingJobName(svc, "lora-a", testAdapterPVC, testAdapterPVCUID),
+			"BackoffLimitExceeded",
+			"Job has reached the specified backoff limit",
+		),
+	}
+
+	st := Compose(svc, deps)
+	if len(st.Adapters) != 1 {
+		t.Fatalf("expected one adapter observation, got %+v", st.Adapters)
+	}
+	adapter := st.Adapters[0]
+	if adapter.State != aimv1alpha1.AdapterStateFailed {
+		t.Errorf("adapter state = %q, want Failed", adapter.State)
+	}
+	const wantError = "BackoffLimitExceeded: Job has reached the specified backoff limit"
+	if adapter.LastError != wantError {
+		t.Errorf("adapter lastError = %q, want %q", adapter.LastError, wantError)
+	}
+	if st.AllStaged || st.Ready {
+		t.Errorf("failed static adapter must not be staged or Ready, got %+v", st)
+	}
+
+	status := &aimv1alpha1.AIMServiceStatus{}
+	DecorateStatus(status, st)
+	if len(status.Adapters) != 1 ||
+		status.Adapters[0].State != aimv1alpha1.AdapterStateFailed ||
+		status.Adapters[0].LastError != wantError {
+		t.Errorf("failed adapter status not propagated: %+v", status.Adapters)
+	}
+
+	var plan controllerutils.PlanResult
+	Plan(&plan, svc, deps, st, nil)
+	for _, obj := range plan.GetToApply() {
+		if job, ok := obj.(*batchv1.Job); ok &&
+			job.Name == StagingJobName(svc, "lora-a", testAdapterPVC, testAdapterPVCUID) {
+			t.Error("failed staging Job must remain terminal until retry policy is explicitly defined")
+		}
 	}
 }
 

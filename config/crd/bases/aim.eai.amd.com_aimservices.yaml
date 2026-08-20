@@ -2377,6 +2377,7 @@ spec:
                       - Pending
                       - Downloading
                       - Downloaded
+                      - Failed
                       - Deleting
                       - Loaded
                       - LoadRejected
@@ -5081,6 +5082,7 @@ spec:
                       - Pending
                       - Downloading
                       - Downloaded
+                      - Failed
                       - Deleting
                       - Loaded
                       - LoadRejected

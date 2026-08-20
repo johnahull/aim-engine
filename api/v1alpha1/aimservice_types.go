@@ -138,7 +138,7 @@ type AIMServiceAdapterReference struct {
 // subtree. The controller tracks staging and removal directly; the engine-reported
 // states (Loaded/LoadRejected) are reserved until the inference container exposes a
 // per-adapter load-status surface.
-// +kubebuilder:validation:Enum=Pending;Downloading;Downloaded;Deleting;Loaded;LoadRejected
+// +kubebuilder:validation:Enum=Pending;Downloading;Downloaded;Failed;Deleting;Loaded;LoadRejected
 type AIMAdapterState string
 
 const (
@@ -148,6 +148,9 @@ const (
 	AdapterStateDownloading AIMAdapterState = "Downloading"
 	// AdapterStateDownloaded means the bytes are staged in this service's subtree.
 	AdapterStateDownloaded AIMAdapterState = "Downloaded"
+	// AdapterStateFailed means the adapter's staging Job terminated unsuccessfully.
+	// LastError carries the Job failure reason and message.
+	AdapterStateFailed AIMAdapterState = "Failed"
 	// AdapterStateDeleting means the adapter was removed from spec.adapters and its
 	// bytes are being reclaimed from the service subtree by the subtree-sync Job.
 	// The entry is dropped from status once the prune completes.

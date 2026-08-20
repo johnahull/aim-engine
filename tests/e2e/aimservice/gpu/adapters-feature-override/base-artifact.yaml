@@ -1,4 +1,4 @@
-# Pre-created Qwen3-8B model artifact with the shared RWX adapter disk used by
+# Pre-created Qwen2.5-0.5B model artifact with the shared RWX adapter disk used by
 # both the staging Job and the inference pod.
 #
 # The profile cache adopts this artifact because modelId/sourceUri match the
@@ -7,12 +7,12 @@
 apiVersion: aim.eai.amd.com/v1alpha1
 kind: AIMArtifact
 metadata:
-  name: qwen3-8b-base
+  name: qwen25-05b-base
 spec:
   type: model
-  modelId: Qwen/Qwen3-8B
-  sourceUri: hf://Qwen/Qwen3-8B
-  size: 25Gi
+  modelId: Qwen/Qwen2.5-0.5B-Instruct
+  sourceUri: hf://Qwen/Qwen2.5-0.5B-Instruct
+  size: 2Gi
   adapterDisk:
-    size: 5Gi
+    size: 1Gi
     storageClassName: longhorn

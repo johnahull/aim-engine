@@ -38,6 +38,13 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 )
 
+const blockedBackendPath = "/__aim_blocked__"
+
+var blockedExternalPaths = []string{
+	"/v1/load_lora_adapter",
+	"/v1/unload_lora_adapter",
+}
+
 // GenerateHTTPRouteName creates a deterministic name for the HTTPRoute.
 func GenerateHTTPRouteName(serviceName, namespace string) (string, error) {
 	return utils.GenerateDerivedName([]string{serviceName}, utils.WithHashSource(namespace))
@@ -245,6 +252,41 @@ func buildHTTPRoute(
 		},
 	}
 
+	// Rewrite vLLM's runtime LoRA mutation endpoints before the catch-all
+	// service-prefix rule can forward them. Exact path matches take precedence
+	// over the prefix match below, while all inference endpoints retain the
+	// existing forwarding behavior.
+	blockedRules := make([]gatewayapiv1.HTTPRouteRule, 0, len(blockedExternalPaths))
+	for _, blockedPath := range blockedExternalPaths {
+		externalPath := blockedPath
+		if path != "/" {
+			externalPath = path + blockedPath
+		}
+
+		blockedRules = append(blockedRules, gatewayapiv1.HTTPRouteRule{
+			Matches: []gatewayapiv1.HTTPRouteMatch{
+				{
+					Path: &gatewayapiv1.HTTPPathMatch{
+						Type:  ptr.To(gatewayapiv1.PathMatchExact),
+						Value: ptr.To(externalPath),
+					},
+				},
+			},
+			Filters: []gatewayapiv1.HTTPRouteFilter{
+				{
+					Type: gatewayapiv1.HTTPRouteFilterURLRewrite,
+					URLRewrite: &gatewayapiv1.HTTPURLRewriteFilter{
+						Path: &gatewayapiv1.HTTPPathModifier{
+							Type:            gatewayapiv1.FullPathHTTPPathModifier,
+							ReplaceFullPath: ptr.To(blockedBackendPath),
+						},
+					},
+				},
+			},
+			BackendRefs: []gatewayapiv1.HTTPBackendRef{backendRef},
+		})
+	}
+
 	// Build URL rewrite filter to strip the path prefix
 	// The backend expects requests at /v1/... but we match on a prefix like /namespace/service/...
 	rewriteType := gatewayapiv1.PrefixMatchHTTPPathModifier
@@ -303,7 +345,7 @@ func buildHTTPRoute(
 				ParentRefs: parentRefs,
 			},
 			Hostnames: hostnames,
-			Rules:     []gatewayapiv1.HTTPRouteRule{rule},
+			Rules:     append(blockedRules, rule),
 		},
 	}
 

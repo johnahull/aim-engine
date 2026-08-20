@@ -576,8 +576,8 @@ func TestPlanHTTPRoute(t *testing.T) {
 				if len(route.Spec.ParentRefs) != 1 {
 					t.Errorf("expected 1 parent ref, got %d", len(route.Spec.ParentRefs))
 				}
-				if len(route.Spec.Rules) != 1 {
-					t.Errorf("expected 1 rule, got %d", len(route.Spec.Rules))
+				if len(route.Spec.Rules) != len(blockedExternalPaths)+1 {
+					t.Errorf("expected %d rules, got %d", len(blockedExternalPaths)+1, len(route.Spec.Rules))
 				}
 			} else {
 				if result != nil {
@@ -585,6 +585,88 @@ func TestPlanHTTPRoute(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPlanHTTPRoute_BlocksRuntimeLoRAMutations(t *testing.T) {
+	gatewayRef := &gatewayapiv1.ParentReference{Name: "test-gateway"}
+	pathTemplate := "/{.metadata.namespace}/{.metadata.name}"
+	service := NewService("model-service").Build()
+	service.Namespace = "team"
+	runtimeConfig := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			Routing: &aimv1alpha1.AIMRuntimeRoutingConfig{
+				Enabled:      ptr.To(true),
+				GatewayRef:   gatewayRef,
+				PathTemplate: &pathTemplate,
+			},
+		},
+	}
+
+	route := buildHTTPRoute(service, gatewayRef, runtimeConfig, nil)
+	if len(route.Spec.Rules) != len(blockedExternalPaths)+1 {
+		t.Fatalf("expected %d rules, got %d", len(blockedExternalPaths)+1, len(route.Spec.Rules))
+	}
+
+	for i, blockedPath := range blockedExternalPaths {
+		rule := route.Spec.Rules[i]
+		if len(rule.Matches) != 1 || rule.Matches[0].Path == nil {
+			t.Fatalf("blocked rule %d must have one path match", i)
+		}
+
+		match := rule.Matches[0].Path
+		if match.Type == nil || *match.Type != gatewayapiv1.PathMatchExact {
+			t.Errorf("blocked rule %d must use an exact path match", i)
+		}
+		expectedPath := "/team/model-service" + blockedPath
+		if match.Value == nil || *match.Value != expectedPath {
+			t.Errorf("blocked rule %d path = %v, want %q", i, match.Value, expectedPath)
+		}
+
+		if len(rule.Filters) != 1 || rule.Filters[0].URLRewrite == nil || rule.Filters[0].URLRewrite.Path == nil {
+			t.Fatalf("blocked rule %d must have one URL rewrite path filter", i)
+		}
+		rewrite := rule.Filters[0].URLRewrite.Path
+		if rewrite.Type != gatewayapiv1.FullPathHTTPPathModifier {
+			t.Errorf("blocked rule %d rewrite type = %q, want %q", i, rewrite.Type, gatewayapiv1.FullPathHTTPPathModifier)
+		}
+		if rewrite.ReplaceFullPath == nil || *rewrite.ReplaceFullPath != blockedBackendPath {
+			t.Errorf("blocked rule %d rewrite path = %v, want %q", i, rewrite.ReplaceFullPath, blockedBackendPath)
+		}
+		if len(rule.BackendRefs) != 1 {
+			t.Errorf("blocked rule %d must retain the predictor backend", i)
+		}
+	}
+
+	catchAll := route.Spec.Rules[len(route.Spec.Rules)-1]
+	if len(catchAll.Matches) != 1 || catchAll.Matches[0].Path == nil {
+		t.Fatal("catch-all rule must have one path match")
+	}
+	if catchAll.Matches[0].Path.Type == nil || *catchAll.Matches[0].Path.Type != gatewayapiv1.PathMatchPathPrefix {
+		t.Error("catch-all rule must retain its path-prefix match")
+	}
+}
+
+func TestPlanHTTPRoute_BlocksRuntimeLoRAMutationsAtRootPrefix(t *testing.T) {
+	gatewayRef := &gatewayapiv1.ParentReference{Name: "test-gateway"}
+	pathTemplate := "/"
+	service := NewService("model-service").Build()
+	runtimeConfig := &aimv1alpha1.AIMRuntimeConfigCommon{
+		AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+			Routing: &aimv1alpha1.AIMRuntimeRoutingConfig{
+				Enabled:      ptr.To(true),
+				GatewayRef:   gatewayRef,
+				PathTemplate: &pathTemplate,
+			},
+		},
+	}
+
+	route := buildHTTPRoute(service, gatewayRef, runtimeConfig, nil)
+	for i, blockedPath := range blockedExternalPaths {
+		match := route.Spec.Rules[i].Matches[0].Path
+		if match == nil || match.Value == nil || *match.Value != blockedPath {
+			t.Errorf("blocked rule %d path = %v, want %q", i, match, blockedPath)
+		}
 	}
 }
 

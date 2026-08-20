@@ -4,16 +4,20 @@
 apiVersion: aim.eai.amd.com/v1alpha2
 kind: AIMService
 metadata:
-  name: qwen3-8b-medical-lora
+  name: qwen25-05b-lora
 spec:
   runtimeConfigName: adapters-feature-override
   profile:
-    name: qwen3-8b-no-adapters-feature
+    name: qwen25-05b-no-adapters-feature
   profileOverrides:
     features:
       - adapters
-  adapterMode: static
+  # Enable vLLM's internal load/unload handlers; the generated Gateway route
+  # must still keep those mutation APIs inaccessible to end users.
+  adapterMode: dynamic
+  adapterRuntime:
+    maxRank: 16
   adapters:
-    - name: qwen3-8b-medical-lora
+    - name: qwen25-05b-lora
       kind: AIMArtifact
   replicas: 1

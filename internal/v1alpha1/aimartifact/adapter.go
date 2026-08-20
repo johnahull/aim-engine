@@ -248,7 +248,7 @@ func listLiveAdapterServiceIDs(ctx context.Context, c client.Client, namespace s
 
 // buildAdapterReaperJob builds the periodic subtree-reclaim Job owned by the model
 // artifact. It mounts the adapter disk RW and removes subtrees of services no
-// longer present (plus crash-orphaned staging dirs).
+// longer present, crash-orphaned staging dirs, and atomically-unloaded bytes.
 func buildAdapterReaperJob(
 	mc *aimv1alpha1.AIMArtifact,
 	adapterPVC string,

@@ -78,12 +78,13 @@ verify this, so the container remains the final authority.
 
 This release ships **reference-only** adapter support: adapters are plain
 references to existing `AIMArtifact` objects, and status reflects disk-side
-staging only (`Pending` / `Downloading` / `Downloaded`). The list is editable
+staging only (`Pending` / `Downloading` / `Downloaded` / `Failed`). The list is editable
 — adding an adapter stages it and the runtime hot-loads it. Removing an entry
-is reconciled: a controller-managed subtree-sync Job prunes the removed
-adapter's directory from the service subtree (the model-artifact reaper still
-reclaims the *whole* subtree when the service is deleted). Note the in-pod
-effect of a removal depends on the image running in dynamic mode (watcher);
+is reconciled: a controller-managed subtree-sync Job atomically moves the
+removed adapter's directory out of the service subtree, then deletes it (the
+model-artifact reaper retries any leftover cleanup and still reclaims the
+*whole* subtree when the service is deleted). Note the in-pod effect of a
+removal depends on the image running in dynamic mode (watcher);
 in static mode the bytes are removed from disk but the running pod keeps the
 adapter until restart. The controller sets the `AIM_ADAPTER_*` container env
 (`AIM_ADAPTER_SOURCE`, `AIM_ADAPTER_MODE`, the `MAX_*` caps, and a dynamic-mode
@@ -163,6 +164,7 @@ service that serves adapters gets its own subtree keyed by the service UID:
     <adapter-path>/         # one directory per adapter
   .staging/                 # download scratch (PVC root, outside the pod mount)
   .aside/                   # pre-promote swap area
+  .unload-tmp/              # atomically removed adapters awaiting cleanup
 ```
 
 A per-`(service, adapter)` staging Job downloads the adapter into `.staging/`,
@@ -284,13 +286,16 @@ The InferenceService is gated until the base model is `Ready` **and** the
 per-service adapter subtree exists (the subtree-sync Job has succeeded). The
 service checks each logical adapter's `compatibleWith` list against the
 resolved base artifact's `modelId`; exact adapters are checked against the
-resolved artifact name. Compatible adapters then stage asynchronously and the
-runtime loads them as they land — downloads never hold back serving. The service exposes a single aggregate
-`Adapters` condition (rather than one condition per adapter) and per-adapter
-disk-side states under `status.adapters[]`. Once the subtree exists the
-`Adapters` condition is `Ready` even while individual adapters are still
-downloading; a configuration error is the only adapter state that blocks the
-InferenceService:
+resolved artifact name. Compatible adapters then stage asynchronously. In
+dynamic mode the runtime loads them as they land without holding back base-model
+serving; in static mode the InferenceService waits until every declared adapter
+is `Downloaded`. The service exposes a single aggregate `Adapters` condition
+(rather than one condition per adapter) and per-adapter disk-side states under
+`status.adapters[]`. Once the subtree exists the aggregate condition is `Ready`
+even if an individual adapter is still downloading or has failed. A `Failed`
+entry carries the staging Job's reason and message in `lastError`. Configuration
+errors block both modes; in static mode any adapter not yet `Downloaded` also
+blocks InferenceService creation:
 
 ```yaml
 status:
@@ -306,7 +311,7 @@ status:
 | `ParentLacksAdapterDisk` | The resolved base model has no adapter disk yet (`Progressing`). |
 | `AdapterSubtreeProvisioning` | The per-service subtree is being created; the ISVC is gated on this (`Progressing`). |
 | `AdapterConfigInvalid` | Multiple model sources, an incompatible model ID, an exact-parent mismatch, a duplicate adapter path, or a non-adapter artifact was referenced (`Failed`, blocks the ISVC). |
-| `AdaptersStaging` | The subtree is ready and serving; one or more adapters are still downloading asynchronously (`Ready`). |
+| `AdaptersStaging` | The subtree is ready but one or more adapters are not `Downloaded` (`Ready` aggregate condition). Dynamic serving continues; static ISVC creation remains gated. |
 | `AdaptersStaged` | All declared adapters are staged (`Ready`). |
 
 ## Reclaim
@@ -319,15 +324,18 @@ collection cannot reclaim them. Cleanup is two-tier, split by ownership:
   owner reference and are cascade-deleted with that concrete parent artifact.
 
 - **Per-adapter unload (service alive)** — the AIMService-owned **subtree-sync**
-  Job prunes adapter directories no longer in `spec.adapters`. It is owned by the
-  service (garbage-collected with it) and runs whenever the declared set changes.
+  Job atomically moves adapter directories no longer in `spec.adapters` to
+  `.unload-tmp`, then deletes them as its final, best-effort step. It is owned by
+  the service (garbage-collected with it) and runs whenever the declared set
+  changes.
 - **Whole-subtree reclaim (service deleted)** — the base model artifact
   periodically launches a **reaper** Job that removes subtrees whose owning
-  `AIMService` no longer exists, plus crash-orphaned `.staging` / `.aside`
-  directories. This is owned by the model artifact (not the service) precisely so
-  it can run *after* the service — and its subtree-sync Job — are gone. Deleting
-  an adapter-serving service tears down its pods immediately; its on-disk subtree
-  is reclaimed by the next sweep.
+  `AIMService` no longer exists, crash-orphaned `.staging` / `.aside`
+  directories, and old `.unload-tmp` entries even for live services. This is
+  owned by the model artifact (not the service) precisely so it can run *after*
+  the service — and its subtree-sync Job — are gone. Deleting an adapter-serving
+  service tears down its pods immediately; its on-disk subtree is reclaimed by
+  the next sweep.
 
 ## Serving contract
 

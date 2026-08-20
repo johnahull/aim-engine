@@ -1,4 +1,4 @@
-# Namespaced Qwen3-8B profile for MI300X that deliberately omits
+# Namespaced Qwen2.5-0.5B profile for MI300X that deliberately omits
 # features: [adapters].
 #
 # The service explicitly asserts the missing capability through
@@ -7,10 +7,10 @@
 apiVersion: aim.eai.amd.com/v1alpha2
 kind: AIMProfile
 metadata:
-  name: qwen3-8b-no-adapters-feature
+  name: qwen25-05b-no-adapters-feature
 spec:
-  aimId: Qwen/Qwen3-8B
-  modelId: Qwen/Qwen3-8B
+  aimId: Qwen/Qwen2.5-0.5B-Instruct
+  modelId: Qwen/Qwen2.5-0.5B-Instruct
   engine: vllm
   metric: latency
   precision: fp16
@@ -21,15 +21,15 @@ spec:
   acceleratorCount: 1
   image: amdenterpriseai/aim-base:0.13
   modelSources:
-    - modelId: Qwen/Qwen3-8B
-      sourceUri: hf://Qwen/Qwen3-8B
-      # Qwen3-8B fp16 weights are roughly 16 GiB; leave download headroom.
-      size: 25Gi
+    - modelId: Qwen/Qwen2.5-0.5B-Instruct
+      sourceUri: hf://Qwen/Qwen2.5-0.5B-Instruct
+      # Public model is about 1.0 GB including tokenizer/config files.
+      size: 2Gi
   caching:
     enabled: true
   engineArgs:
     gpu-memory-utilization: 0.9
-    max-model-len: 4096
-    max-num-batched-tokens: 2048
+    max-model-len: 2048
+    max-num-batched-tokens: 1024
     max-num-seqs: 4
     tensor-parallel-size: 1

@@ -753,7 +753,8 @@ func (r *ArtifactReconciler) PlanResources(
 
 	// Phase 5: Periodic adapter-subtree reclaim. Subtrees aren't K8s objects, so
 	// owner-ref GC can't reclaim them; a reaper Job mounts the disk RW and removes
-	// subtrees whose owning AIMService is gone, plus crash-orphaned staging dirs.
+	// subtrees whose owning AIMService is gone, crash-orphaned staging dirs, and
+	// atomically-unloaded bytes left behind by subtree-sync cleanup.
 	// TTL on the Job + RequeueAfter on the model drives the sweep cadence.
 	if mc.Spec.AdapterDisk != nil && obs.adapterPvc != nil && obs.adapterPvc.OK() {
 		// Only launch the reaper with a trustworthy keep-list. If the live-service

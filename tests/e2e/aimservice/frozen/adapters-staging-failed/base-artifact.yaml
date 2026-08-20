@@ -1,0 +1,25 @@
+# Bootstrap model artifact with the adapter disk used by the failing staging
+# Job. The base download is simulated so this regression test needs no network
+# access or accelerator.
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: adapters-staging-failed-base
+spec:
+  type: model
+  modelId: test-org/failure-base
+  sourceUri: hf://test-org/failure-base
+  size: 10Mi
+  adapterDisk:
+    size: 5Gi
+  env:
+    - name: AIM_DEBUG_SIMULATE_HF_DOWNLOAD
+      value: "true"
+    - name: AIM_DEBUG_SIMULATE_HF_DURATION
+      value: "1"
+    - name: EXPECTED_SIZE_BYTES
+      value: "102400"
+    - name: PROGRESS_INTERVAL
+      value: "3"
+    - name: STALL_TIMEOUT
+      value: "120"

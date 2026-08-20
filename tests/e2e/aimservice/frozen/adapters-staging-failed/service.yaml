@@ -1,0 +1,11 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: adapters-staging-failed-service
+spec:
+  profile:
+    name: adapters-staging-failed-profile
+  adapters:
+    - name: adapters-staging-failed-lora
+      kind: AIMArtifact
+  replicas: 1

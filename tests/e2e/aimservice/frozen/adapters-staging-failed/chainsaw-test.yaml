@@ -1,0 +1,160 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Regression: a terminally failed adapter staging Job must be reflected on the
+# AIMService as state=Failed with the Kubernetes Job failure details in
+# lastError. Downloads are simulated and every configured protocol fails, so
+# this test is deterministic and does not need a GPU or network access.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: adapters-staging-failed
+spec:
+  description: >-
+    Exhaust a simulated adapter download, then verify that the failed staging
+    Job is surfaced through status.adapters instead of remaining Downloading.
+  timeouts:
+    assert: 5m
+  steps:
+    - name: Bootstrap the base artifact and adapter disk
+      try:
+        - apply:
+            file: base-artifact.yaml
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: adapters-staging-failed-base
+              status:
+                status: Ready
+                (adapterPersistentVolumeClaim != ""): true
+
+    - name: Create the adapter that fails every simulated protocol
+      try:
+        - apply:
+            file: adapter-artifact.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: adapters-staging-failed-lora
+              status:
+                status: Ready
+
+    - name: Create the frozen adapter-capable profile
+      try:
+        - apply:
+            file: cluster-profile.yaml
+        - script:
+            content: |
+              apply-with-status.sh cluster-profile.yaml --status-only
+
+    - name: Create the service
+      try:
+        - apply:
+            file: service.yaml
+
+    - name: Wait for the service-owned profile cache
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: adapters-staging-failed-service
+
+    - name: Freeze the profile cache onto the bootstrapped base artifact
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              PC_NAME=$(kubectl get aimprofilecache -n "$NAMESPACE" \
+                -l aim.eai.amd.com/service=adapters-staging-failed-service \
+                -o jsonpath='{.items[0].metadata.name}')
+              test -n "$PC_NAME"
+
+              CACHE_PVC=$(kubectl get pvc -n "$NAMESPACE" \
+                -l aim.eai.amd.com/cache.name=adapters-staging-failed-base \
+                -o jsonpath='{.items[0].metadata.name}')
+              test -n "$CACHE_PVC"
+
+              kubectl annotate aimprofilecache "$PC_NAME" -n "$NAMESPACE" \
+                aim.eai.amd.com/reconciliation-paused=true --overwrite
+
+              kubectl patch aimprofilecache "$PC_NAME" -n "$NAMESPACE" \
+                --type=merge --subresource=status \
+                -p "{
+                  \"status\": {
+                    \"status\": \"Ready\",
+                    \"conditions\": [
+                      {\"type\": \"ProfileFound\", \"status\": \"True\", \"reason\": \"ProfileResolved\", \"message\": \"resolved\", \"lastTransitionTime\": \"2025-01-01T00:00:00Z\"},
+                      {\"type\": \"ArtifactsReady\", \"status\": \"True\", \"reason\": \"AllCachesReady\", \"message\": \"ready\", \"lastTransitionTime\": \"2025-01-01T00:00:00Z\"}
+                    ],
+                    \"artifacts\": {
+                      \"adapters-staging-failed-base\": {
+                        \"name\": \"adapters-staging-failed-base\",
+                        \"model\": \"test-org/failure-base\",
+                        \"status\": \"Ready\",
+                        \"persistentVolumeClaim\": \"$CACHE_PVC\",
+                        \"mountPoint\": \"/workspace/cache/test-org/failure-base\"
+                      }
+                    }
+                  }
+                }"
+
+    - name: Assert the adapter staging Job fails
+      try:
+        - assert:
+            timeout: 5m
+            resource:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: adapters-staging-failed-service
+                  aim.eai.amd.com/component: adapter-stage
+              status:
+                (conditions[?type == 'Failed']):
+                  - status: "True"
+      catch:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              kubectl get jobs,pods -n "$NAMESPACE" -o wide
+              kubectl logs -n "$NAMESPACE" \
+                -l aim.eai.amd.com/component=adapter-stage \
+                --all-containers --tail=200 || true
+
+    - name: Assert the service reports the adapter failure
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: adapters-staging-failed-service
+              status:
+                (adapters[?name == 'adapters-staging-failed-lora']):
+                  - state: Failed
+                    (contains(lastError || '', 'BackoffLimitExceeded')): true
+      catch:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              kubectl get aimservice -n "$NAMESPACE" \
+                adapters-staging-failed-service -o yaml
+              kubectl get jobs -n "$NAMESPACE" \
+                -l aim.eai.amd.com/component=adapter-stage -o yaml

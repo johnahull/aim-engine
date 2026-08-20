@@ -114,7 +114,7 @@ states (Loaded/LoadRejected) are reserved until the inference container exposes 
 per-adapter load-status surface.
 
 _Validation:_
-- Enum: [Pending Downloading Downloaded Deleting Loaded LoadRejected]
+- Enum: [Pending Downloading Downloaded Failed Deleting Loaded LoadRejected]
 
 _Appears in:_
 - [AIMServiceAdapterStatus](#aimserviceadapterstatus)
@@ -124,6 +124,7 @@ _Appears in:_
 | `Pending` | AdapterStatePending means the adapter is applied and waiting on a precondition.<br /> |
 | `Downloading` | AdapterStateDownloading means a staging Job is running for this adapter.<br /> |
 | `Downloaded` | AdapterStateDownloaded means the bytes are staged in this service's subtree.<br /> |
+| `Failed` | AdapterStateFailed means the adapter's staging Job terminated unsuccessfully.<br />LastError carries the Job failure reason and message.<br /> |
 | `Deleting` | AdapterStateDeleting means the adapter was removed from spec.adapters and its<br />bytes are being reclaimed from the service subtree by the subtree-sync Job.<br />The entry is dropped from status once the prune completes.<br /> |
 | `Loaded` | AdapterStateLoaded means the inference engine has the adapter in memory.<br />RESERVED: engine-reported, not yet populated by the controller.<br /> |
 | `LoadRejected` | AdapterStateLoadRejected means the bytes are present but the engine declined<br />to load the adapter. RESERVED: engine-reported, not yet populated.<br /> |
@@ -1833,7 +1834,7 @@ _Appears in:_
 | `name` _string_ | Name is the adapter reference name. |  |  |
 | `adapterPath` _string_ | AdapterPath is the on-disk directory name (mirrored from the artifact). |  | Optional: \{\} <br /> |
 | `modelId` _string_ | ModelID is the adapter's canonical model id (mirrored from the artifact). |  | Optional: \{\} <br /> |
-| `state` _[AIMAdapterState](#aimadapterstate)_ | State is the disk-side state of the adapter for this service. |  | Enum: [Pending Downloading Downloaded Deleting Loaded LoadRejected] <br />Optional: \{\} <br /> |
+| `state` _[AIMAdapterState](#aimadapterstate)_ | State is the disk-side state of the adapter for this service. |  | Enum: [Pending Downloading Downloaded Failed Deleting Loaded LoadRejected] <br />Optional: \{\} <br /> |
 | `loadedReplicas` _string_ | LoadedReplicas reports how many serving replicas have the adapter loaded,<br />as "loaded/total" (e.g. "3/3"). RESERVED: engine-reported, not yet populated. |  | Optional: \{\} <br /> |
 | `lastObserved` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta)_ | LastObserved is when the controller last observed this adapter's state. |  | Optional: \{\} <br /> |
 | `lastError` _string_ | LastError carries the most recent error for this adapter (e.g. a mirrored<br />failing reason from the underlying artifact). |  | Optional: \{\} <br /> |

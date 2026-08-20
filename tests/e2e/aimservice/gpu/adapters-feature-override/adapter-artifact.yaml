@@ -1,16 +1,16 @@
-# Public Qwen3-8B medical LoRA used by the live validation. Its Kubernetes name
-# becomes both the on-disk directory and the model id exposed by vLLM.
+# Public 4.3 MB Qwen2.5-0.5B LoRA used by the live validation. Its Kubernetes
+# name becomes both the on-disk directory and the model id exposed by vLLM.
 #
 # compatibleWith uses logical base-model compatibility rather than binding the
 # adapter's lifecycle to one concrete model AIMArtifact.
 apiVersion: aim.eai.amd.com/v1alpha1
 kind: AIMArtifact
 metadata:
-  name: qwen3-8b-medical-lora
+  name: qwen25-05b-lora
 spec:
   type: adapter
-  modelId: XinyuanWang/qwen3-8b-medical-lora
+  modelId: closestfriend/brie-qwen2.5-0.5b
   compatibleWith:
-    - Qwen/Qwen3-8B
-  sourceUri: hf://XinyuanWang/qwen3-8b-medical-lora
+    - Qwen/Qwen2.5-0.5B-Instruct
+  sourceUri: hf://closestfriend/brie-qwen2.5-0.5b
   rank: 16

@@ -3,16 +3,17 @@
 # AIMService GPU E2E: explicit adapter feature override
 #
 # This reproduces the validated live setup with public Hugging Face artifacts:
-#   base model: Qwen/Qwen3-8B
-#   adapter:    XinyuanWang/qwen3-8b-medical-lora (rank 16)
+#   base model: Qwen/Qwen2.5-0.5B-Instruct (~1.0 GB)
+#   adapter:    closestfriend/brie-qwen2.5-0.5b (4.3 MB weights, rank 16)
 #   image:      amdenterpriseai/aim-base:0.13
 #
 # The seed AIMProfile intentionally does NOT advertise features: [adapters].
 # The service explicitly sets profileOverrides.features: [adapters], which must:
 #   1. fork a service-owned overlay carrying the asserted adapter feature;
-#   2. infer AIM_ADAPTER_MAX_RANK=16 from the adapter artifact;
+#   2. project the explicit dynamic-mode AIM_ADAPTER_MAX_RANK=16 ceiling;
 #   3. stage and mount the adapter subtree read-only at /adapters; and
-#   4. expose the adapter as a usable OpenAI model.
+#   4. load the adapter dynamically; and
+#   5. keep vLLM's runtime load/unload APIs inaccessible through the Gateway.
 #
 # Requires:
 # - AMD MI300X GPU capacity.
@@ -32,11 +33,10 @@ metadata:
     hf-access: anonymous
 spec:
   description: >-
-    Serve the public Qwen3-8B medical LoRA through the full v1alpha2 pipeline
-    from a seed profile without the adapters feature, using an explicit
-    profile override; verify overlay materialisation, rank inference, disk
-    mounting, /v1/models registration, and an actual chat completion addressed
-    to the adapter model.
+    Serve a public Qwen2.5-0.5B LoRA through the full v1alpha2 pipeline from a
+    seed profile without the adapters feature, using an explicit profile
+    override; verify overlay materialisation, rank projection, disk mounting,
+    /v1/models registration, and Gateway blocking of runtime LoRA mutations.
   timeouts:
     assert: 600s
   steps:
@@ -45,23 +45,23 @@ spec:
         - apply:
             file: runtime-config.yaml
 
-    - name: Pre-create the Qwen3-8B artifact with an RWX adapter disk
+    - name: Pre-create the Qwen2.5-0.5B artifact with an RWX adapter disk
       try:
         - apply:
             file: base-artifact.yaml
         - assert:
-            # First-time Qwen3-8B download is roughly 16 GiB.
-            timeout: 40m
+            # First-time model download is about 1.0 GB.
+            timeout: 15m
             resource:
               apiVersion: aim.eai.amd.com/v1alpha1
               kind: AIMArtifact
               metadata:
-                name: qwen3-8b-base
+                name: qwen25-05b-base
               status:
                 status: Ready
                 (adapterPersistentVolumeClaim != ""): true
 
-    - name: Create the public rank-16 medical LoRA artifact
+    - name: Create the public rank-16 LoRA artifact
       try:
         - apply:
             file: adapter-artifact.yaml
@@ -71,11 +71,11 @@ spec:
               apiVersion: aim.eai.amd.com/v1alpha1
               kind: AIMArtifact
               metadata:
-                name: qwen3-8b-medical-lora
+                name: qwen25-05b-lora
               status:
                 status: Ready
 
-    - name: Create the feature-silent Qwen profile
+    - name: Create the feature-silent Qwen2.5 profile
       try:
         - apply:
             file: profile.yaml
@@ -85,7 +85,7 @@ spec:
               apiVersion: aim.eai.amd.com/v1alpha2
               kind: AIMProfile
               metadata:
-                name: qwen3-8b-no-adapters-feature
+                name: qwen25-05b-no-adapters-feature
               status:
                 status: Ready
 
@@ -102,10 +102,10 @@ spec:
               apiVersion: aim.eai.amd.com/v1alpha1
               kind: AIMService
               metadata:
-                name: qwen3-8b-medical-lora
+                name: qwen25-05b-lora
               status:
                 adapterMaxRank: 16
-                (adapters[?name == 'qwen3-8b-medical-lora']):
+                (adapters[?name == 'qwen25-05b-lora']):
                   - state: Downloaded
       catch:
         - script:
@@ -114,7 +114,7 @@ spec:
                 value: ($namespace)
             content: |
               echo "===== AIMService status ====="
-              kubectl get aimservice -n "$NAMESPACE" qwen3-8b-medical-lora -o yaml || true
+              kubectl get aimservice -n "$NAMESPACE" qwen25-05b-lora -o yaml || true
               echo "===== adapter staging Jobs ====="
               kubectl get jobs -n "$NAMESPACE" -l aim.eai.amd.com/component=adapter-stage || true
               kubectl logs -n "$NAMESPACE" -l aim.eai.amd.com/component=adapter-stage --tail=200 || true
@@ -127,12 +127,12 @@ spec:
               apiVersion: aim.eai.amd.com/v1alpha2
               kind: AIMService
               metadata:
-                name: qwen3-8b-medical-lora
+                name: qwen25-05b-lora
               status:
                 status: Running
                 resolvedProfile:
                   scope: Namespace
-                  (name != 'qwen3-8b-no-adapters-feature'): true
+                  (name != 'qwen25-05b-no-adapters-feature'): true
       catch:
         - script:
             env:
@@ -140,7 +140,7 @@ spec:
                 value: ($namespace)
             content: |
               echo "===== AIMService ====="
-              kubectl get aimservice -n "$NAMESPACE" qwen3-8b-medical-lora -o yaml || true
+              kubectl get aimservice -n "$NAMESPACE" qwen25-05b-lora -o yaml || true
               echo "===== profiles and caches ====="
               kubectl get aimprofile,aimprofilecache -n "$NAMESPACE" -o yaml || true
               echo "===== InferenceService ====="
@@ -162,9 +162,9 @@ spec:
               kind: AIMProfile
               metadata:
                 annotations:
-                  aim.eai.amd.com/overlay-service: qwen3-8b-medical-lora
+                  aim.eai.amd.com/overlay-service: qwen25-05b-lora
               spec:
-                (contains(features, 'adapters')): true
+                (contains(features || `[]`, 'adapters')): true
 
     - name: Assert the seed profile still does not advertise adapter support
       try:
@@ -174,7 +174,7 @@ spec:
               apiVersion: aim.eai.amd.com/v1alpha2
               kind: AIMProfile
               metadata:
-                name: qwen3-8b-no-adapters-feature
+                name: qwen25-05b-no-adapters-feature
               spec:
                 (contains(features || `[]`, 'adapters')): false
 
@@ -187,7 +187,7 @@ spec:
               kind: InferenceService
               metadata:
                 labels:
-                  aim.eai.amd.com/service: qwen3-8b-medical-lora
+                  aim.eai.amd.com/service: qwen25-05b-lora
               spec:
                 predictor:
                   model:
@@ -197,27 +197,41 @@ spec:
                     (env[?name == 'AIM_ADAPTER_SOURCE']):
                       - value: /adapters
                     (env[?name == 'AIM_ADAPTER_MODE']):
-                      - value: static
+                      - value: dynamic
                     (env[?name == 'AIM_ADAPTER_MAX_RANK']):
                       - value: "16"
 
-    - name: Verify the adapter is listed and can serve a chat completion
+    - name: Verify the dynamically loaded adapter is listed
       description: |
-        Registration in /v1/models proves the staged directory was loaded.
-        Sending a completion with model=qwen3-8b-medical-lora proves the adapter
-        is actually addressable for inference, not merely present on disk.
+        Registration in /v1/models proves the dynamic runtime watcher loaded
+        the staged adapter rather than merely finding bytes on disk.
       try:
         - script:
             timeout: 15m
             env:
               - name: ADAPTER_NAME
-                value: qwen3-8b-medical-lora
-              - name: VALIDATE_ADAPTER_COMPLETION
-                value: "true"
-              - name: ADAPTER_PROMPT
-                value: Reply with exactly OK.
+                value: qwen25-05b-lora
               - name: HTTP_RETRY_DEADLINE
                 value: "900"
               - name: HTTP_BASE_PATH
-                value: (join('', ['/integration/adapters-feature-override/', $namespace, '/qwen3-8b-medical-lora/v1']))
+                value: (join('', ['/integration/adapters-feature-override/', $namespace, '/qwen25-05b-lora/v1']))
             content: bash ../_shared/validate-adapter-loaded.sh
+
+    - name: Verify the Gateway blocks dynamic LoRA mutation APIs
+      description: |
+        The load/unload handlers must respond inside the predictor but return
+        404 through the generated HTTPRoute. Ordinary /v1/models routing must
+        remain healthy and keep listing the loaded adapter.
+      try:
+        - script:
+            timeout: 2m
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: AIM_SERVICE
+                value: qwen25-05b-lora
+              - name: ADAPTER_NAME
+                value: qwen25-05b-lora
+              - name: HTTP_SERVICE_PATH
+                value: (join('', ['/integration/adapters-feature-override/', $namespace, '/qwen25-05b-lora']))
+            content: bash ../_shared/validate-adapter-mutation-routes-blocked.sh

@@ -1,0 +1,23 @@
+# Logical adapter whose staging download deterministically exhausts every
+# configured protocol. This produces a real failed Kubernetes Job without
+# reaching Hugging Face.
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: adapters-staging-failed-lora
+spec:
+  type: adapter
+  compatibleWith:
+    - test-org/failure-base
+  modelId: test-org/failure-lora
+  sourceUri: hf://test-org/failure-lora
+  rank: 16
+  env:
+    - name: AIM_DOWNLOADER_PROTOCOL
+      value: XET,HTTP
+    - name: AIM_DEBUG_SIMULATE_HF_DOWNLOAD
+      value: "true"
+    - name: AIM_DEBUG_SIMULATE_HF_FAIL_PROTOCOLS
+      value: XET,HTTP
+    - name: AIM_DEBUG_SIMULATE_HF_DURATION
+      value: "1"

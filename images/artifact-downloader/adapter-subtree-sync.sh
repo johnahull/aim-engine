@@ -28,12 +28,12 @@
 #   1. Creates the per-service subtree directory if missing, so the
 #      InferenceService can mount it read-only (subPath) before any adapter has
 #      downloaded — the aim-runtime errors on a missing subPath at startup.
-#   2. Removes (unloads) any adapter directory in the subtree that is no longer
-#      in the declared keep-list, so removing an entry from spec.adapters
-#      reclaims its bytes. In dynamic mode the in-pod watcher then unloads it
-#      (the disk is ground truth). It never touches other services'
-#      subtrees or the PVC-root control dirs (.staging/.aside) — whole-subtree
-#      reclaim for deleted services is the model-artifact-owned reaper's job.
+#   2. Atomically moves (unloads) any adapter directory no longer in the
+#      declared keep-list out of the live subtree, then best-effort deletes the
+#      moved bytes. In dynamic mode the in-pod watcher observes the atomic
+#      disappearance (the disk is ground truth). Failed cleanup is left under
+#      .unload-tmp for the model-artifact-owned reaper and does not fail sync.
+#      It never touches other services' live subtrees.
 #
 # Contract (env):
 #   ADAPTER_PVC_ROOT     Mount path of the adapter-disk PVC (mounted RW at root).
@@ -47,6 +47,8 @@ set -eu
 KEEP="${KEEP_ADAPTER_PATHS:-}"
 
 SERVICE_ROOT="${ADAPTER_PVC_ROOT}/${SERVICE_ID}"
+UNLOAD_ROOT="${ADAPTER_PVC_ROOT}/.unload-tmp/${SERVICE_ID}"
+move_failed=0
 
 # is_kept <name> -> 0 when name is in the keep list.
 is_kept() {
@@ -73,8 +75,41 @@ for dir in "$SERVICE_ROOT"/*; do
     if is_kept "$base"; then
         continue
     fi
-    echo "Unloading adapter directory no longer declared: ${base}"
-    rm -rf "$dir"
+
+    # Use a unique directory on the same PVC. Moving the live directory into
+    # the slot is one rename(2), so readers see the whole adapter disappear at
+    # once rather than observing rm -rf remove its files incrementally.
+    if ! mkdir -p "$UNLOAD_ROOT"; then
+        echo "Error: cannot create unload directory for adapter '${base}'" >&2
+        move_failed=1
+        continue
+    fi
+    if ! slot=$(mktemp -d "${UNLOAD_ROOT}/${base}.XXXXXX"); then
+        echo "Error: cannot allocate unload slot for adapter '${base}'" >&2
+        move_failed=1
+        continue
+    fi
+
+    echo "Atomically unloading adapter directory no longer declared: ${base}"
+    if ! mv "$dir" "${slot}/adapter"; then
+        echo "Error: failed to move adapter '${base}' out of the live subtree" >&2
+        rmdir "$slot" 2>/dev/null || true
+        move_failed=1
+    fi
 done
+
+# Cleanup is deliberately last and best-effort. A failed rm must not undo the
+# successful live-tree reconciliation; the periodic reaper retries old entries.
+if [ -d "$UNLOAD_ROOT" ]; then
+    echo "Cleaning unloaded adapter bytes under ${UNLOAD_ROOT}"
+    if ! rm -rf "$UNLOAD_ROOT"; then
+        echo "Warning: could not remove all unloaded adapter bytes; the reaper will retry" >&2
+    fi
+fi
+
+if [ "$move_failed" -ne 0 ]; then
+    echo "Error: one or more adapters could not be moved out of the live subtree" >&2
+    exit 1
+fi
 
 echo "Subtree sync complete for ${SERVICE_ROOT}"

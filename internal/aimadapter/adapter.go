@@ -582,25 +582,54 @@ func evalAdapter(ref aimv1alpha1.AIMServiceAdapterReference, deps Dependencies, 
 	if ad.AdapterPath == "" {
 		ad.AdapterPath = artifact.Name
 	}
-	ad.State = adapterDiskState(ref.Name, artifact, deps)
+	ad.State, ad.LastError = adapterDiskState(ref.Name, artifact, deps)
 	return ad, cfgErr
 }
 
 // adapterDiskState derives an adapter's disk-side state: the artifact must be
 // Ready (lineage validated) before staging, then the staging Job drives
-// Downloading/Downloaded.
-func adapterDiskState(name string, artifact *aimv1alpha1.AIMArtifact, deps Dependencies) aimv1alpha1.AIMAdapterState {
+// Downloading/Downloaded/Failed. Terminal Job failure details are returned for
+// status.adapters[].lastError.
+func adapterDiskState(
+	name string,
+	artifact *aimv1alpha1.AIMArtifact,
+	deps Dependencies,
+) (aimv1alpha1.AIMAdapterState, string) {
 	if artifact.Status.Status != constants.AIMStatusReady {
-		return aimv1alpha1.AdapterStatePending
+		return aimv1alpha1.AdapterStatePending, ""
 	}
 	jf, jok := deps.StagingJobs[name]
 	if !jok || !jf.OK() || jf.Value == nil {
-		return aimv1alpha1.AdapterStatePending
+		return aimv1alpha1.AdapterStatePending, ""
 	}
 	if utils.IsJobSucceeded(jf.Value) {
-		return aimv1alpha1.AdapterStateDownloaded
+		return aimv1alpha1.AdapterStateDownloaded, ""
 	}
-	return aimv1alpha1.AdapterStateDownloading
+	if utils.IsJobFailed(jf.Value) {
+		return aimv1alpha1.AdapterStateFailed, stagingJobFailure(jf.Value)
+	}
+	return aimv1alpha1.AdapterStateDownloading, ""
+}
+
+func stagingJobFailure(job *batchv1.Job) string {
+	for _, condition := range job.Status.Conditions {
+		if condition.Type != batchv1.JobFailed || condition.Status != corev1.ConditionTrue {
+			continue
+		}
+		reason := strings.TrimSpace(condition.Reason)
+		message := strings.TrimSpace(condition.Message)
+		switch {
+		case reason != "" && message != "":
+			return fmt.Sprintf("%s: %s", reason, message)
+		case message != "":
+			return message
+		case reason != "":
+			return reason
+		default:
+			return "Adapter staging Job failed"
+		}
+	}
+	return "Adapter staging Job failed"
 }
 
 // deletingAdapters returns observations for adapters still recorded on status
@@ -757,7 +786,9 @@ func Plan(
 	// Stage adapters independently of the subtree gate (the staging Job creates
 	// the subtree itself if needed before promoting).
 	for _, ad := range st.Adapters {
-		if ad.State == aimv1alpha1.AdapterStateDownloaded || ad.State == aimv1alpha1.AdapterStateDeleting {
+		if ad.State == aimv1alpha1.AdapterStateDownloaded ||
+			ad.State == aimv1alpha1.AdapterStateFailed ||
+			ad.State == aimv1alpha1.AdapterStateDeleting {
 			continue
 		}
 
