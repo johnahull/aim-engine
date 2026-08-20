@@ -1,0 +1,122 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: profile-runtime-compatibility-0-11
+  labels:
+    requires: gpu-amd
+    hf-access: anonymous
+spec:
+  description: Discover aim-base 0.11, derive public Qwen weights, preserve its profile YAML contract, and serve live inference on MI300X.
+  timeouts:
+    assert: 600s
+    cleanup: 600s
+  steps:
+    - name: Discover the pinned base runtime
+      try:
+        - apply:
+            file: ../_shared/runtime-config.yaml
+        - apply:
+            file: base-model.yaml
+        - assert:
+            timeout: 5m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: runtime-base
+              status:
+                (managedProfiles.base > `0`): true
+                (conditions[?type == 'Ready']):
+                  - status: "True"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/profile-role: base
+                  aim.eai.amd.com/source-model: runtime-base
+              spec:
+                acceleratorModel: MI300X
+                acceleratorCount: 1
+                metric: latency
+              status:
+                status: Ready
+
+    - name: Derive and deploy Qwen/Qwen3-0.6B
+      try:
+        - apply:
+            file: ../_shared/derived-model.yaml
+        - assert:
+            timeout: 5m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: runtime-derived
+              status:
+                (managedProfiles.ready > `0`): true
+                (conditions[?type == 'Ready']):
+                  - status: "True"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/profile-role: deployable
+                  aim.eai.amd.com/source-model: runtime-derived
+              spec:
+                aimId: Qwen/Qwen3-0.6B
+                modelId: Qwen/Qwen3-0.6B
+                acceleratorModel: MI300X
+                acceleratorCount: 1
+                metric: latency
+                image: amdenterpriseai/aim-base:0.11@sha256:a3561f8eaf6ed3c59d45c2004d115d0f10f644b3d22ffd5ba5064f94f3e9075e
+              status:
+                status: Ready
+        - apply:
+            file: ../_shared/service.yaml
+        - assert:
+            timeout: 45m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMService
+              metadata:
+                name: runtime-compatibility
+              status:
+                status: Running
+                resolvedProfile:
+                  scope: Namespace
+        - script:
+            timeout: 2m
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: EXPECTED_IMAGE
+                value: amdenterpriseai/aim-base:0.11@sha256:a3561f8eaf6ed3c59d45c2004d115d0f10f644b3d22ffd5ba5064f94f3e9075e
+            content: bash ../_shared/assert-contract.sh
+        - assert:
+            timeout: 5m
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: runtime-compatibility
+                  component: predictor
+              spec:
+                (containers[?name == 'kserve-container']):
+                  - image: amdenterpriseai/aim-base:0.11@sha256:a3561f8eaf6ed3c59d45c2004d115d0f10f644b3d22ffd5ba5064f94f3e9075e
+                    resources:
+                      limits:
+                        amd.com/gpu: "1"
+        - script:
+            timeout: 6m
+            env:
+              - name: HTTP_BASE_PATH
+                value: (join('', ['/integration/profile-runtime-compatibility/', $namespace, '/runtime-compatibility/v1']))
+              - name: HTTP_ALLOW_REASONING_ONLY
+                value: "true"
+            content: bash ../../_shared/validate-http.sh

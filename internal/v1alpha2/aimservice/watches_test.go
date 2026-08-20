@@ -39,6 +39,7 @@ import (
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 // TestProfileRelevantChangePredicate_StatusTransition is the baseline case:
@@ -156,6 +157,36 @@ func TestProfileRelevantChangePredicate_ProvenanceLabelsFire(t *testing.T) {
 
 	if !pred.Update(event.UpdateEvent{ObjectOld: oldP, ObjectNew: newP}) {
 		t.Error("expected role label flip to fire the predicate")
+	}
+}
+
+func TestProfileRelevantChangePredicate_YAMLContractAnnotationChange(t *testing.T) {
+	pred := profileRelevantChangePredicate()
+
+	base := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
+		Status:     aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+	}
+	backfilled := base.DeepCopy()
+	backfilled.Annotations = map[string]string{
+		profileyaml.AnnotationContract: profileyaml.DefaultContract().Encode(),
+	}
+	corrected := backfilled.DeepCopy()
+	corrected.Annotations[profileyaml.AnnotationContract] = `{"codec":"aim-profile/v1","metadataFields":["engine","gpu","gpu_count","metric","precision","type"]}`
+
+	for _, tc := range []struct {
+		name string
+		old  *aimv1alpha2.AIMProfile
+		new  *aimv1alpha2.AIMProfile
+	}{
+		{name: "backfill", old: base, new: backfilled},
+		{name: "correction", old: backfilled, new: corrected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !pred.Update(event.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}) {
+				t.Fatal("expected profile YAML contract annotation change to fire the predicate")
+			}
+		})
 	}
 }
 

@@ -36,6 +36,7 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 const (
@@ -113,6 +114,13 @@ func TestBuildDesiredGeneratedProfiles_GenericNVIDIA(t *testing.T) {
 	}
 	if got := profile.Labels[constants.LabelKeyProfileOrigin]; got != string(aimv1alpha1.ProfileOriginGenerated) {
 		t.Fatalf("profile origin = %q", got)
+	}
+	contract, found, err := profileyaml.FromAnnotations(profile.Annotations)
+	if err != nil {
+		t.Fatalf("parse generated profile YAML contract: %v", err)
+	}
+	if !found || contract.Codec() != profileyaml.CodecV1 {
+		t.Fatalf("generated profile contract = %q, found=%v", contract.Codec(), found)
 	}
 	resources := aimprofile.ResolveProfileResources(profile.Spec.AIMProfileSpecCommon)
 	gpu := resources.Requests[corev1.ResourceName(constants.NVIDIAGPUResourceName)]

@@ -31,6 +31,7 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 func TestBuildDesiredOfficialClusterModelProfiles_StampsRoleAndOriginLabels(t *testing.T) {
@@ -41,7 +42,8 @@ func TestBuildDesiredOfficialClusterModelProfiles_StampsRoleAndOriginLabels(t *t
 	}
 	catalog := aimprofile.DiscoveryCatalog{
 		Profiles: []aimprofile.DiscoveryCatalogItem{{
-			BaseImage: "quay.io/amd/aim-base:0.10.0",
+			BaseImage:    "quay.io/amd/aim-base:0.10.0",
+			YAMLContract: profileyaml.DefaultContract(),
 			Spec: aimv1alpha2.AIMProfileSpecCommon{
 				AimId:     "qwen/Qwen3-32B",
 				ModelId:   "qwen/Qwen3-32B",
@@ -91,7 +93,8 @@ func TestBuildDesiredOfficialClusterModelProfiles_BaseEntriesStampedAsBase(t *te
 	}
 	catalog := aimprofile.DiscoveryCatalog{
 		Profiles: []aimprofile.DiscoveryCatalogItem{{
-			BaseImage: "ghcr.io/silogen/aim-base-vllm:0.1.0",
+			BaseImage:    "ghcr.io/silogen/aim-base-vllm:0.1.0",
+			YAMLContract: profileyaml.DefaultContract(),
 			Spec: aimv1alpha2.AIMProfileSpecCommon{
 				ProfileId: "vllm-cpu-bf16-tp1-latency",
 				Engine:    "vllm",

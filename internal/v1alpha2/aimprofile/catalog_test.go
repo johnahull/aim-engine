@@ -46,12 +46,20 @@ metadata:
   precision: fp8
   type: standard
   primary: true
+  capabilities:
+    tool_calling: true
+    structured_outputs: true
+    reasoning: true
+  future_runtime_hint:
+    mode: fast
   accelerator_model: MI300X
   accelerator_count: 1
   features:
     - adapters
 env_vars:
   VLLM_USE_TRITON_FLASH_ATTN: "1"
+future_top_level:
+  enabled: true
 `
 
 	configMap := &corev1.ConfigMap{
@@ -118,6 +126,113 @@ env_vars:
 	}
 	if candidates[0].BaseImage != "quay.io/amd/aim-base:0.9.0" {
 		t.Fatalf("candidate BaseImage = %q, want metadata baseImage", candidates[0].BaseImage)
+	}
+	contract := candidates[0].YAMLContract
+	for _, field := range []string{"accelerator_model", "accelerator_count", "primary", "features"} {
+		if !contract.HasMetadataField(field) {
+			t.Errorf("candidate YAML contract missing %q: %s", field, contract.Encode())
+		}
+	}
+	extensions := contract.Extensions()
+	if _, ok := extensions.Metadata["capabilities"]; !ok {
+		t.Errorf("candidate YAML contract dropped capabilities: %#v", extensions.Metadata)
+	}
+	if _, ok := extensions.Metadata["future_runtime_hint"]; !ok {
+		t.Errorf("candidate YAML contract dropped future_runtime_hint: %#v", extensions.Metadata)
+	}
+	if _, ok := extensions.TopLevel["future_top_level"]; !ok {
+		t.Errorf("candidate YAML contract dropped future_top_level: %#v", extensions.TopLevel)
+	}
+}
+
+func TestParseProfileYAMLIntoCatalogItem_InfersYAMLContract(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		metadata string
+		present  []string
+		absent   []string
+	}{
+		{
+			name: "legacy GPU fields",
+			metadata: `
+  gpu: MI300X
+  gpu_count: 1
+  manual_selection_only: false`,
+			present: []string{"gpu", "gpu_count", "manual_selection_only"},
+			absent:  []string{"accelerator_model", "accelerator_type", "accelerator_count"},
+		},
+		{
+			name: "transitional accelerator fields",
+			metadata: `
+  accelerator_type: gpu
+  accelerator_model: MI300X
+  accelerator_count: 1
+  manual_selection_only: false`,
+			present: []string{"accelerator_model", "accelerator_type", "accelerator_count", "manual_selection_only"},
+			absent:  []string{"gpu", "gpu_count"},
+		},
+		{
+			name: "strict accelerator fields",
+			metadata: `
+  accelerator_type: gpu
+  accelerator_model: MI300X
+  accelerator_count: 1`,
+			present: []string{"accelerator_model", "accelerator_type", "accelerator_count"},
+			absent:  []string{"gpu", "gpu_count", "manual_selection_only"},
+		},
+		{
+			name: "mixed source fields",
+			metadata: `
+  gpu: MI300X
+  gpu_count: 1
+  accelerator_type: gpu
+  accelerator_model: MI300X
+  accelerator_count: 1
+  manual_selection_only: false`,
+			present: []string{
+				"gpu", "gpu_count",
+				"accelerator_model", "accelerator_type", "accelerator_count",
+				"manual_selection_only",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`aim_id: org/model
+model_id: org/model
+metadata:
+  engine: vllm
+  metric: latency
+  precision: fp16
+  type: optimized` + tc.metadata + `
+engine_args: {}
+env_vars: {}
+`)
+			item, err := parseProfileYAMLIntoCatalogItem(
+				raw,
+				"org/model/vllm-mi300x-fp16-tp1-latency.yaml",
+				"org/model",
+				"registry.example/aim-model:test",
+				"registry.example/aim-base:test",
+				"test",
+			)
+			if err != nil {
+				t.Fatalf("parseProfileYAMLIntoCatalogItem: %v", err)
+			}
+			for _, field := range tc.present {
+				if !item.YAMLContract.HasMetadataField(field) {
+					t.Errorf("YAMLContract missing %q: %s", field, item.YAMLContract.Encode())
+				}
+			}
+			for _, field := range tc.absent {
+				if item.YAMLContract.HasMetadataField(field) {
+					t.Errorf("YAMLContract unexpectedly contains %q: %s", field, item.YAMLContract.Encode())
+				}
+			}
+		})
 	}
 }
 

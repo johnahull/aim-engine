@@ -1,0 +1,19 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: runtime-compatibility
+  annotations:
+    aim.eai.amd.com/reconciler-pipeline: profile
+spec:
+  runtimeConfigName: profile-runtime-compatibility
+  model:
+    name: runtime-derived
+  profile:
+    selector:
+      acceleratorModel: MI300X
+      acceleratorCount: 1
+      metric: latency
+      minimumType: unoptimized
+  caching:
+    mode: Dedicated
+  replicas: 1

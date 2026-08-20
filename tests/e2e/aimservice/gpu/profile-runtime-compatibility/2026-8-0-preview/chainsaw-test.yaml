@@ -1,0 +1,140 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: profile-runtime-compatibility-2026-8-0-preview
+  labels:
+    requires: gpu-amd
+    needs-secret: dockerhub_pull_secret
+    hf-access: anonymous
+spec:
+  description: Discover aim-instinct-base 2026.8.0-preview, derive public Qwen weights, preserve its profile YAML contract and pull secret, and serve live inference on MI300X.
+  timeouts:
+    assert: 600s
+    cleanup: 600s
+  steps:
+    - name: Ensure Docker Hub pull secret in the test namespace
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: PULL_SECRET_REQUIRED
+                value: "true"
+            content: bash ../../../../_shared/ensure-pull-secret.sh
+
+    - name: Discover the pinned base runtime
+      try:
+        - apply:
+            file: ../_shared/runtime-config.yaml
+        - apply:
+            file: base-model.yaml
+        - assert:
+            timeout: 5m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: runtime-base
+              status:
+                (managedProfiles.base > `0`): true
+                (conditions[?type == 'Ready']):
+                  - status: "True"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/profile-role: base
+                  aim.eai.amd.com/source-model: runtime-base
+              spec:
+                acceleratorModel: MI300X
+                acceleratorCount: 1
+                metric: latency
+                imagePullSecrets:
+                  - name: dockerhub-regcred
+              status:
+                status: Ready
+
+    - name: Derive and deploy Qwen/Qwen3-0.6B
+      try:
+        - apply:
+            file: ../_shared/derived-model.yaml
+        - assert:
+            timeout: 5m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: runtime-derived
+              status:
+                (managedProfiles.ready > `0`): true
+                (conditions[?type == 'Ready']):
+                  - status: "True"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/profile-role: deployable
+                  aim.eai.amd.com/source-model: runtime-derived
+              spec:
+                aimId: Qwen/Qwen3-0.6B
+                modelId: Qwen/Qwen3-0.6B
+                acceleratorModel: MI300X
+                acceleratorCount: 1
+                metric: latency
+                image: docker.io/silogenai/aim-instinct-base:2026.8.0-preview@sha256:b25ccd88e9314b09a1216682934b014f1ef5ed0585e49a118f0e56bd5b6ff42b
+                imagePullSecrets:
+                  - name: dockerhub-regcred
+              status:
+                status: Ready
+        - apply:
+            file: ../_shared/service.yaml
+        - assert:
+            timeout: 45m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMService
+              metadata:
+                name: runtime-compatibility
+              status:
+                status: Running
+                resolvedProfile:
+                  scope: Namespace
+        - script:
+            timeout: 2m
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: EXPECTED_IMAGE
+                value: docker.io/silogenai/aim-instinct-base:2026.8.0-preview@sha256:b25ccd88e9314b09a1216682934b014f1ef5ed0585e49a118f0e56bd5b6ff42b
+            content: bash ../_shared/assert-contract.sh
+        - assert:
+            timeout: 5m
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: runtime-compatibility
+                  component: predictor
+              spec:
+                imagePullSecrets:
+                  - name: dockerhub-regcred
+                (containers[?name == 'kserve-container']):
+                  - image: docker.io/silogenai/aim-instinct-base:2026.8.0-preview@sha256:b25ccd88e9314b09a1216682934b014f1ef5ed0585e49a118f0e56bd5b6ff42b
+                    resources:
+                      limits:
+                        amd.com/gpu: "1"
+        - script:
+            timeout: 6m
+            env:
+              - name: HTTP_BASE_PATH
+                value: (join('', ['/integration/profile-runtime-compatibility/', $namespace, '/runtime-compatibility/v1']))
+              - name: HTTP_ALLOW_REASONING_ONLY
+                value: "true"
+            content: bash ../../_shared/validate-http.sh

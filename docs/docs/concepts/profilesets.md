@@ -108,11 +108,10 @@ The same shape applies to [`AIMModel.spec.profiles.derivedFrom`](../guides/custo
 | `containerEnv` | Merges by env-var name; matching names override, new names append. |
 | `engineEnv` | Merges by key; matching keys override, new keys append. |
 | `engineArgs` | Shallow merge on top of source `engineArgs`; matching top-level keys override, new keys append. |
-| `image` | Replaces the derived profile's container image entirely. When unset, the image is resolved from the source profile and whether the override replaces the weights — see [Image resolution](#image-resolution) below. |
 
 ### Image resolution
 
-When `overrides.image` is unset, the derived profile's image depends on the source profile's role and whether the override replaces the model weights (`overrides.modelSources`):
+When the profile set's top-level `spec.image` is unset, the derived profile's image depends on the source profile's role and whether the override replaces the model weights (`overrides.modelSources`):
 
 | Source profile | Override replaces weights? | Resulting image |
 |---|---|---|
@@ -120,9 +119,15 @@ When `overrides.image` is unset, the derived profile's image depends on the sour
 | Deployable | **No** (partitioning-only / env-only / engineArgs-only override) | **Keeps the optimized source image.** The model optimizations and tuning still apply, so a re-partition or env tweak stays on the model-optimized image instead of silently downgrading to the base runtime. |
 | Base (`role=base`, an aim-base image used for [Custom Models](../guides/custom-models.md)) | — | Keeps the source image unchanged. A base profile already *is* the runtime image; weights come from `overrides.modelSources`. |
 
-An explicit `overrides.image` always wins outright, regardless of the above.
+An explicit top-level `spec.image` always wins outright, regardless of the above.
 
 Derived profiles inherit the source profile's `status.baseImage` so subsequent derivations or overlays can rebase consistently.
+
+### Profile YAML contract inheritance
+
+Derived profiles also inherit the source profile's complete runtime-YAML contract. For real-profile-backed derivation, the contract comes from the source profile's `aim.eai.amd.com/profile-yaml-contract` annotation. For cache-backed derivation, it is inferred directly from each raw profile YAML in the discovery cache. The derived profile carries the same codec, modeled-field presence, and opaque source extensions. Runtime projection uses that information to choose between legacy `gpu` fields, transitional accelerator fields, and strict canonical accelerator fields while retaining runtime-only additions that are not part of `AIMProfile.spec`.
+
+Neither profile derivation nor runtime projection infers compatibility from an image name or tag. In particular, setting the profile set's top-level `spec.image` changes the container image but does **not** inspect that replacement image or choose a new YAML contract. The replacement image must accept the source profile's inherited format.
 
 ## Spec shape
 
@@ -226,12 +231,13 @@ metadata:
 spec:
   selector:
     role: base
-    aimId: acme/custom-transformer
     modelRef:
       name: aim-base-vllm
       scope: Namespace
   versionPolicy: all
   overrides:
+    aimId: acme/custom-transformer
+    modelId: acme/custom-transformer
     modelSources:
       - modelId: acme/custom-transformer
         sourceUri: s3://acme-models/custom-transformer
@@ -260,19 +266,20 @@ Zero values serialise explicitly (no `omitempty`), so `kubectl` printcolumns and
 
 `DerivationReady=False / NoMatchingProfiles` means the selector matched zero source candidates. This is by far the most common failure mode; see troubleshooting below.
 
-## Derived-profile labelling
+## Derived-profile labels and annotations
 
-Profiles produced by an `AIMProfileSet` carry these labels:
+Profiles produced by an `AIMProfileSet` carry this metadata:
 
-| Label | Value |
-|---|---|
-| `aim.eai.amd.com/profile-source` | `copy` |
-| `aim.eai.amd.com/profile-role` | `deployable` (or `base` if the derivation was authored to produce base profiles, which is unusual) |
-| `aim.eai.amd.com/profile-origin` | `derived` |
-| `aim.eai.amd.com/source-model` | Name of the AIM(Cluster)Model that owns the profile set (when applicable) |
-| `aim.eai.amd.com/source-model-scope` | `namespace` or `cluster` |
+| Kind | Name | Value |
+|---|---|---|
+| Annotation | `aim.eai.amd.com/profile-source` | `copy` |
+| Annotation | `aim.eai.amd.com/profile-yaml-contract` | Inherited source codec, field presence, and runtime extensions |
+| Label | `aim.eai.amd.com/profile-role` | `deployable` (or `base` if the derivation was authored to produce base profiles, which is unusual) |
+| Label | `aim.eai.amd.com/profile-origin` | `derived` |
+| Label | `aim.eai.amd.com/source-model` | Name of the AIM(Cluster)Model that owns the profile set (when applicable) |
+| Label | `aim.eai.amd.com/source-model-scope` | `namespace` or `cluster` |
 
-By default, derived profiles are **not** marked `profile-copyable`, which prevents accidental cascading copy chains. If you want a derived profile to itself be a valid derivation source, set the label explicitly.
+By default, derived profiles are **not** marked `profile-copyable`, which prevents accidental cascading copy chains. If you want a derived profile to itself be a valid derivation source, set the `aim.eai.amd.com/profile-copyable: "true"` annotation explicitly.
 
 ## Source eligibility
 
@@ -280,7 +287,7 @@ For real-profile-backed mode, a source profile must carry `aim.eai.amd.com/profi
 
 - Image-discovery-produced profiles owned by AIM(Cluster)Models are marked copyable by default.
 - Derived profiles are not marked copyable by default — opt in explicitly if you want chained derivation.
-- Hand-authored profiles need the label added explicitly to participate.
+- Hand-authored profiles need the annotation added explicitly to participate.
 
 Cache-backed mode bypasses this — the entries are taken directly from the discovery catalog.
 
@@ -301,14 +308,14 @@ AIMID:.spec.aimId,\
 PRECISION:.spec.precision,\
 ACCEL:.spec.acceleratorModel,\
 ROLE:.metadata.labels.aim\\.eai\\.amd\\.com/profile-role,\
-COPYABLE:.metadata.labels.aim\\.eai\\.amd\\.com/profile-copyable
+COPYABLE:.metadata.annotations.aim\\.eai\\.amd\\.com/profile-copyable
 ```
 
 Common causes:
 
 - A selector field is too restrictive — relax `precision`, `acceleratorModel`, etc.
 - `modelRef.name` typo or wrong scope.
-- Source profiles lack the `profile-copyable: "true"` label.
+- Source profiles lack the `aim.eai.amd.com/profile-copyable: "true"` annotation.
 - For cache-backed mode: `spec.sourceRef.name` doesn't reference an existing ConfigMap.
 
 ### `managedProfiles.total == 0` after applying

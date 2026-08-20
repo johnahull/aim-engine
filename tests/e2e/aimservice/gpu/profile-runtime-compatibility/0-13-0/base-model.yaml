@@ -1,0 +1,6 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMModel
+metadata:
+  name: runtime-base
+spec:
+  image: amdenterpriseai/aim-base:0.13.0@sha256:82eb627496c88ae435b845c89e0914f5b358390103fd994ecf3b17573c7e2a5e

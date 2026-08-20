@@ -43,6 +43,7 @@ import (
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/runtimeprojection"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
@@ -252,6 +253,14 @@ func TestProfileProjectionPredicate(t *testing.T) {
 	readyChanged := base.DeepCopy()
 	readyChanged.Status.Status = constants.AIMStatusReady
 
+	contractBackfilled := base.DeepCopy()
+	contractBackfilled.Annotations = map[string]string{
+		profileyaml.AnnotationContract: profileyaml.DefaultContract().Encode(),
+	}
+
+	contractCorrected := contractBackfilled.DeepCopy()
+	contractCorrected.Annotations[profileyaml.AnnotationContract] = `{"codec":"aim-profile/v1","metadataFields":["engine","gpu","gpu_count","metric","precision","type"]}`
+
 	cosmetic := base.DeepCopy()
 
 	tests := []struct {
@@ -262,6 +271,8 @@ func TestProfileProjectionPredicate(t *testing.T) {
 	}{
 		{name: "spec (generation) change fires", old: base, new: specChanged, want: true},
 		{name: "readiness transition fires", old: base, new: readyChanged, want: true},
+		{name: "contract backfill fires", old: base, new: contractBackfilled, want: true},
+		{name: "contract correction fires", old: contractBackfilled, new: contractCorrected, want: true},
 		{name: "cosmetic status write is filtered", old: base, new: cosmetic, want: false},
 	}
 
@@ -572,6 +583,14 @@ func TestClusterProfileProjectionPredicate(t *testing.T) {
 	readyChanged := base.DeepCopy()
 	readyChanged.Status.Status = constants.AIMStatusReady
 
+	contractBackfilled := base.DeepCopy()
+	contractBackfilled.Annotations = map[string]string{
+		profileyaml.AnnotationContract: profileyaml.DefaultContract().Encode(),
+	}
+
+	contractCorrected := contractBackfilled.DeepCopy()
+	contractCorrected.Annotations[profileyaml.AnnotationContract] = `{"codec":"aim-profile/v1","metadataFields":["engine","gpu","gpu_count","metric","precision","type"]}`
+
 	cosmetic := base.DeepCopy()
 
 	tests := []struct {
@@ -582,6 +601,8 @@ func TestClusterProfileProjectionPredicate(t *testing.T) {
 	}{
 		{name: "spec (generation) change fires", old: base, new: specChanged, want: true},
 		{name: "readiness transition fires", old: base, new: readyChanged, want: true},
+		{name: "contract backfill fires", old: base, new: contractBackfilled, want: true},
+		{name: "contract correction fires", old: contractBackfilled, new: contractCorrected, want: true},
 		{name: "cosmetic status write is filtered", old: base, new: cosmetic, want: false},
 	}
 

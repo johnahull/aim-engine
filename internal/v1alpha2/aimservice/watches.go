@@ -44,6 +44,7 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 // isNotFoundLike treats both API-server 404s and cache-Lister
@@ -328,7 +329,9 @@ func findServicesForResourceNodeChange(c client.Client) handler.MapFunc {
 //   - derived node affinity (Status.ResolvedNodeAffinity feeds ISVC affinity),
 //   - provenance labels (role / source-model / origin) — selector-driven
 //     services pick up new candidates whenever a profile's role flips
-//     from `base` to `deployable` or its source-model changes.
+//     from `base` to `deployable` or its source-model changes,
+//   - profile YAML contract annotation (service overlays inherit it from their
+//     seed profile).
 //
 // ObservedGeneration alone is not a sufficient proxy: if the profile
 // controller recomputes Resources or ResolvedNodeAffinity on node-label
@@ -342,6 +345,10 @@ func profileRelevantChangePredicate() predicate.Predicate {
 		DeleteFunc:  func(_ event.DeleteEvent) bool { return true },
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld.GetAnnotations()[profileyaml.AnnotationContract] !=
+				e.ObjectNew.GetAnnotations()[profileyaml.AnnotationContract] {
+				return true
+			}
 			oldStatus, oldGen, oldRes, oldAff := profileRelevantFields(e.ObjectOld)
 			newStatus, newGen, newRes, newAff := profileRelevantFields(e.ObjectNew)
 			if oldStatus != newStatus || oldGen != newGen {

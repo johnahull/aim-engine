@@ -25,6 +25,8 @@ package aimprofile
 import (
 	"sort"
 
+	"github.com/blang/semver/v4"
+
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
@@ -185,10 +187,18 @@ func compareProfileVersions(a, b string) int {
 		return -1
 	case b == "":
 		return 1
-	default:
-		if a > b {
-			return 1
-		}
+	}
+
+	aSemver, aErr := semver.ParseTolerant(a)
+	bSemver, bErr := semver.ParseTolerant(b)
+	switch {
+	case aErr == nil && bErr == nil:
+		return aSemver.Compare(bSemver)
+	case aErr == nil:
+		return 1
+	case bErr == nil:
 		return -1
+	default:
+		return compareVersionStrings(a, b)
 	}
 }

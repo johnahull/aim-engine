@@ -29,21 +29,22 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/blang/semver/v4"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/aimimage"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 // ProfileCopyCandidate is a resource-neutral profile source used by derivation hosts such as AIMModel.
 type ProfileCopyCandidate struct {
-	Name      string
-	Spec      aimv1alpha2.AIMProfileSpecCommon
-	Status    aimv1alpha2.AIMProfileStatus
-	BaseImage string
+	Name         string
+	Spec         aimv1alpha2.AIMProfileSpecCommon
+	Status       aimv1alpha2.AIMProfileStatus
+	BaseImage    string
+	YAMLContract profileyaml.Contract
 }
 
 // ProfileCopyRequest describes a resource-neutral profile derivation request.
@@ -211,31 +212,49 @@ func MatchesEngineArgs(sourceArgs, selectorArgs *apiextensionsv1.JSON) (bool, er
 
 // FilterProfileCopyCandidates applies selector and version-policy matching.
 func FilterProfileCopyCandidates(candidates []ProfileCopyCandidate, req ProfileCopyRequest) ([]ProfileCopyCandidate, error) {
+	indexes, err := FilterProfileCopyCandidateIndexes(candidates, req)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]ProfileCopyCandidate, 0, len(indexes))
+	for _, index := range indexes {
+		filtered = append(filtered, candidates[index])
+	}
+	return filtered, nil
+}
+
+// FilterProfileCopyCandidateIndexes applies selector and version-policy
+// matching and returns indexes into the original candidate slice.
+func FilterProfileCopyCandidateIndexes(candidates []ProfileCopyCandidate, req ProfileCopyRequest) ([]int, error) {
 	if req.VersionPolicy == aimv1alpha1.ProfileVersionPolicyPinned && req.Version == "" {
 		return nil, fmt.Errorf("version is required when versionPolicy is pinned")
 	}
 
-	matched := make([]ProfileCopyCandidate, 0, len(candidates))
-	for _, candidate := range candidates {
+	matched := make([]int, 0, len(candidates))
+	for i, candidate := range candidates {
 		ok, err := MatchesProfileCopySelector(candidate, req.Selector)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			matched = append(matched, candidate)
+			matched = append(matched, i)
 		}
 	}
 
 	switch req.VersionPolicy {
 	case aimv1alpha1.ProfileVersionPolicyLatest:
-		version := latestProfileCopyVersion(matched)
+		matchedCandidates := make([]ProfileCopyCandidate, 0, len(matched))
+		for _, index := range matched {
+			matchedCandidates = append(matchedCandidates, candidates[index])
+		}
+		version := latestProfileCopyVersion(matchedCandidates)
 		if version == "" {
 			return matched[:0], nil
 		}
 		filtered := matched[:0]
-		for _, candidate := range matched {
-			if candidate.Status.Version == version {
-				filtered = append(filtered, candidate)
+		for _, index := range matched {
+			if candidates[index].Status.Version == version {
+				filtered = append(filtered, index)
 			}
 		}
 		return filtered, nil
@@ -246,9 +265,9 @@ func FilterProfileCopyCandidates(candidates []ProfileCopyCandidate, req ProfileC
 			return matched, nil
 		}
 		filtered := matched[:0]
-		for _, candidate := range matched {
-			if candidate.Status.Version == req.Version {
-				filtered = append(filtered, candidate)
+		for _, index := range matched {
+			if candidates[index].Status.Version == req.Version {
+				filtered = append(filtered, index)
 			}
 		}
 		return filtered, nil
@@ -505,29 +524,10 @@ func ResolveDerivedProfileImage(imageOverride, sourceBaseImage, sourceImage stri
 }
 
 func latestProfileCopyVersion(profiles []ProfileCopyCandidate) string {
-	if len(profiles) == 0 {
-		return ""
-	}
-
 	bestVersion := ""
-	bestSemver := semver.Version{}
-	bestParsed := false
-
 	for _, profile := range profiles {
 		version := profile.Status.Version
-		if version == "" {
-			continue
-		}
-		parsed, err := semver.ParseTolerant(version)
-		if err != nil {
-			if !bestParsed && compareVersionStrings(version, bestVersion) > 0 {
-				bestVersion = version
-			}
-			continue
-		}
-		if !bestParsed || parsed.GT(bestSemver) {
-			bestParsed = true
-			bestSemver = parsed
+		if compareProfileVersions(version, bestVersion) > 0 {
 			bestVersion = version
 		}
 	}

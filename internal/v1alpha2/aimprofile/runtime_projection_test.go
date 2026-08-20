@@ -38,6 +38,7 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
 
@@ -160,6 +161,7 @@ func TestProfilePlanResources_ProjectsNamespaceRuntime(t *testing.T) {
 		resolvedResources: ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
 		deployable:        true,
 		projectable:       true,
+		yamlContract:      profileyaml.CanonicalContract(&spec),
 	}
 	obs.profile = profile
 
@@ -285,6 +287,54 @@ func TestProfileRuntimeProjectionBuildErrorSurfacesInStatusAndSkipsApply(t *test
 	}
 }
 
+func TestSourceDerivedProfileMissingContractKeepsExistingProjectionUntouched(t *testing.T) {
+	spec := aimv1alpha2.AIMProfileSpecCommon{
+		AimId:   "org/model",
+		ModelId: "org/model",
+		Image:   "registry.io/model:1.0.0",
+		Engine:  "vllm",
+		ModelSources: []aimv1alpha1.AIMModelSource{{
+			ModelID:   "org/model",
+			SourceURI: "hf://org/model",
+		}},
+	}
+	profile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "legacy-profile",
+			Namespace: "team-a",
+			Labels: map[string]string{
+				constants.LabelKeyProfileOrigin: string(aimv1alpha1.ProfileOriginDiscovered),
+			},
+		},
+		Spec: aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: spec},
+	}
+	r := &ProfileReconciler{ProjectionMode: aimv1alpha2.RuntimeProjectionModeExhaustive}
+	obs := r.ComposeState(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile},
+		ProfileFetchResult{profile: profile},
+	)
+	if obs.projectionErr == nil {
+		t.Fatal("expected missing source-derived contract to block projection")
+	}
+
+	plan := r.PlanResources(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile},
+		obs,
+	)
+	if len(plan.GetToApplyWithForce()) != 0 || len(plan.GetToDelete()) != 0 {
+		t.Fatalf("missing contract must leave existing projection untouched: apply=%d delete=%d",
+			len(plan.GetToApplyWithForce()), len(plan.GetToDelete()))
+	}
+
+	status := &aimv1alpha2.AIMProfileStatus{ProjectedRuntimeName: serving.RuntimeName(profile.Name)}
+	r.DecorateStatus(status, controllerutils.NewConditionManager(nil), obs)
+	if status.ProjectedRuntimeName == "" {
+		t.Fatal("missing contract must retain the previously published runtime name")
+	}
+}
+
 func TestClusterProfileRuntimeProjectionBuildErrorSkipsApply(t *testing.T) {
 	spec := gpuSpec()
 	spec.Engine = "vllm"
@@ -378,6 +428,7 @@ func TestProfilePlanResources_StampsEagerProjectionMarker(t *testing.T) {
 				resolvedResources:  ResolveResources(tc.spec.AcceleratorType, tc.spec.AcceleratorCount, nil, tc.spec.AcceleratorModel, nil),
 				deployable:         true,
 				projectable:        true,
+				yamlContract:       profileyaml.CanonicalContract(&tc.spec),
 			}
 			obs.profile = profile
 
@@ -635,6 +686,7 @@ func TestProfilePlanResources_ReducedModelSlugPrimary(t *testing.T) {
 		resolvedResources:  ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
 		deployable:         true,
 		projectable:        true,
+		yamlContract:       profileyaml.CanonicalContract(&spec),
 	}
 	obs.profile = profile
 
@@ -753,6 +805,7 @@ func TestProfilePlanResources_BothModeNoAmbiguity(t *testing.T) {
 		resolvedResources:  ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
 		deployable:         true,
 		projectable:        true,
+		yamlContract:       profileyaml.CanonicalContract(&spec),
 	}
 	obs.profile = profile
 

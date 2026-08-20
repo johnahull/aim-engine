@@ -23,8 +23,7 @@
 # Convergence is asserted within the step timeouts: the shadow SR + ConfigMap
 # materialize and KServe rebinds onto the NAMESPACE SR (status.servingRuntimeName
 # set, clusterServingRuntimeName cleared) with no manual intervention. The
-# reconvergence window was measured at a few seconds on the live GPU vcluster (see
-# ADR 0008 appendix finding 4 / bare-CSR addendum).
+# reconvergence window was measured at a few seconds on the live GPU vcluster.
 #
 # Uses the computed hashed runtime name (serving.RuntimeName("test-bare-csr") =
 # aim-test-bare-csr-899eadd9), never a literal aim-<profile>. No accelerator and

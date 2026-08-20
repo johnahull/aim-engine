@@ -1260,6 +1260,34 @@ func TestProfileLess(t *testing.T) {
 			aWins: true,
 		},
 		{
+			name: "tier 8: calendar full release beats rc",
+			a: spec{
+				Type: aimv1alpha1.AIMProfileTypeOptimized, AcceleratorModel: "MI300X", Metric: "latency",
+				Precision: "fp8", AcceleratorCount: 1, AcceleratorType: aimv1alpha1.AcceleratorTypeGPU,
+			},
+			b: spec{
+				Type: aimv1alpha1.AIMProfileTypeOptimized, AcceleratorModel: "MI300X", Metric: "latency",
+				Precision: "fp8", AcceleratorCount: 1, AcceleratorType: aimv1alpha1.AcceleratorTypeGPU,
+			},
+			aVer:  "2026.8.0",
+			bVer:  "2026.8.0-rc1",
+			aWins: true,
+		},
+		{
+			name: "tier 8: unpadded October beats September",
+			a: spec{
+				Type: aimv1alpha1.AIMProfileTypeOptimized, AcceleratorModel: "MI300X", Metric: "latency",
+				Precision: "fp8", AcceleratorCount: 1, AcceleratorType: aimv1alpha1.AcceleratorTypeGPU,
+			},
+			b: spec{
+				Type: aimv1alpha1.AIMProfileTypeOptimized, AcceleratorModel: "MI300X", Metric: "latency",
+				Precision: "fp8", AcceleratorCount: 1, AcceleratorType: aimv1alpha1.AcceleratorTypeGPU,
+			},
+			aVer:  "2026.10.0-preview",
+			bVer:  "2026.9.0",
+			aWins: true,
+		},
+		{
 			name: "tier 9: alphabetical name as last resort",
 			a: spec{
 				Type: aimv1alpha1.AIMProfileTypeOptimized, AcceleratorModel: "MI300X", Metric: "latency",

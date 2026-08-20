@@ -45,6 +45,7 @@ import (
 
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
 
@@ -181,10 +182,16 @@ func DesiredFor(isvc *servingv1beta1.InferenceService, state ProjectionState) (D
 
 	spec := profile.GetProfileSpecCommon()
 	status := profile.GetStatus()
+	origin := profileyaml.EffectiveOrigin(profile.GetLabels(), status.Origin)
+	yamlContract, err := profileyaml.ForProfile(profile.GetAnnotations(), origin, &spec)
+	if err != nil {
+		return DesiredProjection{}, fmt.Errorf("parse profile YAML contract for profile %q: %w", profile.GetName(), err)
+	}
 	input := serving.NamespaceRuntimeInput{
 		ProfileName:  profile.GetName(),
 		Namespace:    isvc.Namespace,
 		Spec:         &spec,
+		YAMLContract: yamlContract,
 		Resources:    status.Resources,
 		NodeAffinity: status.ResolvedNodeAffinity,
 		Cache:        state.Cache,

@@ -536,6 +536,57 @@ func TestFilterProfileCopyCandidates_LatestVersion(t *testing.T) {
 	}
 }
 
+func TestFilterProfileCopyCandidates_LatestCalendarVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		versions []string
+		want     string
+	}{
+		{
+			name:     "full release beats rc and preview for the same date",
+			versions: []string{"2026.8.0-preview", "2026.8.0", "2026.8.0-rc1"},
+			want:     "2026.8.0",
+		},
+		{
+			name:     "rc beats preview for the same date",
+			versions: []string{"2026.8.0-preview", "2026.8.0-rc1"},
+			want:     "2026.8.0-rc1",
+		},
+		{
+			name:     "unpadded October beats September",
+			versions: []string{"0.13.0", "2026.9.0", "2026.10.0-preview"},
+			want:     "2026.10.0-preview",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			candidates := make([]ProfileCopyCandidate, 0, len(tt.versions))
+			for _, version := range tt.versions {
+				candidates = append(candidates, ProfileCopyCandidate{
+					Spec:   aimv1alpha2.AIMProfileSpecCommon{AimId: "qwen/qwen3-32b"},
+					Status: aimv1alpha2.AIMProfileStatus{Version: version},
+				})
+			}
+
+			matched, err := FilterProfileCopyCandidates(candidates, ProfileCopyRequest{
+				Selector:      aimv1alpha1.ProfileSelector{AimId: "qwen/qwen3-32b"},
+				VersionPolicy: aimv1alpha1.ProfileVersionPolicyLatest,
+			})
+			if err != nil {
+				t.Fatalf("FilterProfileCopyCandidates() error = %v", err)
+			}
+			if len(matched) != 1 || matched[0].Status.Version != tt.want {
+				t.Fatalf("matched = %#v, want only %s", matched, tt.want)
+			}
+		})
+	}
+}
+
 func TestFilterProfileCopyCandidates_PinnedRequiresVersion(t *testing.T) {
 	t.Parallel()
 

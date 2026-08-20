@@ -468,6 +468,9 @@ func TestExtractVersionFromImage(t *testing.T) {
 		{"registry.io/aim-qwen:0.11-rc21", "0.11-rc21"},
 		{"registry.io/aim-qwen:0.11.0+build123", "0.11.0+build123"},
 		{"registry.io/aim-qwen:v0.11.2", "v0.11.2"},
+		{"registry.io/aim-qwen:2026.8.0-preview", "2026.8.0-preview"},
+		{"registry.io/aim-qwen:2026.8.0-rc1", "2026.8.0-rc1"},
+		{"registry.io/aim-qwen:2026.8.0", "2026.8.0"},
 	}
 
 	for _, tt := range tests {

@@ -12,6 +12,13 @@ GATEWAY="${HTTP_GATEWAY:-${HTTP_SVC:-kserve-ingress-gateway}}"
 SVC_PORT="${HTTP_PORT:-80}"
 BASE_PATH="${HTTP_BASE_PATH:-/integration/test/v1}"  # contains /models and /chat/completions
 TIMEOUT="${HTTP_TIMEOUT:-60}"
+MAX_TOKENS="${HTTP_MAX_TOKENS:-16}"
+ALLOW_REASONING_ONLY="${HTTP_ALLOW_REASONING_ONLY:-false}"
+
+KUBECTL=(kubectl)
+if [[ -n "${HTTP_KUBE_CONTEXT:-}" ]]; then
+  KUBECTL+=(--context "$HTTP_KUBE_CONTEXT")
+fi
 
 # Retry budget. The KServe predictor can report Ready before the HTTPRoute has
 # propagated and before vLLM has finished loading weights, so we poll instead
@@ -33,7 +40,7 @@ need kubectl; need curl; need jq
 # look it up by the owning-gateway labels Envoy Gateway stamps on the Service.
 SVC="${HTTP_SVC:-}"
 if [[ -z "$SVC" || "$SVC" == "$GATEWAY" ]]; then
-  RESOLVED_SVC="$(kubectl get svc -n "$NS" \
+  RESOLVED_SVC="$("${KUBECTL[@]}" get svc -n "$NS" \
     -l "gateway.envoyproxy.io/owning-gateway-name=${GATEWAY},gateway.envoyproxy.io/owning-gateway-namespace=${NS}" \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   if [[ -n "$RESOLVED_SVC" ]]; then
@@ -47,7 +54,7 @@ echo "Routing via Service ${NS}/${SVC} (Gateway ${GATEWAY})"
 start_proxy() {
   for p in 8001 8002 8003 8004 8005; do
     if ! lsof -iTCP:"$p" -sTCP:LISTEN -P -n >/dev/null 2>&1; then
-      kubectl proxy --port="$p" >/dev/null 2>&1 &
+      "${KUBECTL[@]}" proxy --port="$p" >/dev/null 2>&1 &
       PROXY_PID=$!
       sleep 1
       if kill -0 "$PROXY_PID" 2>/dev/null; then
@@ -107,9 +114,9 @@ PAYLOAD="$(jq -n --arg model "$MODEL_ID" '
   messages: [
     {role:"user", content:"Hello there!"}
   ],
-  max_tokens: 16,
+  max_tokens: ($max_tokens | tonumber),
   temperature: 0
-}')"
+}' --arg max_tokens "$MAX_TOKENS")"
 
 deadline=$(( SECONDS + RETRY_DEADLINE ))
 CODE2=""
@@ -135,13 +142,21 @@ if [[ "$CODE2" != "200" ]]; then
   exit 1
 fi
 
-# Validate general OpenAI chat schema surface
-jq -e '
+# Validate general OpenAI chat schema surface. Existing smoke tests require the
+# standard content field; reasoning-only responses are an explicit opt-in.
+CONTENT_CHECK='(.choices[0].message.content|type=="string")'
+if [[ "$ALLOW_REASONING_ONLY" == "true" ]]; then
+  CONTENT_CHECK='(
+    (.choices[0].message.content|type=="string") or
+    (.choices[0].message.reasoning|type=="string")
+  )'
+fi
+jq -e "
   .object and
-  (.choices|type=="array" and length>0) and
-  (.choices[0].message.content|type=="string") and
-  (.model|type=="string")
-' >/dev/null 2>&1 <<<"$BODY2" || {
+  (.choices|type==\"array\" and length>0) and
+  $CONTENT_CHECK and
+  (.model|type==\"string\")
+" >/dev/null 2>&1 <<<"$BODY2" || {
   echo "ERROR: /chat/completions body does not look like a valid OpenAI response"
   echo "$BODY2" | head -c 800; echo
   exit 1
@@ -150,6 +165,6 @@ jq -e '
 echo "✅ /chat/completions returned 200 and looks valid"
 echo
 echo "Assistant said:"
-echo "$BODY2" | jq -r '.choices[0].message.content'
+echo "$BODY2" | jq -r '.choices[0].message.content // .choices[0].message.reasoning // empty'
 echo
 echo "All checks passed ✅"

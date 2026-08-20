@@ -117,6 +117,29 @@ AIM Engine follows semantic versioning. Within a major version:
 
 The minimum supported Kubernetes version is **1.32** (see [Prerequisites](../getting-started/installation.md#prerequisites)).
 
+### Profile YAML contract backfill
+
+Current operators record the source runtime's profile-YAML codec, modeled-field presence, and opaque runtime extensions on discovered and derived profiles with the `aim.eai.amd.com/profile-yaml-contract` annotation. Profiles created by an older operator may not have this annotation. Generated and independently hand-authored profiles use the current strict `accelerator_*` v1 format. Discovered and derived profiles do not guess: runtime projection retains any existing runtime and reports the missing contract until the owning producer backfills the annotation.
+
+After upgrading an installation that still serves legacy runtimes requiring `gpu` / `gpu_count`, allow the owning `AIMModel`, `AIMClusterModel`, `AIMProfileSet`, or `AIMClusterProfileSet` to reconcile. Existing projected runtimes remain untouched while the contract is unknown, avoiding a transient rewrite to the strict schema. Reconcile upstream image-backed models before real-profile-backed profile sets so the sets inherit the recovered source contract. If an object is not backfilled through normal reconciliation, update the owning resource in a way that its controller watches, or restart the operator to enqueue its resources again. You can audit profiles that still lack the contract with:
+
+```bash
+kubectl get aimprofile -A -o json | \
+  jq -r '.items[] | select(.metadata.annotations["aim.eai.amd.com/profile-yaml-contract"] == null) | [.metadata.namespace, .metadata.name] | @tsv'
+
+kubectl get aimclusterprofile -o json | \
+  jq -r '.items[] | select(.metadata.annotations["aim.eai.amd.com/profile-yaml-contract"] == null) | .metadata.name'
+```
+
+Generated and independently hand-authored profiles have no source YAML to inspect and continue to use the strict canonical format by design.
+
+After the contract is backfilled, AIM Engine reconciles the projected ServingRuntime and ConfigMap automatically. Existing predictor pods are not rolled by a ConfigMap data update and must be restarted to read the corrected startup profile. Newly created pods, including scale-from-zero pods, use the corrected projection. For an AIMService, restart its predictor pods with:
+
+```bash
+kubectl delete pod -n <namespace> \
+  -l aim.eai.amd.com/service=<service-name>
+```
+
 ## Migration window
 
 The aim-engine operator serves `v1alpha1` and `v1alpha2` of every shared CRD

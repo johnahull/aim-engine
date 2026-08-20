@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -40,6 +41,7 @@ import (
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 // TestManagedProfileCounts_ZeroSerializesExplicitly pins F7: zero-valued
@@ -264,6 +266,129 @@ func TestProfileSetCandidateLoading_RequiresExplicitCopyOptIn(t *testing.T) {
 	}
 }
 
+func TestProfileSetContractValidationRunsAfterSelection(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1.AddToScheme() error = %v", err)
+	}
+	if err := aimv1alpha2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	validAnnotations := profileyaml.Mark(
+		map[string]string{aimprofile.AnnotationProfileCopyable: "true"},
+		profileyaml.DefaultContract(),
+	)
+	missingAnnotations := map[string]string{aimprofile.AnnotationProfileCopyable: "true"}
+	validSpec := aimv1alpha2.AIMProfileSpecCommon{
+		AimId:            "qwen/Qwen3-32B",
+		ModelId:          "qwen/Qwen3-32B",
+		ProfileId:        "mi300x",
+		AcceleratorModel: "MI300X",
+	}
+	obsoleteSpec := validSpec
+	obsoleteSpec.ProfileId = "mi250"
+	obsoleteSpec.AcceleratorModel = "MI250"
+
+	namespaceValid := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "namespace-valid",
+			Namespace:   "team-a",
+			Annotations: validAnnotations,
+		},
+		Spec:   aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: validSpec},
+		Status: aimv1alpha2.AIMProfileStatus{Origin: aimv1alpha1.ProfileOriginDerived},
+	}
+	namespaceObsolete := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "namespace-obsolete",
+			Namespace:   "team-a",
+			Annotations: missingAnnotations,
+		},
+		Spec:   aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: obsoleteSpec},
+		Status: aimv1alpha2.AIMProfileStatus{Origin: aimv1alpha1.ProfileOriginDerived},
+	}
+	clusterValid := &aimv1alpha2.AIMClusterProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-valid", Annotations: validAnnotations},
+		Spec:       aimv1alpha2.AIMClusterProfileSpec{AIMProfileSpecCommon: validSpec},
+		Status:     aimv1alpha2.AIMProfileStatus{Origin: aimv1alpha1.ProfileOriginDerived},
+	}
+	clusterObsolete := &aimv1alpha2.AIMClusterProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-obsolete", Annotations: missingAnnotations},
+		Spec:       aimv1alpha2.AIMClusterProfileSpec{AIMProfileSpecCommon: obsoleteSpec},
+		Status:     aimv1alpha2.AIMProfileStatus{Origin: aimv1alpha1.ProfileOriginDerived},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(namespaceValid, namespaceObsolete, clusterValid, clusterObsolete).
+		Build()
+
+	tests := []struct {
+		name       string
+		sourceKind string
+		load       func() ([]profileSetCandidate, error)
+	}{
+		{
+			name:       "namespace profiles",
+			sourceKind: "AIMProfile",
+			load: func() ([]profileSetCandidate, error) {
+				set := &aimv1alpha2.AIMProfileSet{
+					ObjectMeta: metav1.ObjectMeta{Name: "namespace-set", Namespace: "team-a"},
+				}
+				return loadNamespaceCandidates(context.Background(), fakeClient, fakeClient, set)
+			},
+		},
+		{
+			name:       "cluster profiles",
+			sourceKind: "AIMClusterProfile",
+			load: func() ([]profileSetCandidate, error) {
+				set := &aimv1alpha2.AIMClusterProfileSet{
+					ObjectMeta: metav1.ObjectMeta{Name: "cluster-set"},
+				}
+				return loadClusterCandidates(context.Background(), fakeClient, fakeClient, set)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			candidates, err := tc.load()
+			if err != nil {
+				t.Fatalf("load candidates: %v", err)
+			}
+			if len(candidates) != 2 {
+				t.Fatalf("len(candidates) = %d, want 2", len(candidates))
+			}
+
+			selected, err := resolveSelectedProfileSetCandidates(candidates, aimprofile.ProfileCopyRequest{
+				Selector:      aimv1alpha1.ProfileSelector{AcceleratorModel: "MI300X"},
+				VersionPolicy: aimv1alpha1.ProfileVersionPolicyAll,
+			})
+			if err != nil {
+				t.Fatalf("unselected missing contract blocked reconciliation: %v", err)
+			}
+			if len(selected) != 1 || selected[0].Spec.AcceleratorModel != "MI300X" {
+				t.Fatalf("selected = %#v, want only the valid MI300X candidate", selected)
+			}
+
+			_, err = resolveSelectedProfileSetCandidates(candidates, aimprofile.ProfileCopyRequest{
+				Selector:      aimv1alpha1.ProfileSelector{AcceleratorModel: "MI250"},
+				VersionPolicy: aimv1alpha1.ProfileVersionPolicyAll,
+			})
+			if err == nil {
+				t.Fatal("selected missing contract did not fail")
+			}
+			if !strings.Contains(err.Error(), tc.sourceKind) ||
+				!strings.Contains(err.Error(), profileyaml.AnnotationContract) {
+				t.Fatalf("selected missing contract error = %q, want source kind and annotation", err)
+			}
+		})
+	}
+}
+
 func TestPlanResources_SkipsDeletesWhenCandidatesFailToLoad(t *testing.T) {
 	t.Parallel()
 
@@ -273,7 +398,7 @@ func TestPlanResources_SkipsDeletesWhenCandidatesFailToLoad(t *testing.T) {
 	}
 	fetch := ProfileSetFetchResult{
 		set:        set,
-		candidates: controllerutils.FetchResult[[]aimprofile.ProfileCopyCandidate]{Error: errors.New("catalog unavailable")},
+		candidates: controllerutils.FetchResult[[]profileSetCandidate]{Error: errors.New("catalog unavailable")},
 		managed: controllerutils.FetchResult[[]managedProfile]{Value: []managedProfile{{
 			Object: &aimv1alpha2.AIMProfile{ObjectMeta: metav1.ObjectMeta{Name: "managed", Namespace: "team-a"}},
 		}}},
@@ -303,7 +428,8 @@ func TestBuildDesiredNamespaceProfiles_MarksCopiesWithProfileSource(t *testing.T
 		},
 	}
 	desired, err := buildDesiredNamespaceProfiles(set, []aimprofile.ProfileCopyCandidate{{
-		Name: "source",
+		Name:         "source",
+		YAMLContract: profileyaml.DefaultContract(),
 		Spec: aimv1alpha2.AIMProfileSpecCommon{
 			AimId:     "qwen/Qwen3-32B",
 			ModelId:   "qwen/Qwen3-32B",
@@ -379,8 +505,25 @@ func TestBuildDesiredNamespaceProfiles_BaseRoleStampsIdentityFromOverrides(t *te
 		},
 	}
 
+	sourceContract, err := profileyaml.Inspect([]byte(`metadata:
+  engine: vllm
+  gpu: MI300X
+  gpu_count: 1
+  manual_selection_only: false
+  metric: latency
+  precision: fp16
+  type: general
+  capabilities:
+    reasoning: true
+engine_args: {}
+env_vars: {}
+`))
+	if err != nil {
+		t.Fatalf("Inspect source profile YAML: %v", err)
+	}
 	baseProfile := aimprofile.ProfileCopyCandidate{
-		Name: "custom-base-vllm-mi300x",
+		Name:         "custom-base-vllm-mi300x",
+		YAMLContract: sourceContract,
 		Spec: aimv1alpha2.AIMProfileSpecCommon{
 			Engine:           "vllm",
 			AcceleratorModel: "MI300X",
@@ -407,6 +550,22 @@ func TestBuildDesiredNamespaceProfiles_BaseRoleStampsIdentityFromOverrides(t *te
 	}
 	if !aimprofile.IsProfileDeployable(profile.Spec.AIMProfileSpecCommon) {
 		t.Fatalf("derived profile must be deployable; spec = %#v", profile.Spec.AIMProfileSpecCommon)
+	}
+	derivedContract, found, err := profileyaml.FromAnnotations(profile.Annotations)
+	if err != nil {
+		t.Fatalf("parse derived profile YAML contract: %v", err)
+	}
+	if !found {
+		t.Fatal("derived profile YAML contract annotation is missing")
+	}
+	for _, field := range []string{"gpu", "gpu_count", "manual_selection_only"} {
+		if !derivedContract.HasMetadataField(field) {
+			t.Errorf("derived profile YAML contract missing %q: %s", field, derivedContract.Encode())
+		}
+	}
+	extensions := derivedContract.Extensions()
+	if _, ok := extensions.Metadata["capabilities"]; !ok {
+		t.Errorf("derived profile dropped source capabilities: %#v", extensions.Metadata)
 	}
 }
 

@@ -38,6 +38,7 @@ import (
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 var errListNodesFailed = errors.New("list nodes failed")
@@ -160,9 +161,26 @@ func TestBuildDesiredOfficialProfiles_MarksProfilesAsImageDerived(t *testing.T) 
 	model := &aimv1alpha2.AIMModel{
 		ObjectMeta: metav1.ObjectMeta{Name: "qwen", Namespace: "team-a", UID: "model-uid"},
 	}
+	sourceContract, err := profileyaml.Inspect([]byte(`metadata:
+  engine: vllm
+  gpu: MI300X
+  gpu_count: 1
+  manual_selection_only: false
+  metric: latency
+  precision: fp16
+  type: optimized
+  capabilities:
+    reasoning: true
+engine_args: {}
+env_vars: {}
+`))
+	if err != nil {
+		t.Fatalf("Inspect source profile YAML: %v", err)
+	}
 	catalog := aimprofile.DiscoveryCatalog{
 		Profiles: []aimprofile.DiscoveryCatalogItem{{
-			BaseImage: "quay.io/amd/aim-base:0.10.0",
+			BaseImage:    "quay.io/amd/aim-base:0.10.0",
+			YAMLContract: sourceContract,
 			Spec: aimv1alpha2.AIMProfileSpecCommon{
 				AimId:     "qwen/Qwen3-32B",
 				ModelId:   "qwen/Qwen3-32B",
@@ -202,6 +220,22 @@ func TestBuildDesiredOfficialProfiles_MarksProfilesAsImageDerived(t *testing.T) 
 	if !aimprofile.IsProfileCopyable(profile.Annotations) {
 		t.Fatal("image-derived profile should be marked copyable")
 	}
+	discoveredContract, found, err := profileyaml.FromAnnotations(profile.Annotations)
+	if err != nil {
+		t.Fatalf("parse discovered profile YAML contract: %v", err)
+	}
+	if !found {
+		t.Fatal("discovered profile YAML contract annotation is missing")
+	}
+	for _, field := range []string{"gpu", "gpu_count", "manual_selection_only"} {
+		if !discoveredContract.HasMetadataField(field) {
+			t.Errorf("discovered profile YAML contract missing %q: %s", field, discoveredContract.Encode())
+		}
+	}
+	extensions := discoveredContract.Extensions()
+	if _, ok := extensions.Metadata["capabilities"]; !ok {
+		t.Errorf("discovered profile dropped capabilities: %#v", extensions.Metadata)
+	}
 }
 
 func TestBuildDesiredOfficialProfiles_PrimaryFallbackFromRecommendedDeployments(t *testing.T) {
@@ -230,12 +264,14 @@ func TestBuildDesiredOfficialProfiles_PrimaryFallbackFromRecommendedDeployments(
 				// tuple and the YAML didn't stamp `primary` itself, so the fallback
 				// should flip Primary to true.
 				PrimaryExplicit: false,
+				YAMLContract:    profileyaml.DefaultContract(),
 				Spec:            specCommon("vllm-mi300x-fp16-tp1-latency", "MI300X", 1, "fp16", "latency"),
 			},
 			{
 				// Same image, no matching recommended deployment for fp8 — fallback
 				// leaves Primary at the catalog default (false).
 				PrimaryExplicit: false,
+				YAMLContract:    profileyaml.DefaultContract(),
 				Spec:            specCommon("vllm-mi300x-fp8-tp1-latency", "MI300X", 1, "fp8", "latency"),
 			},
 			{
@@ -243,12 +279,14 @@ func TestBuildDesiredOfficialProfiles_PrimaryFallbackFromRecommendedDeployments(
 				// though this spec matches a recommended deployment, the fallback
 				// MUST NOT override an explicit value from the image author.
 				PrimaryExplicit: true,
+				YAMLContract:    profileyaml.DefaultContract(),
 				Spec:            specCommon("vllm-mi300x-fp16-tp1-throughput", "MI300X", 1, "fp16", "throughput"),
 			},
 			{
 				// Recommended deployment uses profileId — exact match on ProfileId
 				// wins regardless of the other fields.
 				PrimaryExplicit: false,
+				YAMLContract:    profileyaml.DefaultContract(),
 				Spec:            specCommon("vllm-mi300x-named-special", "MI300X", 1, "fp8", "latency"),
 			},
 		},
@@ -405,8 +443,9 @@ func TestComposeState_NodeListFailurePreventsPruningManagedProfiles(t *testing.T
 	catalog := aimprofile.DiscoveryCatalog{
 		AimID: "qwen/qwen3-32b",
 		Profiles: []aimprofile.DiscoveryCatalogItem{{
-			Name:    "tp2",
-			Version: "0.10.0",
+			Name:         "tp2",
+			Version:      "0.10.0",
+			YAMLContract: profileyaml.DefaultContract(),
 			Spec: aimv1alpha2.AIMProfileSpecCommon{
 				AimId:     "qwen/qwen3-32b",
 				ModelId:   "qwen/qwen3-32b-fp8",
@@ -462,8 +501,9 @@ func TestPlanResources_DiscoveredProfilesCarryOwnerRefBranch(t *testing.T) {
 	catalog := aimprofile.DiscoveryCatalog{
 		AimID: "qwen/qwen3-32b",
 		Profiles: []aimprofile.DiscoveryCatalogItem{{
-			Name:    "tp2",
-			Version: "0.10.0",
+			Name:         "tp2",
+			Version:      "0.10.0",
+			YAMLContract: profileyaml.DefaultContract(),
 			Spec: aimv1alpha2.AIMProfileSpecCommon{
 				AimId:        "qwen/qwen3-32b",
 				ModelId:      "qwen/qwen3-32b-fp8",
@@ -652,7 +692,8 @@ func TestBuildDesiredOfficialProfiles_StampsRoleAndOriginLabels(t *testing.T) {
 	}
 	catalog := aimprofile.DiscoveryCatalog{
 		Profiles: []aimprofile.DiscoveryCatalogItem{{
-			BaseImage: "quay.io/amd/aim-base:0.10.0",
+			BaseImage:    "quay.io/amd/aim-base:0.10.0",
+			YAMLContract: profileyaml.DefaultContract(),
 			Spec: aimv1alpha2.AIMProfileSpecCommon{
 				AimId:     "qwen/Qwen3-32B",
 				ModelId:   "qwen/Qwen3-32B",
@@ -705,7 +746,8 @@ func TestBuildDesiredOfficialProfiles_BaseEntriesStampedAsBase(t *testing.T) {
 	}
 	catalog := aimprofile.DiscoveryCatalog{
 		Profiles: []aimprofile.DiscoveryCatalogItem{{
-			BaseImage: "ghcr.io/silogen/aim-base-vllm:0.1.0",
+			BaseImage:    "ghcr.io/silogen/aim-base-vllm:0.1.0",
+			YAMLContract: profileyaml.DefaultContract(),
 			Spec: aimv1alpha2.AIMProfileSpecCommon{
 				ProfileId: "vllm-cpu-bf16-tp1-latency",
 				Engine:    "vllm",

@@ -41,6 +41,7 @@ import (
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 const (
@@ -96,15 +97,26 @@ type desiredProfile struct {
 	Object client.Object
 }
 
+// profileSetCandidate keeps the profile resource metadata needed to resolve
+// its YAML contract after selector and version-policy filtering. Catalog
+// candidates already carry an inspected contract and are marked resolved.
+type profileSetCandidate struct {
+	aimprofile.ProfileCopyCandidate
+	annotations      map[string]string
+	labels           map[string]string
+	sourceKind       string
+	contractResolved bool
+}
+
 type ProfileSetFetchResult struct {
 	set        *aimv1alpha2.AIMProfileSet
-	candidates controllerutils.FetchResult[[]aimprofile.ProfileCopyCandidate]
+	candidates controllerutils.FetchResult[[]profileSetCandidate]
 	managed    controllerutils.FetchResult[[]managedProfile]
 }
 
 type ClusterProfileSetFetchResult struct {
 	set        *aimv1alpha2.AIMClusterProfileSet
-	candidates controllerutils.FetchResult[[]aimprofile.ProfileCopyCandidate]
+	candidates controllerutils.FetchResult[[]profileSetCandidate]
 	managed    controllerutils.FetchResult[[]managedProfile]
 }
 
@@ -146,7 +158,7 @@ func (r *ProfileSetReconciler) FetchRemoteState(
 	managed, managedErr := listManagedNamespaceProfiles(ctx, c, set.Namespace, string(set.UID))
 	return ProfileSetFetchResult{
 		set:        set,
-		candidates: controllerutils.FetchResult[[]aimprofile.ProfileCopyCandidate]{Value: candidates, Error: candidateErr},
+		candidates: controllerutils.FetchResult[[]profileSetCandidate]{Value: candidates, Error: candidateErr},
 		managed:    controllerutils.FetchResult[[]managedProfile]{Value: managed, Error: managedErr},
 	}
 }
@@ -161,7 +173,7 @@ func (r *ClusterProfileSetReconciler) FetchRemoteState(
 	managed, managedErr := listManagedClusterProfiles(ctx, c, string(set.UID))
 	return ClusterProfileSetFetchResult{
 		set:        set,
-		candidates: controllerutils.FetchResult[[]aimprofile.ProfileCopyCandidate]{Value: candidates, Error: candidateErr},
+		candidates: controllerutils.FetchResult[[]profileSetCandidate]{Value: candidates, Error: candidateErr},
 		managed:    controllerutils.FetchResult[[]managedProfile]{Value: managed, Error: managedErr},
 	}
 }
@@ -173,7 +185,11 @@ func (r *ProfileSetReconciler) ComposeState(
 ) ProfileSetObservation {
 	obs := ProfileSetObservation{}
 	if fetch.candidates.Error == nil {
-		obs.desiredProfiles, obs.buildErr = buildDesiredNamespaceProfiles(fetch.set, fetch.candidates.Value)
+		var selected []aimprofile.ProfileCopyCandidate
+		selected, obs.buildErr = resolveSelectedProfileSetCandidates(fetch.candidates.Value, profileCopyRequest(fetch.set.Spec))
+		if obs.buildErr == nil {
+			obs.desiredProfiles, obs.buildErr = buildDesiredNamespaceProfiles(fetch.set, selected)
+		}
 	}
 	if fetch.managed.Error == nil {
 		obs.existingManaged = fetch.managed.Value
@@ -191,7 +207,11 @@ func (r *ClusterProfileSetReconciler) ComposeState(
 ) ClusterProfileSetObservation {
 	obs := ClusterProfileSetObservation{}
 	if fetch.candidates.Error == nil {
-		obs.desiredProfiles, obs.buildErr = buildDesiredClusterProfiles(fetch.set, fetch.candidates.Value)
+		var selected []aimprofile.ProfileCopyCandidate
+		selected, obs.buildErr = resolveSelectedProfileSetCandidates(fetch.candidates.Value, profileCopyRequest(fetch.set.Spec))
+		if obs.buildErr == nil {
+			obs.desiredProfiles, obs.buildErr = buildDesiredClusterProfiles(fetch.set, selected)
+		}
 	}
 	if fetch.managed.Error == nil {
 		obs.existingManaged = fetch.managed.Value
@@ -267,13 +287,7 @@ func (r *ClusterProfileSetReconciler) DecorateStatus(
 }
 
 func buildDesiredNamespaceProfiles(set *aimv1alpha2.AIMProfileSet, candidates []aimprofile.ProfileCopyCandidate) ([]desiredProfile, error) {
-	req := aimprofile.ProfileCopyRequest{
-		Selector:      set.Spec.Selector,
-		VersionPolicy: normalizedVersionPolicy(set.Spec.VersionPolicy),
-		Version:       set.Spec.Version,
-		Overrides:     set.Spec.Overrides,
-		ImageOverride: set.Spec.Image,
-	}
+	req := profileCopyRequest(set.Spec)
 	matched, err := aimprofile.FilterProfileCopyCandidates(candidates, req)
 	if err != nil {
 		return nil, controllerutils.NewInvalidSpecError("InvalidProfileSelection", err.Error(), err)
@@ -299,6 +313,7 @@ func buildDesiredNamespaceProfiles(set *aimv1alpha2.AIMProfileSet, candidates []
 			annotationProfileSetName:      set.Name,
 			annotationProfileSetNamespace: set.Namespace,
 		}, aimprofile.ProfileSourceCopy)
+		profile.Annotations = profileyaml.Mark(profile.Annotations, source.YAMLContract)
 		profile.Spec = aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: copiedSpec}
 		profile.Spec.ImagePullSecrets = inheritedPullSecrets(set.Spec, source.Spec)
 		profile.Spec.ServiceAccountName = inheritedServiceAccount(set.Spec, source.Spec)
@@ -308,13 +323,7 @@ func buildDesiredNamespaceProfiles(set *aimv1alpha2.AIMProfileSet, candidates []
 }
 
 func buildDesiredClusterProfiles(set *aimv1alpha2.AIMClusterProfileSet, candidates []aimprofile.ProfileCopyCandidate) ([]desiredProfile, error) {
-	req := aimprofile.ProfileCopyRequest{
-		Selector:      set.Spec.Selector,
-		VersionPolicy: normalizedVersionPolicy(set.Spec.VersionPolicy),
-		Version:       set.Spec.Version,
-		Overrides:     set.Spec.Overrides,
-		ImageOverride: set.Spec.Image,
-	}
+	req := profileCopyRequest(set.Spec)
 	matched, err := aimprofile.FilterProfileCopyCandidates(candidates, req)
 	if err != nil {
 		return nil, controllerutils.NewInvalidSpecError("InvalidProfileSelection", err.Error(), err)
@@ -338,12 +347,71 @@ func buildDesiredClusterProfiles(set *aimv1alpha2.AIMClusterProfileSet, candidat
 			annotationProfileSetUID:  string(set.UID),
 			annotationProfileSetName: set.Name,
 		}, aimprofile.ProfileSourceCopy)
+		profile.Annotations = profileyaml.Mark(profile.Annotations, source.YAMLContract)
 		profile.Spec = aimv1alpha2.AIMClusterProfileSpec{AIMProfileSpecCommon: copiedSpec}
 		profile.Spec.ImagePullSecrets = inheritedPullSecrets(set.Spec, source.Spec)
 		profile.Spec.ServiceAccountName = inheritedServiceAccount(set.Spec, source.Spec)
 		desired = append(desired, desiredProfile{Object: profile})
 	}
 	return desired, nil
+}
+
+func profileCopyRequest(spec aimv1alpha1.AIMProfileSetSpec) aimprofile.ProfileCopyRequest {
+	return aimprofile.ProfileCopyRequest{
+		Selector:      spec.Selector,
+		VersionPolicy: normalizedVersionPolicy(spec.VersionPolicy),
+		Version:       spec.Version,
+		Overrides:     spec.Overrides,
+		ImageOverride: spec.Image,
+	}
+}
+
+func resolveSelectedProfileSetCandidates(
+	candidates []profileSetCandidate,
+	req aimprofile.ProfileCopyRequest,
+) ([]aimprofile.ProfileCopyCandidate, error) {
+	plain := make([]aimprofile.ProfileCopyCandidate, len(candidates))
+	for i := range candidates {
+		plain[i] = candidates[i].ProfileCopyCandidate
+	}
+
+	selectedIndexes, err := aimprofile.FilterProfileCopyCandidateIndexes(plain, req)
+	if err != nil {
+		return nil, controllerutils.NewInvalidSpecError("InvalidProfileSelection", err.Error(), err)
+	}
+
+	resolved := make([]aimprofile.ProfileCopyCandidate, 0, len(selectedIndexes))
+	for _, index := range selectedIndexes {
+		candidate, err := candidates[index].resolved()
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, candidate)
+	}
+	return resolved, nil
+}
+
+func (candidate profileSetCandidate) resolved() (aimprofile.ProfileCopyCandidate, error) {
+	if candidate.contractResolved {
+		return candidate.ProfileCopyCandidate, nil
+	}
+
+	spec := candidate.Spec
+	contract, err := profileyaml.ForProfile(
+		candidate.annotations,
+		profileyaml.EffectiveOrigin(candidate.labels, candidate.Status.Origin),
+		&spec,
+	)
+	if err != nil {
+		return aimprofile.ProfileCopyCandidate{}, fmt.Errorf(
+			"parse profile YAML contract on %s %q: %w",
+			candidate.sourceKind,
+			candidate.Name,
+			err,
+		)
+	}
+	candidate.YAMLContract = contract
+	return candidate.ProfileCopyCandidate, nil
 }
 
 func normalizedVersionPolicy(policy aimv1alpha1.ProfileVersionPolicy) aimv1alpha1.ProfileVersionPolicy {
@@ -480,13 +548,13 @@ func buildComponentHealth(fetchErrs []error, buildErr error, managed aimv1alpha1
 	}}
 }
 
-func loadNamespaceCandidates(ctx context.Context, c client.Client, reader client.Reader, set *aimv1alpha2.AIMProfileSet) ([]aimprofile.ProfileCopyCandidate, error) {
+func loadNamespaceCandidates(ctx context.Context, c client.Client, reader client.Reader, set *aimv1alpha2.AIMProfileSet) ([]profileSetCandidate, error) {
 	if set.Spec.SourceRef != nil {
 		_, catalog, err := aimprofile.LoadDiscoveryCatalog(ctx, reader, *set.Spec.SourceRef, set.Namespace)
 		if err != nil {
 			return nil, err
 		}
-		return catalog.ToCandidates(), nil
+		return resolvedProfileSetCandidates(catalog.ToCandidates()), nil
 	}
 	provenance, scope, err := aimprofile.ProvenanceLabelSelector(set.Spec.Selector)
 	if err != nil {
@@ -516,14 +584,14 @@ func loadNamespaceCandidates(ctx context.Context, c client.Client, reader client
 	return listClusterProfileCandidatesWithLabels(ctx, c, aimIDFilter, provenance)
 }
 
-func loadClusterCandidates(ctx context.Context, c client.Client, reader client.Reader, set *aimv1alpha2.AIMClusterProfileSet) ([]aimprofile.ProfileCopyCandidate, error) {
+func loadClusterCandidates(ctx context.Context, c client.Client, reader client.Reader, set *aimv1alpha2.AIMClusterProfileSet) ([]profileSetCandidate, error) {
 	if set.Spec.SourceRef != nil {
 		namespace := constants.GetOperatorNamespace()
 		_, catalog, err := aimprofile.LoadDiscoveryCatalog(ctx, reader, *set.Spec.SourceRef, namespace)
 		if err != nil {
 			return nil, fmt.Errorf("load sourceRef %q from operator namespace %q: %w", set.Spec.SourceRef.Name, namespace, err)
 		}
-		return catalog.ToCandidates(), nil
+		return resolvedProfileSetCandidates(catalog.ToCandidates()), nil
 	}
 	provenance, _, err := aimprofile.ProvenanceLabelSelector(set.Spec.Selector)
 	if err != nil {
@@ -538,7 +606,7 @@ func loadClusterCandidates(ctx context.Context, c client.Client, reader client.R
 	return listClusterProfileCandidatesWithLabels(ctx, c, aimIDFilter, provenance)
 }
 
-func listClusterProfileCandidatesWithLabels(ctx context.Context, c client.Client, aimID string, provenance labels.Selector) ([]aimprofile.ProfileCopyCandidate, error) {
+func listClusterProfileCandidatesWithLabels(ctx context.Context, c client.Client, aimID string, provenance labels.Selector) ([]profileSetCandidate, error) {
 	var list aimv1alpha2.AIMClusterProfileList
 	opts := []client.ListOption{}
 	if aimID != "" {
@@ -550,22 +618,28 @@ func listClusterProfileCandidatesWithLabels(ctx context.Context, c client.Client
 	if err := c.List(ctx, &list, opts...); err != nil {
 		return nil, err
 	}
-	out := make([]aimprofile.ProfileCopyCandidate, 0, len(list.Items))
+	out := make([]profileSetCandidate, 0, len(list.Items))
 	for i := range list.Items {
 		if !aimprofile.IsProfileCopyable(list.Items[i].Annotations) {
 			continue
 		}
-		out = append(out, aimprofile.ProfileCopyCandidate{
-			Name:      list.Items[i].Name,
-			Spec:      list.Items[i].Spec.AIMProfileSpecCommon,
-			Status:    list.Items[i].Status,
-			BaseImage: aimprofile.BaseImageFromProfile(&list.Items[i], list.Items[i].Status.BaseImage),
+		spec := list.Items[i].Spec.AIMProfileSpecCommon
+		out = append(out, profileSetCandidate{
+			ProfileCopyCandidate: aimprofile.ProfileCopyCandidate{
+				Name:      list.Items[i].Name,
+				Spec:      spec,
+				Status:    list.Items[i].Status,
+				BaseImage: aimprofile.BaseImageFromProfile(&list.Items[i], list.Items[i].Status.BaseImage),
+			},
+			annotations: list.Items[i].Annotations,
+			labels:      list.Items[i].Labels,
+			sourceKind:  "AIMClusterProfile",
 		})
 	}
 	return out, nil
 }
 
-func listNamespaceProfileCandidatesWithLabels(ctx context.Context, c client.Client, namespace, aimID string, provenance labels.Selector) ([]aimprofile.ProfileCopyCandidate, error) {
+func listNamespaceProfileCandidatesWithLabels(ctx context.Context, c client.Client, namespace, aimID string, provenance labels.Selector) ([]profileSetCandidate, error) {
 	var list aimv1alpha2.AIMProfileList
 	opts := []client.ListOption{client.InNamespace(namespace)}
 	if aimID != "" {
@@ -577,19 +651,36 @@ func listNamespaceProfileCandidatesWithLabels(ctx context.Context, c client.Clie
 	if err := c.List(ctx, &list, opts...); err != nil {
 		return nil, err
 	}
-	out := make([]aimprofile.ProfileCopyCandidate, 0, len(list.Items))
+	out := make([]profileSetCandidate, 0, len(list.Items))
 	for i := range list.Items {
 		if !aimprofile.IsProfileCopyable(list.Items[i].Annotations) {
 			continue
 		}
-		out = append(out, aimprofile.ProfileCopyCandidate{
-			Name:      list.Items[i].Name,
-			Spec:      list.Items[i].Spec.AIMProfileSpecCommon,
-			Status:    list.Items[i].Status,
-			BaseImage: aimprofile.BaseImageFromProfile(&list.Items[i], list.Items[i].Status.BaseImage),
+		spec := list.Items[i].Spec.AIMProfileSpecCommon
+		out = append(out, profileSetCandidate{
+			ProfileCopyCandidate: aimprofile.ProfileCopyCandidate{
+				Name:      list.Items[i].Name,
+				Spec:      spec,
+				Status:    list.Items[i].Status,
+				BaseImage: aimprofile.BaseImageFromProfile(&list.Items[i], list.Items[i].Status.BaseImage),
+			},
+			annotations: list.Items[i].Annotations,
+			labels:      list.Items[i].Labels,
+			sourceKind:  "AIMProfile",
 		})
 	}
 	return out, nil
+}
+
+func resolvedProfileSetCandidates(candidates []aimprofile.ProfileCopyCandidate) []profileSetCandidate {
+	resolved := make([]profileSetCandidate, len(candidates))
+	for i := range candidates {
+		resolved[i] = profileSetCandidate{
+			ProfileCopyCandidate: candidates[i],
+			contractResolved:     true,
+		}
+	}
+	return resolved
 }
 
 func mergeCandidates(clusterCandidates, namespaceCandidates []aimprofile.ProfileCopyCandidate) []aimprofile.ProfileCopyCandidate {

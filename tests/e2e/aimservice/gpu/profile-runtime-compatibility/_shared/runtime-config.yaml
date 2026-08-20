@@ -1,0 +1,14 @@
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: profile-runtime-compatibility
+spec:
+  artifact:
+    modelDownloadImage: docker.io/amdenterpriseai/aim-artifact-downloader:v0.2.5
+  routing:
+    enabled: true
+    gatewayRef:
+      name: kserve-ingress-gateway
+      namespace: envoy-gateway-system
+    pathTemplate: "/integration/profile-runtime-compatibility/{.metadata.namespace}/{.metadata.name}"
+    requestTimeout: "300s"

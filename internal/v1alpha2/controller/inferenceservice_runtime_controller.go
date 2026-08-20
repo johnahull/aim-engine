@@ -50,6 +50,7 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profilecache"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/runtimeprojection"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
@@ -699,6 +700,10 @@ func clusterProfileProjectionPredicate() predicate.Predicate {
 			if !ok1 || !ok2 {
 				return true
 			}
+			if oldProfile.Annotations[profileyaml.AnnotationContract] !=
+				newProfile.Annotations[profileyaml.AnnotationContract] {
+				return true
+			}
 			return profileProjectionChanged(
 				oldProfile.Generation, newProfile.Generation,
 				&oldProfile.Status, &newProfile.Status,
@@ -721,6 +726,10 @@ func profileProjectionPredicate() predicate.Predicate {
 			oldProfile, ok1 := e.ObjectOld.(*aimv1alpha2.AIMProfile)
 			newProfile, ok2 := e.ObjectNew.(*aimv1alpha2.AIMProfile)
 			if !ok1 || !ok2 {
+				return true
+			}
+			if oldProfile.Annotations[profileyaml.AnnotationContract] !=
+				newProfile.Annotations[profileyaml.AnnotationContract] {
 				return true
 			}
 			return profileProjectionChanged(

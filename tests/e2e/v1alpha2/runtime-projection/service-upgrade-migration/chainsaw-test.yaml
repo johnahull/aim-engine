@@ -17,8 +17,8 @@
 #      (aim-service-controller), the re-apply that omits containers drops the
 #      inline predictor and adds the runtime reference. The referenced runtime is
 #      materialized cross-scope by the always-on lazy InferenceService-watch
-#      projection, and KServe binds it. See ADR 0008 (2026-07-08 addendum) and
-#      its appendix finding 3 (a running pod survives the transient window).
+#      projection, and KServe binds it. The test also confirms that a running
+#      predictor survives the transient runtime-resolution window.
 #
 # Pod readiness is intentionally NOT asserted: the placeholder image
 # (registry.example.com) never pulls and the cache download is simulated, so the
@@ -285,9 +285,9 @@ spec:
         the colocated profile ConfigMap as the aim-profile volume — i.e. the pod
         mounts the profile the lazy watcher materialized onto the referenced
         runtime, not the retired inline one. That the Deployment is present after
-        the in-place rewrite also corroborates ADR 0008 appendix finding 3: the live
-        predictor is re-rendered, not torn down, across the inline->reference
-        transition. The Deployment name is derived from the hashed ISVC name, so
+        the in-place rewrite also confirms that the live predictor is re-rendered,
+        not torn down, across the inline->reference transition. The Deployment
+        name is derived from the hashed ISVC name, so
         locate it via KServe's inferenceservice label rather than a fixed name.
       try:
         - script:

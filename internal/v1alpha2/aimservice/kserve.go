@@ -65,7 +65,7 @@ func fetchInferenceService(
 	}, &servingv1beta1.InferenceService{})
 }
 
-// fetchLegacyProfileConfigMap fetches the pre-ADR-0008 service-owned profile
+// fetchLegacyProfileConfigMap fetches the legacy inline-predictor service-owned profile
 // ConfigMap (<service>-profile-<hash>) by its deterministic legacy name. It is
 // present only for services created before the runtime-reference rewrite; a
 // not-found result is the normal case and is left for PlanResources to skip. A

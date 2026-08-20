@@ -39,6 +39,7 @@ import (
 
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 const (
@@ -62,20 +63,9 @@ type ProfileYAML struct {
 	EnvVars    map[string]string `json:"env_vars"`
 }
 
-// ProfileMetadata matches the AIM runtime's ProfileMetadata schema.
-//
-// We emit BOTH naming conventions so the assembled YAML is valid against
-// every aim-runtime version we ship today:
-//
-//   - Legacy `gpu` / `gpu_count` are still REQUIRED by the runtime baked into
-//     amdenterpriseai/aim-base:0.11 (and earlier). The runtime's Pydantic
-//     ProfileMetadata schema validates `metadata.gpu` and `metadata.gpu_count`
-//     as required fields; omitting them causes the predictor pod to crash
-//     before opening port 8000.
-//   - New `accelerator_model` / `accelerator_type` / `accelerator_count` are
-//     the v1alpha2 vocabulary. Runtimes that don't know them ignore the
-//     extras (Pydantic extras are not forbidden); runtimes that do can
-//     consume them directly.
+// ProfileMetadata is the superset decode shape used by tests and callers that
+// inspect assembled YAML. Rendering is contract-driven: only the field
+// families present in the source profile YAML are emitted.
 type ProfileMetadata struct {
 	Engine              string `json:"engine"`
 	GPU                 string `json:"gpu"`
@@ -101,8 +91,22 @@ type ProfileMetadata struct {
 // AIMProfile and points at it, so this function does not re-merge user overrides
 // on top.
 func AssembleProfileYAML(spec *aimv1alpha2.AIMProfileSpecCommon) ([]byte, string, error) {
+	return AssembleProfileYAMLForContract(spec, profileyaml.CanonicalContract(spec))
+}
+
+// AssembleProfileYAMLForContract builds a complete profile YAML using the field
+// contract inferred from the profile YAML shipped by the runtime image. This
+// keeps projected profiles valid across legacy, transitional, and strict AIM
+// runtime schemas without inspecting the image tag.
+func AssembleProfileYAMLForContract(
+	spec *aimv1alpha2.AIMProfileSpecCommon,
+	contract profileyaml.Contract,
+) ([]byte, string, error) {
 	if spec == nil {
 		return nil, "", fmt.Errorf("profile spec is nil")
+	}
+	if err := contract.Validate(); err != nil {
+		return nil, "", fmt.Errorf("invalid profile YAML contract: %w", err)
 	}
 
 	engineArgs := make(map[string]any)
@@ -122,27 +126,58 @@ func AssembleProfileYAML(spec *aimv1alpha2.AIMProfileSpecCommon) ([]byte, string
 	accModel := spec.AcceleratorModel
 	accType := string(spec.AcceleratorType)
 	accCount := spec.AcceleratorCount
-
-	profile := ProfileYAML{
-		AimID:   spec.AimId,
-		ModelID: spec.ModelId,
-		Metadata: ProfileMetadata{
-			Engine:              spec.Engine,
-			GPU:                 accModel,
-			GPUCount:            accCount,
-			AcceleratorModel:    accModel,
-			AcceleratorType:     accType,
-			AcceleratorCount:    accCount,
-			ManualSelectionOnly: false,
-			Metric:              string(spec.Metric),
-			Precision:           string(spec.Precision),
-			Type:                string(spec.Type),
-			Variant:             spec.Variant,
-			Features:            append([]string(nil), spec.Features...),
-		},
-		EngineArgs: engineArgs,
-		EnvVars:    envVars,
+	if contract.Codec() != profileyaml.CodecV1 {
+		return nil, "", fmt.Errorf("unsupported profile YAML codec %q", contract.Codec())
 	}
+
+	extensions := contract.Extensions()
+
+	metadata := extensions.Metadata
+	metadata["engine"] = spec.Engine
+	metadata["metric"] = string(spec.Metric)
+	metadata["precision"] = string(spec.Precision)
+	metadata["type"] = string(spec.Type)
+
+	if contract.HasMetadataField("gpu") {
+		metadata["gpu"] = accModel
+	}
+	if contract.HasMetadataField("gpu_count") {
+		metadata["gpu_count"] = accCount
+	}
+	if contract.HasMetadataField("accelerator_model") {
+		metadata["accelerator_model"] = accModel
+	}
+	if contract.HasMetadataField("accelerator_type") {
+		metadata["accelerator_type"] = accType
+	}
+	if contract.HasMetadataField("accelerator_count") {
+		metadata["accelerator_count"] = accCount
+	}
+	if contract.HasMetadataField("manual_selection_only") {
+		// The resolver ignores this deprecated field, but legacy/transitional
+		// runtime schemas still require its serialized value when the source
+		// YAML carried it.
+		metadata["manual_selection_only"] = spec.ManualSelectionOnly //nolint:staticcheck
+	}
+	if contract.HasMetadataField("variant") {
+		metadata["variant"] = spec.Variant
+	}
+	if contract.HasMetadataField("features") {
+		metadata["features"] = append([]string{}, spec.Features...)
+	}
+	if contract.HasMetadataField("primary") {
+		metadata["primary"] = spec.Primary
+	}
+	if contract.HasMetadataField("auto_selection_policy") {
+		metadata["auto_selection_policy"] = string(spec.AutoSelectionPolicy)
+	}
+
+	profile := extensions.TopLevel
+	profile["aim_id"] = spec.AimId
+	profile["model_id"] = spec.ModelId
+	profile["metadata"] = metadata
+	profile["engine_args"] = engineArgs
+	profile["env_vars"] = envVars
 
 	yamlBytes, err := yaml.Marshal(profile)
 	if err != nil {

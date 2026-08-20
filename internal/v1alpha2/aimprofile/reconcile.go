@@ -36,6 +36,7 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 // ============================================================================
@@ -168,6 +169,7 @@ type ProfileObservation struct {
 	sourceModel       *aimv1alpha2.ProfileSourceModel
 	origin            aimv1alpha1.ProfileOrigin
 	baseImage         string
+	yamlContract      profileyaml.Contract
 	// projectable reports whether a runtime should be projected for this profile
 	// (deployable, has an image, and hardware is available — freshly computed).
 	projectable   bool
@@ -194,6 +196,7 @@ type ClusterProfileObservation struct {
 	sourceModel       *aimv1alpha2.ProfileSourceModel
 	origin            aimv1alpha1.ProfileOrigin
 	baseImage         string
+	yamlContract      profileyaml.Contract
 	// projectable reports whether a runtime should be projected for this profile
 	// (deployable, has an image, and hardware is available — freshly computed).
 	projectable   bool
@@ -227,7 +230,12 @@ func (r *ProfileReconciler) ComposeState(
 	obs.origin = DeriveProfileOrigin(fetch.profile)
 	obs.baseImage = BaseImageFromProfile(fetch.profile, fetch.profile.Status.BaseImage)
 	obs.projectable = runtimeProjectable(spec, obs.deployable, obs.matchResult)
-	obs.projectionErr = validateNamespaceRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
+	if runtimeProjectionNeedsContract(r.ProjectionMode, spec, obs.projectable, obs.modelSlugWinner) {
+		obs.yamlContract, obs.projectionErr = profileyaml.ForProfile(fetch.profile.Annotations, obs.origin, &spec)
+		if obs.projectionErr == nil {
+			obs.projectionErr = validateNamespaceRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
+		}
+	}
 	return obs
 }
 
@@ -250,8 +258,23 @@ func (r *ClusterProfileReconciler) ComposeState(
 	obs.origin = DeriveProfileOrigin(fetch.profile)
 	obs.baseImage = BaseImageFromProfile(fetch.profile, fetch.profile.Status.BaseImage)
 	obs.projectable = runtimeProjectable(spec, obs.deployable, obs.matchResult)
-	obs.projectionErr = validateClusterRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
+	if runtimeProjectionNeedsContract(r.ProjectionMode, spec, obs.projectable, obs.modelSlugWinner) {
+		obs.yamlContract, obs.projectionErr = profileyaml.ForProfile(fetch.profile.Annotations, obs.origin, &spec)
+		if obs.projectionErr == nil {
+			obs.projectionErr = validateClusterRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
+		}
+	}
 	return obs
+}
+
+func runtimeProjectionNeedsContract(
+	mode aimv1alpha2.RuntimeProjectionMode,
+	spec aimv1alpha2.AIMProfileSpecCommon,
+	projectable, modelSlugWinner bool,
+) bool {
+	return projectable &&
+		(mode.ProjectsPerProfile() ||
+			(mode.ProjectsModelSlug() && modelSlugProjectable(spec, projectable, modelSlugWinner)))
 }
 
 // ============================================================================

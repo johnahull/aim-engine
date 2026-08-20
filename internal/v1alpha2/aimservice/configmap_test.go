@@ -137,14 +137,10 @@ func TestAssembleProfileYAML_RoundTrip(t *testing.T) {
 	if parsed.Metadata.AcceleratorCount != 1 {
 		t.Errorf("accelerator_count mismatch: %d", parsed.Metadata.AcceleratorCount)
 	}
-	// Legacy aliases must mirror the accelerator fields so the runtime in
-	// amdenterpriseai/aim-base:0.11 (which requires `gpu` / `gpu_count`)
-	// validates the assembled profile.
-	if parsed.Metadata.GPU != "MI300X" {
-		t.Errorf("gpu mismatch: %q", parsed.Metadata.GPU)
-	}
-	if parsed.Metadata.GPUCount != 1 {
-		t.Errorf("gpu_count mismatch: %d", parsed.Metadata.GPUCount)
+	// Profiles without source-YAML provenance use the current strict
+	// accelerator schema and must not emit deprecated GPU aliases.
+	if strings.Contains(string(yamlBytes), "\n  gpu:") || strings.Contains(string(yamlBytes), "\n  gpu_count:") {
+		t.Errorf("strict profile unexpectedly emitted legacy GPU fields:\n%s", yamlBytes)
 	}
 	if parsed.Metadata.Engine != "vllm_omni" {
 		t.Errorf("engine mismatch: %q", parsed.Metadata.Engine)

@@ -139,6 +139,7 @@ func validateNamespaceRuntimeProjection(
 		ProfileName:  profile.Name,
 		Namespace:    profile.Namespace,
 		Spec:         &spec,
+		YAMLContract: obs.yamlContract,
 		Resources:    obs.resolvedResources,
 		NodeAffinity: obs.matchResult.NodeAffinity,
 		Cache:        obs.profileCache,
@@ -216,8 +217,8 @@ func fetchMountableCache(ctx context.Context, c client.Client, profile *aimv1alp
 // under the reserved prefix, always ≤63 chars and unguessable) and are routed
 // through the force-apply bucket so AIM Engine authoritatively reconciles drift;
 // the pipeline sets the owner reference for garbage collection. Force-apply is
-// safe by the reserved aim- prefix policy (CONTEXT.md "Authoritative apply", ADR
-// 0008); the hashed name adds an EXTRA margin specific to the per-profile scheme
+// safe by the reserved aim- prefix policy (CONTEXT.md "Authoritative apply");
+// the hashed name adds an EXTRA margin specific to the per-profile scheme
 // — it cannot collide with a hand-authored object even by accident, so a
 // force-apply only ever clobbers a runtime AIM Engine owns.
 //
@@ -243,11 +244,11 @@ func planNamespaceRuntime(
 	if spec.Image == "" {
 		return
 	}
-
 	runtime, configMap, err := serving.BuildNamespaceServingRuntime(serving.NamespaceRuntimeInput{
 		ProfileName:  profile.Name,
 		Namespace:    profile.Namespace,
 		Spec:         &spec,
+		YAMLContract: obs.yamlContract,
 		Resources:    obs.resolvedResources,
 		NodeAffinity: obs.matchResult.NodeAffinity,
 		Cache:        obs.profileCache,
@@ -342,7 +343,7 @@ func planClusterRuntime(
 // Both objects route through the authoritative force-apply bucket (SSA +
 // ForceOwnership); the pipeline sets the owner reference for GC. Force-apply here
 // is safe by the reserved aim- prefix policy ALONE (CONTEXT.md "Reserved `aim-`
-// prefix" / "Authoritative apply", ADR 0008): AIM Engine owns everything under
+// prefix" / "Authoritative apply"): AIM Engine owns everything under
 // aim- exclusively and is authoritative over it, so it force-applies
 // unconditionally — no pre-apply Get, no per-name branching. The justification is
 // the reserved PREFIX, not name unguessability: unlike the per-profile runtime,
@@ -364,12 +365,12 @@ func planNamespaceModelSlugRuntime(
 	if !modelSlugProjectable(spec, obs.projectable, obs.modelSlugWinner) {
 		return
 	}
-
 	runtime, configMap, err := serving.BuildNamespaceServingRuntime(serving.NamespaceRuntimeInput{
 		ProfileName:  profile.Name,
 		Name:         serving.ModelSlugRuntimeName(spec.AimId),
 		Namespace:    profile.Namespace,
 		Spec:         &spec,
+		YAMLContract: obs.yamlContract,
 		Resources:    obs.resolvedResources,
 		NodeAffinity: obs.matchResult.NodeAffinity,
 		Cache:        obs.profileCache,
@@ -393,7 +394,7 @@ func planNamespaceModelSlugRuntime(
 // — NOT by name unguessability: the model-slug name is readable and guessable, so
 // the per-profile hashed-name collision argument does not apply here (see
 // planNamespaceModelSlugRuntime and serving.ModelSlugRuntimeName; CONTEXT.md
-// "Reserved `aim-` prefix" / "Authoritative apply", ADR 0008). See
+// "Reserved `aim-` prefix" / "Authoritative apply"). See
 // planNamespaceModelSlugRuntime for the lifecycle notes.
 func planClusterModelSlugRuntime(
 	ctx context.Context,

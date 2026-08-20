@@ -174,7 +174,7 @@ make test-chainsaw \
 
 ### Runtime projection mode tests (`Both` and `Reduced`)
 
-Eager runtime projection is governed by the operator flag `--runtime-projection-mode` (`Exhaustive` / `Reduced` / `Both` default; see [ADR 0008](../../adr/0008-runtime-projection-from-profiles.md)). The default lane runs the operator in `Both`. Tests whose mutually-exclusive assertions only hold in `Reduced` are gated with `requires: reduced-mode` and excluded from the normal ENV selectors.
+Eager runtime projection is governed by the operator flag `--runtime-projection-mode` (`Exhaustive` / `Reduced` / `Both` default). The default lane runs the operator in `Both`. Tests whose mutually-exclusive assertions only hold in `Reduced` are gated with `requires: reduced-mode` and excluded from the normal ENV selectors.
 
 The default `mode-both` smoke asserts that the per-profile and model-slug runtimes coexist. `Exhaustive` has no dedicated cluster lane because its per-profile branch is already exercised by `Both`; its unique property (absence of the model-slug runtime) remains covered by unit tests. The `Reduced` lane additionally asserts the complementary shape: the model-slug runtime exists and the per-profile runtime does not.
 

@@ -37,6 +37,7 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 const (
@@ -48,7 +49,7 @@ const (
 	// reserved-prefix policy ALONE — a hand-authored runtime uses any other name,
 	// so a force-apply can only ever clobber a runtime AIM Engine owns, regardless
 	// of whether the name is hashed. See CONTEXT.md "Reserved `aim-` prefix" /
-	// "Authoritative apply" and ADR 0008.
+	// "Authoritative apply".
 	//
 	// Per-profile runtimes add one further margin ON TOP OF the prefix policy:
 	// RuntimeName appends a deterministic hash of the profile name, so the exact
@@ -85,7 +86,7 @@ const (
 //   - suffixed with an unguessable SHA-256-derived hash of profileName.
 //
 // The reserved aim- prefix already makes AIM Engine authoritative over this name
-// (see RuntimeNamePrefix, CONTEXT.md "Authoritative apply", ADR 0008), so the
+// (see RuntimeNamePrefix and CONTEXT.md "Authoritative apply"), so the
 // unconditional force-apply is safe on the prefix policy alone. The hash suffix
 // is an ADDITIONAL margin specific to the per-profile scheme: a hand-authored
 // object cannot even land on the exact aim-<truncated-profile>-<hash> name by
@@ -132,7 +133,7 @@ func ModelSlug(aimId string) string {
 // reserved aim- prefix policy alone — AIM Engine owns everything under aim-
 // exclusively, so a force-apply can only clobber a runtime it owns regardless of
 // whether the name is hashed. See CONTEXT.md "Reserved `aim-` prefix" /
-// "Authoritative apply" and ADR 0008.
+// "Authoritative apply".
 func ModelSlugRuntimeName(aimId string) string {
 	slug := ModelSlug(aimId)
 	if maxSlug := utils.MaxKubernetesNameLength - len(RuntimeNamePrefix); len(slug) > maxSlug {
@@ -169,6 +170,12 @@ type NamespaceRuntimeInput struct {
 	// Spec is the resolved profile spec (consumer overlays already
 	// materialised). Required.
 	Spec *aimv1alpha2.AIMProfileSpecCommon
+
+	// YAMLContract is inferred from the source profile YAML and inherited by
+	// derived profiles. Generated and hand-authored profiles pass an explicit
+	// CanonicalContract. The zero value is invalid so missing propagation fails
+	// during validation instead of silently changing the runtime schema.
+	YAMLContract profileyaml.Contract
 
 	// Resources is the resolved predictor resource requirements (the profile
 	// status.resources the profile controller computed). Falls back to
@@ -213,7 +220,7 @@ func BuildNamespaceServingRuntime(input NamespaceRuntimeInput) (*kservev1alpha1.
 
 	spec := input.Spec
 
-	yamlBytes, filename, err := AssembleProfileYAML(spec)
+	yamlBytes, filename, err := AssembleProfileYAMLForContract(spec, input.YAMLContract)
 	if err != nil {
 		return nil, nil, fmt.Errorf("assemble profile YAML: %w", err)
 	}

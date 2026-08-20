@@ -35,10 +35,9 @@ The base-image model is typically applied once by the platform team and reused a
 To use a container as a base image for custom models, it must:
 
 - Ship profile YAMLs under `/workspace/aim-runtime/profiles/general/`. The v1alpha2 discovery walker only scans `general/` when the image's `AIM_ID` is empty (which is the case for a generic base image).
-- Populate `aim_id` in each profile YAML — or leave it empty. If empty, the derivation supplies the architecture identity via `overrides.aimId` (see [Identity stamping](#identity-stamping) below). Both are supported.
-- Leave `model_id` and `model_sources` empty in those YAMLs. That's what makes a profile a "base profile" rather than a published deployable.
+- Leave `aim_id`, `model_id`, and model sources empty in those YAMLs. A materialized base `AIMProfile` must have both `spec.aimId` and `spec.modelSources` empty; setting only one side is rejected by the profile CRD. The derivation supplies the target identity through `overrides.aimId` / `overrides.modelId` and the weights through `overrides.modelSources` (see [Identity stamping](#identity-stamping) below).
 
-Base profile YAMLs **do** carry `precision`, `metric`, `acceleratorModel`, `acceleratorCount`, and `engineArgs` — these are intrinsic tuning artefacts of the base image and the whole reason a base profile is useful as a derivation source. Derivation copies them through to each derived profile (unless an `overrides.*` field replaces them), so a base image that ships one (MI300X, fp8, latency) profile and one (MI325X, fp16, throughput) profile produces two derived deployable profiles per model.
+Base profile YAMLs **do** carry `precision`, `metric`, accelerator metadata, and `engine_args` — these are intrinsic tuning artefacts of the base image and the whole reason a base profile is useful as a derivation source. Accelerator metadata may use legacy `gpu` / `gpu_count` fields or canonical `accelerator_model` / `accelerator_type` / `accelerator_count` fields. Discovery normalizes either shape into `AIMProfile.spec` while recording the source codec, modeled-field presence, and any runtime-only extensions. Derivation copies both the normalized values and that YAML contract, so custom profiles retain additions such as `metadata.capabilities` as well as the accelerator format accepted by the base runtime.
 
 AMD publishes `amdenterpriseai/aim-base` as a ready-to-use base image. You can also build your own following the layout described above.
 
@@ -227,10 +226,11 @@ spec:
     derivedFrom:
       selector:
         role: base
-        aimId: acme/custom-transformer
         modelRef:
           name: aim-base-vllm
     overrides:
+      aimId: acme/custom-transformer
+      modelId: acme/custom-transformer
       modelSources:
         - modelId: acme/custom-transformer
           sourceUri: s3://acme-models/custom-transformer

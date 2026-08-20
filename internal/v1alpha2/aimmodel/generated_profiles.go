@@ -36,6 +36,7 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 const annotationProfileGenerationFallback = constants.AimLabelDomain + "/profile-generation-fallback"
@@ -135,6 +136,7 @@ func buildDesiredGeneratedProfiles(
 	for _, candidate := range resolution.candidates {
 		annotations := generatedProfileAnnotations(model.Name, string(model.UID), candidate.fallback.Name)
 		annotations[annotationModelNamespace] = model.Namespace
+		annotations = profileyaml.Mark(annotations, profileyaml.CanonicalContract(&candidate.spec))
 		profile := &aimv1alpha2.AIMProfile{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        candidate.name,
@@ -178,11 +180,15 @@ func buildDesiredGeneratedClusterProfiles(
 		rejections:          resolution.rejections,
 	}
 	for _, candidate := range resolution.candidates {
+		annotations := profileyaml.Mark(
+			generatedProfileAnnotations(model.Name, string(model.UID), candidate.fallback.Name),
+			profileyaml.CanonicalContract(&candidate.spec),
+		)
 		profile := &aimv1alpha2.AIMClusterProfile{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        candidate.name,
 				Labels:      generatedProfileLabels(),
-				Annotations: generatedProfileAnnotations(model.Name, string(model.UID), candidate.fallback.Name),
+				Annotations: annotations,
 			},
 			Spec: aimv1alpha2.AIMClusterProfileSpec{AIMProfileSpecCommon: candidate.spec},
 		}

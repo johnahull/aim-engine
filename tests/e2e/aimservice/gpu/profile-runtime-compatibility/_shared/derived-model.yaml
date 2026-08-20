@@ -1,0 +1,22 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMModel
+metadata:
+  name: runtime-derived
+spec:
+  profiles:
+    derivedFrom:
+      selector:
+        role: base
+        modelRef:
+          name: runtime-base
+          scope: Namespace
+        acceleratorModel: MI300X
+        acceleratorCount: 1
+        metric: latency
+    versionPolicy: all
+    overrides:
+      aimId: Qwen/Qwen3-0.6B
+      modelId: Qwen/Qwen3-0.6B
+      modelSources:
+        - modelId: Qwen/Qwen3-0.6B
+          sourceUri: hf://Qwen/Qwen3-0.6B

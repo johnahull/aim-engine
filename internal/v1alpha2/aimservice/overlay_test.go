@@ -37,6 +37,7 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 // TestHasProfileOverrides_DetectsRealOverrides asserts hasProfileOverrides
@@ -104,6 +105,29 @@ func TestBuildServiceOverlayProfile_AppliesAllOverrides(t *testing.T) {
 	seed.Features = []string{"native-feature"}
 	seed.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "ghcr-secret"}}
 	seed.ServiceAccountName = "seed-sa"
+	seedContract, err := profileyaml.Inspect([]byte(`metadata:
+  engine: vllm
+  gpu: MI300X
+  gpu_count: 1
+  manual_selection_only: false
+  metric: latency
+  precision: fp16
+  type: optimized
+  capabilities:
+    reasoning: true
+engine_args: {}
+env_vars: {}
+`))
+	if err != nil {
+		t.Fatalf("Inspect seed profile YAML: %v", err)
+	}
+	seedProfile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        testProfileA,
+			Annotations: profileyaml.Mark(nil, seedContract),
+		},
+		Spec: aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: *seed},
+	}
 
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{
@@ -131,7 +155,10 @@ func TestBuildServiceOverlayProfile_AppliesAllOverrides(t *testing.T) {
 	}
 
 	obs := ServiceObservation{
-		ServiceFetchResult:    ServiceFetchResult{service: service},
+		ServiceFetchResult: ServiceFetchResult{
+			service: service,
+			profile: controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: seedProfile},
+		},
 		resolvedProfileSpec:   seed,
 		resolvedProfileStatus: &aimv1alpha2.AIMProfileStatus{},
 		profileName:           testProfileA,
@@ -149,6 +176,7 @@ func TestBuildServiceOverlayProfile_AppliesAllOverrides(t *testing.T) {
 	if overlay.Annotations[AnnotationOverlayService] != testServiceName {
 		t.Errorf("overlay missing service back-reference annotation, got %v", overlay.Annotations)
 	}
+	assertInheritedOverlayContract(t, overlay.Annotations)
 
 	if len(overlaySpec.ModelSources) != 1 || overlaySpec.ModelSources[0].ModelID != "user/finetune-v2" {
 		t.Errorf("ModelSources not replaced: %+v", overlaySpec.ModelSources)
@@ -208,6 +236,27 @@ func TestBuildServiceOverlayProfile_AppliesAllOverrides(t *testing.T) {
 	}
 	if overlaySpec.ServiceAccountName != "seed-sa" {
 		t.Errorf("ServiceAccountName must inherit from seed: %q", overlaySpec.ServiceAccountName)
+	}
+}
+
+func assertInheritedOverlayContract(t *testing.T, annotations map[string]string) {
+	t.Helper()
+
+	overlayContract, found, err := profileyaml.FromAnnotations(annotations)
+	if err != nil {
+		t.Fatalf("parse overlay YAML contract: %v", err)
+	}
+	if !found {
+		t.Fatal("overlay YAML contract annotation is missing")
+	}
+	for _, field := range []string{"gpu", "gpu_count", "manual_selection_only"} {
+		if !overlayContract.HasMetadataField(field) {
+			t.Errorf("overlay YAML contract missing inherited field %q: %s", field, overlayContract.Encode())
+		}
+	}
+	extensions := overlayContract.Extensions()
+	if _, ok := extensions.Metadata["capabilities"]; !ok {
+		t.Errorf("overlay dropped inherited capabilities: %#v", extensions.Metadata)
 	}
 }
 
@@ -526,6 +575,45 @@ func decodeJSONObject(t *testing.T, value *apiextensionsv1.JSON) map[string]any 
 		t.Fatalf("decode JSON: %v", err)
 	}
 	return out
+}
+
+func TestBuildServiceOverlayProfile_SucceedsAfterContractBackfill(t *testing.T) {
+	seedSpec := sampleProfileSpec()
+	seedProfile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: testProfileA, Namespace: "ns"},
+		Spec:       aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: *seedSpec},
+		Status:     aimv1alpha2.AIMProfileStatus{Origin: aimv1alpha1.ProfileOriginDerived},
+	}
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns", UID: "uid"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
+			ProfileOverrides: &aimv1alpha1.AIMServiceProfileOverrides{
+				AcceleratorModel: "MI325X",
+			},
+		},
+	}
+	obs := ServiceObservation{
+		ServiceFetchResult: ServiceFetchResult{
+			service: service,
+			profile: controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: seedProfile},
+		},
+		resolvedProfileSpec: seedSpec,
+		profileName:         testProfileA,
+	}
+
+	if _, _, err := buildServiceOverlayProfile(service, obs); err == nil {
+		t.Fatal("expected a derived seed without a profile YAML contract to fail")
+	}
+
+	seedProfile.Annotations = profileyaml.Mark(seedProfile.Annotations, profileyaml.DefaultContract())
+	overlay, _, err := buildServiceOverlayProfile(service, obs)
+	if err != nil {
+		t.Fatalf("buildServiceOverlayProfile after contract backfill: %v", err)
+	}
+	if overlay.Annotations[profileyaml.AnnotationContract] == "" {
+		t.Fatal("overlay did not inherit the backfilled profile YAML contract")
+	}
 }
 
 // TestBuildServiceOverlayProfile_StampsProvenanceLabels asserts the overlay

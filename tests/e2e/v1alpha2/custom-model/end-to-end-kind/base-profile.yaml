@@ -26,6 +26,9 @@ metadata:
     # Image-discovery profiles get it stamped automatically; hand-authored
     # seeds (this one) must opt in explicitly or they are silently skipped.
     aim.eai.amd.com/profile-copyable: "true"
+    # This seed stands in for discovery output, so it must carry the source
+    # profile's persisted runtime-YAML contract just like a discovered profile.
+    aim.eai.amd.com/profile-yaml-contract: '{"codec":"aim-profile/v1","metadataFields":["accelerator_count","accelerator_model","accelerator_type","engine","metric","precision","type"]}'
   labels:
     aim.eai.amd.com/profile-role: base
     aim.eai.amd.com/profile-origin: discovered

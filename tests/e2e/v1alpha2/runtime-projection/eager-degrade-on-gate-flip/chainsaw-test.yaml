@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
 #
-# Asymmetric teardown is additive. ADR 0008 specifies that eager
-# runtime projection is gated on "projectable" for CREATION, but once a runtime
+# Asymmetric teardown is additive. Eager runtime projection is gated on
+# "projectable" for CREATION, but once a runtime
 # exists a later gate flip (e.g. matching nodes vanish) must NOT delete it — the
 # runtime is kept and the profile is marked Degraded. This test validates that
 # contract live, for BOTH scopes, regardless of implementation:

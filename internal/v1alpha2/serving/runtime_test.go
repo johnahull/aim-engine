@@ -36,6 +36,7 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 func gpuResources() *corev1.ResourceRequirements {
@@ -120,9 +121,10 @@ func TestBuildNamespaceServingRuntime_WanProfileFidelity(t *testing.T) {
 	spec.AcceleratorCount = 4
 
 	runtime, cm, err := BuildNamespaceServingRuntime(NamespaceRuntimeInput{
-		ProfileName: "wan22-tp4-latency",
-		Namespace:   "aim-testing",
-		Spec:        spec,
+		ProfileName:  "wan22-tp4-latency",
+		Namespace:    "aim-testing",
+		Spec:         spec,
+		YAMLContract: profileyaml.CanonicalContract(spec),
 	})
 	if err != nil {
 		t.Fatalf("BuildNamespaceServingRuntime: %v", err)
@@ -168,6 +170,7 @@ func completeNoCacheRuntime(t *testing.T) (*kservev1alpha1.ServingRuntime, *core
 		ProfileName:  "qwen3-32b-mi300x",
 		Namespace:    "team-ml",
 		Spec:         spec,
+		YAMLContract: profileyaml.CanonicalContract(spec),
 		Resources:    gpuResources(),
 		NodeAffinity: mi300xAffinity(),
 	})
@@ -326,6 +329,67 @@ func TestBuildNamespaceServingRuntime_ProfileConfigMapAndEnv(t *testing.T) {
 	}
 }
 
+func TestBuildNamespaceServingRuntime_ConfigMapUsesInheritedYAMLContract(t *testing.T) {
+	cases := []struct {
+		name     string
+		contract profileyaml.Contract
+		present  []string
+		absent   []string
+	}{
+		{
+			name:     "legacy source",
+			contract: sourceContract(t, "  gpu: MI300X\n  gpu_count: 1\n  manual_selection_only: true\n"),
+			present:  []string{"gpu", "gpu_count", "manual_selection_only"},
+			absent:   []string{"accelerator_model", "accelerator_type", "accelerator_count"},
+		},
+		{
+			name:     "strict source",
+			contract: profileyaml.DefaultContract(),
+			present:  []string{"accelerator_model", "accelerator_type", "accelerator_count"},
+			absent:   []string{"gpu", "gpu_count", "manual_selection_only"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := sampleSpec()
+			spec.ManualSelectionOnly = true //nolint:staticcheck // Compatibility serialization is under test.
+			_, cm, err := BuildNamespaceServingRuntime(NamespaceRuntimeInput{
+				ProfileName:  "qwen3-32b-mi300x",
+				Namespace:    "team-ml",
+				Spec:         spec,
+				YAMLContract: tc.contract,
+			})
+			if err != nil {
+				t.Fatalf("BuildNamespaceServingRuntime: %v", err)
+			}
+			if len(cm.Data) != 1 {
+				t.Fatalf("ConfigMap entries = %d, want 1", len(cm.Data))
+			}
+
+			var raw string
+			for _, raw = range cm.Data {
+			}
+			var decoded struct {
+				Metadata map[string]any `json:"metadata"`
+			}
+			if err := yaml.Unmarshal([]byte(raw), &decoded); err != nil {
+				t.Fatalf("unmarshal mounted profile YAML: %v", err)
+			}
+			for _, key := range tc.present {
+				if _, ok := decoded.Metadata[key]; !ok {
+					t.Errorf("mounted profile YAML missing %q:\n%s", key, raw)
+				}
+			}
+			for _, key := range tc.absent {
+				if _, ok := decoded.Metadata[key]; ok {
+					t.Errorf("mounted profile YAML unexpectedly contains %q:\n%s", key, raw)
+				}
+			}
+		})
+	}
+}
+
 // TestBuildNamespaceServingRuntime_FrameworkEnvWinsOverProfile pins that the
 // operator-managed AIM_* framework env wins over a colliding profile
 // ContainerEnv: the identity-of-the-profile vars belong to the framework, not
@@ -339,9 +403,10 @@ func TestBuildNamespaceServingRuntime_FrameworkEnvWinsOverProfile(t *testing.T) 
 	}
 
 	runtime, _, err := BuildNamespaceServingRuntime(NamespaceRuntimeInput{
-		ProfileName: "qwen3-32b-mi300x",
-		Namespace:   "team-ml",
-		Spec:        spec,
+		ProfileName:  "qwen3-32b-mi300x",
+		Namespace:    "team-ml",
+		Spec:         spec,
+		YAMLContract: profileyaml.CanonicalContract(spec),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -385,6 +450,7 @@ func TestBuildNamespaceServingRuntime_WithProfileCache(t *testing.T) {
 		ProfileName:  "qwen3-32b-mi300x",
 		Namespace:    "team-ml",
 		Spec:         spec,
+		YAMLContract: profileyaml.CanonicalContract(spec),
 		Resources:    gpuResources(),
 		NodeAffinity: mi300xAffinity(),
 		Cache:        cache,
@@ -434,10 +500,11 @@ func TestBuildNamespaceServingRuntime_CacheNotReadyOmitsMount(t *testing.T) {
 	}
 
 	runtime, _, err := BuildNamespaceServingRuntime(NamespaceRuntimeInput{
-		ProfileName: "qwen3-32b-mi300x",
-		Namespace:   "team-ml",
-		Spec:        spec,
-		Cache:       cache,
+		ProfileName:  "qwen3-32b-mi300x",
+		Namespace:    "team-ml",
+		Spec:         spec,
+		YAMLContract: profileyaml.CanonicalContract(spec),
+		Cache:        cache,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -582,9 +649,10 @@ func TestBareCSRProfileID_MatchesShadowConfigMapKey(t *testing.T) {
 			// The complete namespace runtime is the shadow that completes it: it
 			// carries the colocated ConfigMap the env resolves against.
 			runtime, cm, err := BuildNamespaceServingRuntime(NamespaceRuntimeInput{
-				ProfileName: "qwen3-32b-mi300x",
-				Namespace:   "team-ml",
-				Spec:        spec,
+				ProfileName:  "qwen3-32b-mi300x",
+				Namespace:    "team-ml",
+				Spec:         spec,
+				YAMLContract: profileyaml.CanonicalContract(spec),
 			})
 			if err != nil {
 				t.Fatalf("BuildNamespaceServingRuntime: %v", err)

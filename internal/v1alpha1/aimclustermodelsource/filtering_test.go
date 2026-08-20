@@ -148,6 +148,42 @@ func TestMatchesSemver(t *testing.T) {
 			want:        true,
 		},
 		{
+			name:        "calendar preview is valid semver",
+			tag:         "2026.8.0-preview",
+			constraints: []string{">=2026.8.0-preview", "<2026.9.0"},
+			want:        true,
+		},
+		{
+			name:        "calendar preview sorts before rc",
+			tag:         "2026.8.0-preview",
+			constraints: []string{">=2026.8.0-rc1"},
+			want:        false,
+		},
+		{
+			name:        "calendar rc sorts after preview",
+			tag:         "2026.8.0-rc1",
+			constraints: []string{">2026.8.0-preview", "<2026.8.0"},
+			want:        true,
+		},
+		{
+			name:        "calendar full release sorts after rc",
+			tag:         "2026.8.0",
+			constraints: []string{">2026.8.0-rc1"},
+			want:        true,
+		},
+		{
+			name:        "calendar month is compared numerically",
+			tag:         "2026.10.0-preview",
+			constraints: []string{">2026.9.0", "<2026.11.0"},
+			want:        true,
+		},
+		{
+			name:        "zero-padded calendar month is invalid semver",
+			tag:         "2026.08.0-preview",
+			constraints: []string{">=2026.8.0-preview"},
+			want:        false,
+		},
+		{
 			name:        "version below minimum constraint",
 			tag:         "0.8.4",
 			constraints: []string{">=0.9"},

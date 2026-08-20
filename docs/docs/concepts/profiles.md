@@ -58,7 +58,7 @@ v1alpha2 stamps a small set of canonical labels on every operator-produced profi
 | `aim.eai.amd.com/source-model` | Name of the owning `AIMModel` / `AIMClusterModel` |
 | `aim.eai.amd.com/source-model-scope` | `namespace`, `cluster` |
 
-Two more provenance markers are **annotations**, not labels — nothing selects on them, so a label selector will never match:
+Two provenance markers are **annotations**, not labels — nothing selects on them, so a label selector will never match:
 
 | Annotation | Values |
 |---|---|
@@ -72,6 +72,38 @@ The matching `status` fields mirror the labels for kubectl-friendly access:
 - `status.deployable` derives from spec (also implicit from `profile-role`)
 
 See [Naming and Labels → Profile labels](../reference/naming-and-labels.md#profile-labels) for the canonical list (including label setters and selector recipes).
+
+## Projected profile YAML compatibility
+
+`AIMProfile.spec` is the canonical control-plane model used for profile selection, scheduling, derivation, and overrides. The YAML mounted into an AIM runtime is a versioned wire format. AIM Engine decodes source YAML into the canonical CRD and later uses the recorded source codec to encode it back into a format accepted by that runtime. Detection comes from the **source profile document**, never from the image repository or tag.
+
+The current `aim-profile/v1` codec covers the legacy, transitional, and strict accelerator field variants:
+
+| Source YAML field presence | Projected metadata |
+|---|---|
+| `gpu`, `gpu_count`, `manual_selection_only` | `gpu`, `gpu_count`, `manual_selection_only` |
+| `accelerator_model`, `accelerator_type`, `accelerator_count`, `manual_selection_only` | `accelerator_model`, `accelerator_type`, `accelerator_count`, `manual_selection_only` |
+| `accelerator_model`, `accelerator_type`, `accelerator_count` | `accelerator_model`, `accelerator_type`, `accelerator_count` |
+
+Discovery records one controller-owned `aim.eai.amd.com/profile-yaml-contract` JSON annotation containing:
+
+- the codec identifier;
+- the source presence of fields AIM Engine models; and
+- source-owned metadata or top-level extensions AIM Engine does not model.
+
+Profile sets, custom-model derivation, and AIMService overlays inherit the complete contract, so eager and lazy runtime projection reproduce the same field family and retain runtime-only additions such as `metadata.capabilities`. AIM Engine's normalized CRD values remain authoritative: opaque extensions cannot replace identity, hardware, engine, metric, precision, type, `engine_args`, or `env_vars`.
+
+`metadata.features` and `metadata.capabilities` are intentionally distinct. Features advertise runtime/container integration contracts, currently LoRA adapter support (`adapters` or `adapters-scale-only`). AIM Engine models features in `AIMProfile.spec.features` because service composition depends on them. Capabilities describe model/API behavior such as tool calling, structured outputs, and reasoning. AIM runtime validation consumes those flags, while AIM Engine currently preserves the complete capabilities block as an opaque source-owned extension. A profile may declare either field, both, or neither.
+
+If a later AIM Engine release starts modeling a field that an older contract stored as an extension, the existing opaque value remains authoritative until the source profile is inspected again. Re-inspection moves the value into the canonical CRD and records modeled field presence. This avoids replacing preserved future data with a zero-valued typed field during an upgrade.
+
+Source profiles may eventually declare a top-level `profile_schema_version`. Version `1` selects the current codec; profiles that omit it remain compatible with the established v1 document shape. Unknown explicit versions and unknown persisted codec identifiers fail explicitly rather than silently dropping fields. New structural formats can therefore add new codecs while old profiles continue using the codec recorded when they were discovered.
+
+Generated and hand-authored profiles that have no source YAML provenance use the strict canonical `accelerator_*` v1 format. Discovered and derived profiles must carry their inspected contract; projection waits for producer backfill rather than guessing a source schema from annotation absence or an image tag. The annotation is diagnostic controller state, not a normal user-facing configuration knob.
+
+Contracts are bounded to 64 KiB so they cannot consume Kubernetes' aggregate annotation budget. Unknown contract-envelope fields, oversized contracts, unknown codecs, and malformed source metadata fail explicitly. Opaque extension keys remain unrestricted within the bounded `extensions` maps.
+
+`manual_selection_only` is preserved only when the source schema contained that field. This is runtime-schema compatibility, not resolver behavior: `spec.manualSelectionOnly` remains deprecated and ignored for profile selection.
 
 ## Filtering profiles by `aimId` (field selector)
 

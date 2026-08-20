@@ -5,6 +5,9 @@ metadata:
   annotations:
     aim.eai.amd.com/base-image: docker.io/amdenterpriseai/aim-base:0.1.10
     aim.eai.amd.com/profile-copyable: "true"
+    # This seed stands in for discovery output, so it must carry the source
+    # profile's persisted runtime-YAML contract just like a discovered profile.
+    aim.eai.amd.com/profile-yaml-contract: '{"codec":"aim-profile/v1","metadataFields":["accelerator_count","accelerator_model","accelerator_type","engine","metric","precision","type"]}'
   labels:
     # Source-model labels stand in for what the AIMModel reconciler stamps
     # when it materialises profiles via image discovery. The selector below

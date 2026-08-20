@@ -43,6 +43,7 @@ import (
 	legacyaimmodel "github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimmodel"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimruntimeconfig"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 type ClusterModelReconciler struct {
@@ -433,6 +434,7 @@ func buildDesiredOfficialClusterModelProfiles(
 			annotationModelName: model.Name,
 			annotationBaseImage: entry.BaseImage,
 		}, aimprofile.ProfileSourceImage), true)
+		clusterProfile.Annotations = profileyaml.Mark(clusterProfile.Annotations, entry.YAMLContract)
 		// See buildDesiredOfficialProfiles for why the role label is
 		// derived from the spec rather than hardcoded — a base-image
 		// AIMClusterModel emits entries that classify as `base`.

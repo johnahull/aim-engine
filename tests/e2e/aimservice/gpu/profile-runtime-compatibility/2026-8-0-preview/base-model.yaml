@@ -1,0 +1,8 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMModel
+metadata:
+  name: runtime-base
+spec:
+  image: docker.io/silogenai/aim-instinct-base:2026.8.0-preview@sha256:b25ccd88e9314b09a1216682934b014f1ef5ed0585e49a118f0e56bd5b6ff42b
+  imagePullSecrets:
+    - name: dockerhub-regcred

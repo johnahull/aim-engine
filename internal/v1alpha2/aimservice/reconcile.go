@@ -92,7 +92,7 @@ type ServiceFetchResult struct {
 	httpRoute            controllerutils.FetchResult[*gatewayapiv1.HTTPRoute]
 	gateway              controllerutils.FetchResult[*gatewayapiv1.Gateway]
 
-	// legacyProfileConfigMap is the pre-ADR-0008 service-owned profile
+	// legacyProfileConfigMap is the legacy inline-predictor service-owned profile
 	// ConfigMap (<service>-profile-<hash>), fetched so PlanResources can
 	// garbage-collect it when a service that predates the runtime-reference
 	// rewrite is reconciled by the new operator. Absent (IsNotFound) for
@@ -493,7 +493,7 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 
 	result.inferenceService = fetchInferenceService(ctx, c, service)
 
-	// Fetch the orphaned pre-ADR-0008 service-owned profile ConfigMap, if any,
+	// Fetch the orphaned legacy inline-predictor profile ConfigMap, if any,
 	// so PlanResources can garbage-collect it on the first post-upgrade
 	// reconcile. Only ever a Get by the deterministic legacy name; a name-gen
 	// failure or a not-found result is handled downstream (cleanup is skipped).
@@ -773,11 +773,11 @@ func (r *ProfileServiceReconciler) composeDerivedNames(ctx context.Context, obs 
 	// Only the filename is consumed downstream (buildFrameworkEnvVars wires it
 	// into the runtime env); the referenced runtime now carries the projected
 	// profile ConfigMap, so the service no longer keeps the rendered YAML bytes.
-	_, filename, err := assembleProfileYAML(obs.resolvedProfileSpec)
+	filename, err := profileFilename(obs.resolvedProfileSpec)
 	if err != nil {
-		logger.Error(err, "failed to assemble profile YAML",
+		logger.Error(err, "failed to resolve profile YAML filename",
 			"service", service.Name, "profile", obs.profileName)
-		obs.configErr = fmt.Errorf("assemble profile YAML: %w", err)
+		obs.configErr = fmt.Errorf("resolve profile YAML filename: %w", err)
 		return
 	}
 	obs.profileYAMLName = filename
@@ -969,7 +969,7 @@ func (r *ProfileServiceReconciler) PlanResources(
 	return planResult
 }
 
-// planLegacyProfileConfigMapCleanup queues the orphaned pre-ADR-0008
+// planLegacyProfileConfigMapCleanup queues the orphaned legacy inline-predictor
 // service-owned profile ConfigMap (<service>-profile-<hash>) for deletion when
 // it is still present in observed state. Before the runtime-reference rewrite an
 // AIMService built its own profile ConfigMap; the referenced runtime now carries

@@ -45,6 +45,7 @@ import (
 	legacyaimmodel "github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimmodel"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimruntimeconfig"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
 
 const (
@@ -757,6 +758,7 @@ func buildDesiredOfficialProfiles(
 			annotationModelNamespace: model.Namespace,
 			annotationBaseImage:      entry.BaseImage,
 		}, aimprofile.ProfileSourceImage), true)
+		profile.Annotations = profileyaml.Mark(profile.Annotations, entry.YAMLContract)
 		// Image-discovery profiles are always `discovered`; the role label
 		// reflects structural classification of the catalog entry:
 		// deployable when the spec carries identity (aimId + modelSources),
