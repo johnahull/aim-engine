@@ -548,7 +548,7 @@ func appendProjectionComponentHealth(
 		return health
 	}
 	return append(health, controllerutils.ComponentHealth{
-		Component: "RuntimeProjection",
+		Component: runtimeProjectionComponent,
 		State:     constants.AIMStatusFailed,
 		Reason:    aimv1alpha2.AIMProfileReasonRuntimeProjectionFailed,
 		Message:   fmt.Sprintf("Failed to build projected runtime: %v", projectionErr),

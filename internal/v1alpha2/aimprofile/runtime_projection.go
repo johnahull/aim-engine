@@ -38,6 +38,11 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
 
+const (
+	runtimeProjectionComponent      = "RuntimeProjection"
+	runtimeProjectionReadyCondition = runtimeProjectionComponent + controllerutils.ComponentConditionSuffix
+)
+
 // runtimeProjectable reports whether a profile should have a runtime projected.
 // A profile is projectable when it is deployable, carries an image, and either
 // needs no accelerator (no hardware constraint to satisfy) or has at least one
@@ -475,6 +480,12 @@ func decorateProjectionCondition(
 		)
 		return
 	}
+
+	// RuntimeProjectionReady is emitted by component health only while runtime
+	// construction is failing. Remove the old component condition explicitly
+	// after recovery so it cannot continue gating aggregate readiness.
+	cm.Delete(runtimeProjectionReadyCondition)
+
 	switch {
 	case mode.ProjectsPerProfile():
 		// Exhaustive/Both project a per-profile runtime. Asymmetric teardown: when
