@@ -377,6 +377,14 @@ type AIMServiceProfileOverrides struct {
 	// +optional
 	ModelSources []AIMModelSource `json:"modelSources,omitempty"`
 
+	// Features adds optional runtime capabilities to the service-owned overlay
+	// profile. Values are unioned with the referenced profile's features. Use
+	// ["adapters"] to explicitly assert that the selected image honours the LoRA
+	// adapter runtime contract when discovery metadata does not advertise it.
+	// +optional
+	// +listType=set
+	Features []string `json:"features,omitempty"`
+
 	// AcceleratorModel replaces the referenced profile's acceleratorModel
 	// (e.g. "MI300X" -> "MI325X"). Validation against actual cluster
 	// availability is left to the AIMServiceTemplate / runtime layers.
@@ -440,6 +448,7 @@ type AIMServiceProfileOverrides struct {
 // With v1alpha2, a Profile can be used instead of a Template. Template and Profile
 // are mutually exclusive — at least one resolution path must be specified.
 // +kubebuilder:validation:XValidation:rule="!has(self.minReplicas) || !has(self.maxReplicas) || self.minReplicas <= self.maxReplicas",message="minReplicas must be less than or equal to maxReplicas"
+// +kubebuilder:validation:XValidation:rule="!has(self.adapterRuntime) || !has(self.adapterRuntime.maxRank) || self.adapterMode == 'dynamic'",message="spec.adapterRuntime.maxRank is only valid when spec.adapterMode is dynamic"
 type AIMServiceSpec struct {
 	// Model specifies which model to deploy using one of the available reference methods.
 	// Use `name` to reference an existing AIMModel/AIMClusterModel by name, or use `image`
@@ -618,6 +627,16 @@ type AIMServiceStatus struct {
 	// +listType=map
 	// +listMapKey=name
 	Adapters []AIMServiceAdapterStatus `json:"adapters,omitempty"`
+
+	// AdapterMaxRank is the resolved AIM_ADAPTER_MAX_RANK startup ceiling.
+	// It is only updated when the resolved configuration is valid; a rejected
+	// change leaves the last valid value in place. Static services recompute it
+	// from their declared adapter artifacts, preserving the last resolved value
+	// across transient lookup failures. Dynamic services report the
+	// configured/default startup ceiling, but preserve the previous higher
+	// ceiling while any declared adapter rank is unresolved before a decrease.
+	// +optional
+	AdapterMaxRank int32 `json:"adapterMaxRank,omitempty"`
 
 	// AdapterSubtreeSyncKey records the adapter-disk PVC generation and declared
 	// adapter set most recently reconciled onto the service's adapter subtree by

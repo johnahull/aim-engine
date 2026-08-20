@@ -31,6 +31,7 @@ import (
 	servingv1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -525,7 +526,7 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 	if seedObs.resolvedProfileSpec != nil {
 		cacheProfileName := seedObs.profileName
 		cacheProfileScope := seedObs.profileScope
-		if hasProfileOverrides(service.Spec.ProfileOverrides) {
+		if needsServiceOverlay(service) {
 			overlay, overlaySpec, err := buildServiceOverlayProfile(service, seedObs)
 			if err == nil {
 				resourceMatchSpec = &overlaySpec
@@ -610,7 +611,9 @@ func (r *ProfileServiceReconciler) ComposeState(
 	// the overlay's modelSources, not the seed's. Failures in override
 	// application surface through configErr so the AIMService gets a clean
 	// ConfigValid=False condition rather than silently stalling.
-	if obs.resolvedProfileSpec != nil && hasProfileOverrides(fetch.service.Spec.ProfileOverrides) {
+	//
+	if obs.resolvedProfileSpec != nil &&
+		needsServiceOverlay(fetch.service) {
 		overlay, overlaySpec, err := buildServiceOverlayProfile(fetch.service, obs)
 		if err != nil {
 			obs.configErr = fmt.Errorf("apply service profile overrides: %w", err)
@@ -618,11 +621,28 @@ func (r *ProfileServiceReconciler) ComposeState(
 			obs.desiredOverlayProfile = overlay
 			obs.profileName = overlay.Name
 			obs.profileScope = aimv1alpha1.AIMResolutionScopeNamespace
+
+			// Validate against the DESIRED overlay spec, never the observed one.
+			// The observed overlay lags by a reconcile whenever spec.profileOverrides
+			// changes, so validating against it would judge the new spec by the old
+			// overlay's contents — and because an invalid spec blocks apply
+			// (reconciler.go: shouldApply excludes hasInvalidSpec), the corrected
+			// overlay could never be written. That is a permanent deadlock, not a
+			// transient lag.
+			obs.resolvedProfileSpec = &overlaySpec
 			if fetch.overlayProfile.OK() && fetch.overlayProfile.Value != nil {
-				obs.resolvedProfileSpec = &fetch.overlayProfile.Value.Spec.AIMProfileSpecCommon
-				obs.resolvedProfileStatus = &fetch.overlayProfile.Value.Status
+				observed := fetch.overlayProfile.Value
+				specCurrent := equality.Semantic.DeepEqual(
+					observed.Spec.AIMProfileSpecCommon,
+					overlaySpec,
+				)
+				statusCurrent := observed.Status.ObservedGeneration == observed.Generation
+				if specCurrent && statusCurrent {
+					obs.resolvedProfileStatus = &observed.Status
+				} else {
+					obs.resolvedProfileStatus = nil
+				}
 			} else {
-				obs.resolvedProfileSpec = &overlaySpec
 				obs.resolvedProfileStatus = nil
 			}
 		}
@@ -664,12 +684,19 @@ func (r *ProfileServiceReconciler) ComposeState(
 	// Validate and interpret declared adapters (spec.adapters), and keep computing
 	// while removed adapters are still being reclaimed (status carries Deleting).
 	if aimadapter.IsActive(fetch.service) {
-		// Gate adapters on the resolved profile advertising the LoRA feature.
+		// Validate against the effective resolved profile. Explicit
+		// profileOverrides.features have already been applied to the desired
+		// service-owned overlay by this point.
 		if obs.resolvedProfileSpec != nil {
-			supports := obs.resolvedProfileSpec.SupportsAdapters()
-			fetch.adapterDeps.ProfileSupportsAdapters = &supports
+			supported := obs.resolvedProfileSpec.SupportsAdapters()
+			fetch.adapterDeps.ProfileSupportsAdapters = &supported
 		}
-		obs.adapterState = aimadapter.Compose(fetch.service, fetch.adapterDeps)
+		obs.adapterState = aimadapter.ComposeWithRuntimeConfig(
+			fetch.service,
+			fetch.adapterDeps,
+			fetch.mergedRuntimeConfig.Value,
+			fetch.mergedRuntimeConfig.Error,
+		)
 	}
 
 	return obs
@@ -912,7 +939,12 @@ func (r *ProfileServiceReconciler) PlanResources(
 			planResult.RequestRequeueAfter(5 * time.Second)
 		default:
 			if service.Spec.AdaptersEnabled() {
-				aimadapter.AddVolumeMount(isvc, service, obs.adapterState.AdapterDiskPVC)
+				aimadapter.AddVolumeMount(
+					isvc,
+					service,
+					obs.adapterState.AdapterDiskPVC,
+					obs.adapterState.MaxRank,
+				)
 			}
 			planResult.Apply(isvc)
 		}

@@ -1361,7 +1361,12 @@ func (r *ServiceReconciler) ComposeState(
 	// Validate and interpret declared adapters (spec.adapters), and keep computing
 	// while removed adapters are still being reclaimed (status carries Deleting).
 	if aimadapter.IsActive(fetch.service) {
-		obs.adapterState = aimadapter.Compose(fetch.service, fetch.adapterDeps)
+		obs.adapterState = aimadapter.ComposeWithRuntimeConfig(
+			fetch.service,
+			fetch.adapterDeps,
+			fetch.mergedRuntimeConfig.Value,
+			fetch.mergedRuntimeConfig.Error,
+		)
 	}
 
 	return obs
@@ -1511,7 +1516,12 @@ func (r *ServiceReconciler) PlanResources(
 		default:
 			if service.Spec.AdaptersEnabled() {
 				if isvcObj, ok := isvc.(*servingv1beta1.InferenceService); ok {
-					aimadapter.AddVolumeMount(isvcObj, service, obs.adapterState.AdapterDiskPVC)
+					aimadapter.AddVolumeMount(
+						isvcObj,
+						service,
+						obs.adapterState.AdapterDiskPVC,
+						obs.adapterState.MaxRank,
+					)
 				}
 			}
 			planResult.Apply(isvc)

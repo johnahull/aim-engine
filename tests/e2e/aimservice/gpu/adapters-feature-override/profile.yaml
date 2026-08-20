@@ -1,0 +1,35 @@
+# Namespaced Qwen3-8B profile for MI300X that deliberately omits
+# features: [adapters].
+#
+# The service explicitly asserts the missing capability through
+# spec.profileOverrides.features, so the controller derives a service-owned
+# overlay without mutating this shared seed profile.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: qwen3-8b-no-adapters-feature
+spec:
+  aimId: Qwen/Qwen3-8B
+  modelId: Qwen/Qwen3-8B
+  engine: vllm
+  metric: latency
+  precision: fp16
+  type: unoptimized
+  primary: true
+  acceleratorModel: MI300X
+  acceleratorType: gpu
+  acceleratorCount: 1
+  image: amdenterpriseai/aim-base:0.13
+  modelSources:
+    - modelId: Qwen/Qwen3-8B
+      sourceUri: hf://Qwen/Qwen3-8B
+      # Qwen3-8B fp16 weights are roughly 16 GiB; leave download headroom.
+      size: 25Gi
+  caching:
+    enabled: true
+  engineArgs:
+    gpu-memory-utilization: 0.9
+    max-model-len: 4096
+    max-num-batched-tokens: 2048
+    max-num-seqs: 4
+    tensor-parallel-size: 1

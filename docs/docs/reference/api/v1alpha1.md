@@ -82,6 +82,28 @@ _Appears in:_
 | `dynamic` | AdapterModeDynamic permits editing spec.adapters and mounts the disk even<br />at zero adapters.<br /> |
 
 
+#### AIMAdapterRuntimeConfig
+
+
+
+AIMAdapterRuntimeConfig configures the inference runtime's LoRA adapter
+capacity. It is shared by AIMService and namespace/cluster RuntimeConfigs so
+services can override administrator-provided defaults.
+
+
+
+_Appears in:_
+- [AIMClusterRuntimeConfigSpec](#aimclusterruntimeconfigspec)
+- [AIMRuntimeConfigCommon](#aimruntimeconfigcommon)
+- [AIMRuntimeConfigSpec](#aimruntimeconfigspec)
+- [AIMServiceRuntimeConfig](#aimserviceruntimeconfig)
+- [AIMServiceSpec](#aimservicespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `maxRank` _integer_ | MaxRank is the startup-time LoRA rank ceiling for dynamic adapter mode.<br />A service-level value takes precedence over namespace and cluster<br />RuntimeConfig values. When unset, the controller uses a conservative<br />built-in default.<br />Static adapter services infer the required maximum rank from their declared<br />AIMArtifact objects. A service-level value is rejected in static mode;<br />inherited RuntimeConfig values are ignored because one RuntimeConfig may<br />serve both static and dynamic services.<br />Allowed values mirror vLLM's MaxLoRARanks:<br />1, 8, 16, 32, 64, 128, 256, 320, and 512.<br />Changing this value changes the inference container contract and rolls the<br />serving workload. Increases take effect immediately. A decrease is deferred<br />while any declared adapter artifact's rank is unresolved; the controller<br />retains the last resolved ceiling until every rank can be checked against<br />the lower value. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+
+
 #### AIMAdapterState
 
 _Underlying type:_ _string_
@@ -514,6 +536,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `adapterRuntime` _[AIMAdapterRuntimeConfig](#aimadapterruntimeconfig)_ | AdapterRuntime configures LoRA adapter capacity for inference containers.<br />Service values override namespace and cluster RuntimeConfig defaults. |  | Optional: \{\} <br /> |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
@@ -1566,6 +1589,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `adapterRuntime` _[AIMAdapterRuntimeConfig](#aimadapterruntimeconfig)_ | AdapterRuntime configures LoRA adapter capacity for inference containers.<br />Service values override namespace and cluster RuntimeConfig defaults. |  | Optional: \{\} <br /> |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
@@ -1628,6 +1652,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `adapterRuntime` _[AIMAdapterRuntimeConfig](#aimadapterruntimeconfig)_ | AdapterRuntime configures LoRA adapter capacity for inference containers.<br />Service values override namespace and cluster RuntimeConfig defaults. |  | Optional: \{\} <br /> |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
@@ -2090,6 +2115,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources replaces the referenced profile's modelSources entirely.<br />Use this to point a profile at user-supplied weights (e.g. a fine-tuned<br />checkpoint) without forking the profile itself. The first source's<br />modelId becomes the overlay profile's modelId. |  | Optional: \{\} <br /> |
+| `features` _string array_ | Features adds optional runtime capabilities to the service-owned overlay<br />profile. Values are unioned with the referenced profile's features. Use<br />["adapters"] to explicitly assert that the selected image honours the LoRA<br />adapter runtime contract when discovery metadata does not advertise it. |  | Optional: \{\} <br /> |
 | `acceleratorModel` _string_ | AcceleratorModel replaces the referenced profile's acceleratorModel<br />(e.g. "MI300X" -> "MI325X"). Validation against actual cluster<br />availability is left to the AIMServiceTemplate / runtime layers. |  | Optional: \{\} <br /> |
 | `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor replaces the referenced profile's acceleratorVendor. |  | Enum: [amd nvidia] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount replaces the referenced profile's acceleratorCount. |  | Optional: \{\} <br /> |
@@ -2134,6 +2160,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `adapterRuntime` _[AIMAdapterRuntimeConfig](#aimadapterruntimeconfig)_ | AdapterRuntime configures LoRA adapter capacity for inference containers.<br />Service values override namespace and cluster RuntimeConfig defaults. |  | Optional: \{\} <br /> |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
@@ -2194,6 +2221,7 @@ _Appears in:_
 | `maxReplicas` _integer_ | MaxReplicas specifies the maximum number of replicas for autoscaling.<br />Required when MinReplicas is set or when AutoScaling configuration is provided. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `autoScaling` _[AIMServiceAutoScaling](#aimserviceautoscaling)_ | AutoScaling configures advanced autoscaling behavior using KEDA.<br />Supports custom metrics from OpenTelemetry backend.<br />When specified, MinReplicas and MaxReplicas should also be set. |  | Optional: \{\} <br /> |
 | `runtimeConfigName` _string_ | Name is the name of the runtime config to use for this resource. If a runtime config with this name exists both<br />as a namespace and a cluster runtime config, the values are merged together, the namespace config taking priority<br />over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster<br />runtime config with the name `default` is used, if it exists. |  | Optional: \{\} <br /> |
+| `adapterRuntime` _[AIMAdapterRuntimeConfig](#aimadapterruntimeconfig)_ | AdapterRuntime configures LoRA adapter capacity for inference containers.<br />Service values override namespace and cluster RuntimeConfig defaults. |  | Optional: \{\} <br /> |
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
@@ -2229,6 +2257,7 @@ _Appears in:_
 | `cache` _[AIMServiceCacheStatus](#aimservicecachestatus)_ | Cache captures cache-related status for this service. |  | Optional: \{\} <br /> |
 | `runtime` _[AIMServiceRuntimeStatus](#aimserviceruntimestatus)_ | Runtime captures runtime status including replica counts. |  | Optional: \{\} <br /> |
 | `adapters` _[AIMServiceAdapterStatus](#aimserviceadapterstatus) array_ | Adapters reports the per-adapter disk-side status for services that declare<br />spec.adapters. One entry per declared adapter. Observation is<br />best-effort/eventual; the disk state the controller wrote is authoritative. |  | Optional: \{\} <br /> |
+| `adapterMaxRank` _integer_ | AdapterMaxRank is the resolved AIM_ADAPTER_MAX_RANK startup ceiling.<br />It is only updated when the resolved configuration is valid; a rejected<br />change leaves the last valid value in place. Static services recompute it<br />from their declared adapter artifacts, preserving the last resolved value<br />across transient lookup failures. Dynamic services report the<br />configured/default startup ceiling, but preserve the previous higher<br />ceiling while any declared adapter rank is unresolved before a decrease. |  | Optional: \{\} <br /> |
 | `adapterSubtreeSyncKey` _string_ | AdapterSubtreeSyncKey records the adapter-disk PVC generation and declared<br />adapter set most recently reconciled onto the service's adapter subtree by<br />the subtree-sync Job. The controller re-runs the sync Job whenever the<br />adapter set or storage binding changes. This both reclaims removed adapters<br />and provisions a fresh subtree after a PVC or base artifact is recreated. |  | Optional: \{\} <br /> |
 | `adapterDiskPersistentVolumeClaim` _string_ | AdapterDiskPersistentVolumeClaim is the shared adapter-disk PVC whose<br />service subtree was most recently synchronized successfully. Together with<br />AdapterDiskPersistentVolumeClaimUID it identifies the currently mountable<br />storage binding and is reused through transient parent-resolution gaps. |  | Optional: \{\} <br /> |
 | `adapterDiskPersistentVolumeClaimUid` _string_ | AdapterDiskPersistentVolumeClaimUID is the Kubernetes UID of<br />AdapterDiskPersistentVolumeClaim. A same-name PVC recreation receives a new<br />UID, forcing the controller to provision and stage the service subtree on<br />the replacement storage before switching the InferenceService mount. |  | Optional: \{\} <br /> |
@@ -2995,7 +3024,7 @@ _Appears in:_
 ProfileOverrides mutates selected source profiles when creating derived copies.
 
 Identity fields (`aimId`, `modelId`, `profileId`) and behavioural fields
-(`image`, `acceleratorModel`, `acceleratorCount`, env, args, modelSources)
+(`image`, `features`, `acceleratorModel`, `acceleratorCount`, env, args, modelSources)
 always WRITE onto the derived profile. They are the "stamp on the output"
 half of the derivation contract — the `selector` half FILTERS source
 candidates and never mutates anything. Keeping these halves separated is
@@ -3018,6 +3047,7 @@ _Appears in:_
 | `modelId` _string_ | ModelId stamps the derived profile's spec.modelId. When set, wins<br />over both the source profile's modelId AND the auto-derivation from<br />modelSources[0].modelId. REQUIRED when the enclosing selector has<br />role=base. |  | Optional: \{\} <br /> |
 | `profileId` _string_ | ProfileId stamps the derived profile's spec.profileId. Optional —<br />most callers leave this empty and let the source profile's profileId<br />carry through (or the reconciler synthesise one). |  | Optional: \{\} <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources replaces the copied profile's modelSources. When<br />modelSources[0].modelId is set and overrides.modelId is unset, the<br />derived profile's modelId is auto-derived from modelSources[0]; an<br />explicit overrides.modelId always wins. |  | Optional: \{\} <br /> |
+| `features` _string array_ | Features adds optional runtime capabilities to the copied profile. Values<br />are unioned with the source profile's features; an override cannot remove<br />a capability advertised by the source. |  | Optional: \{\} <br /> |
 | `image` _string_ | Image overrides the runtime container image used by the derived<br />profiles. When empty the deployment image is rebased onto the source<br />profile's base-image (status.baseImage) so private mirrors stay<br />self-contained. |  | Optional: \{\} <br /> |
 | `acceleratorModel` _string_ | AcceleratorModel replaces the copied profile's acceleratorModel. |  | Optional: \{\} <br /> |
 | `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor replaces the copied profile's acceleratorVendor. |  | Enum: [amd nvidia] <br />Optional: \{\} <br /> |

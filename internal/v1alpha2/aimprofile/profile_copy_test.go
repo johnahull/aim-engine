@@ -308,6 +308,34 @@ func TestApplyProfileCopyOverrides_IdentityOverridesWinOverSource(t *testing.T) 
 	}
 }
 
+func TestApplyProfileCopyOverrides_AddsFeaturesAsSetUnion(t *testing.T) {
+	t.Parallel()
+
+	spec, err := ApplyProfileCopyOverrides(
+		aimv1alpha2.AIMProfileSpecCommon{
+			Features: []string{"native-feature", "adapters"},
+		},
+		&aimv1alpha1.ProfileOverrides{
+			Features: []string{"adapters", "service-feature"},
+		},
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("ApplyProfileCopyOverrides() error = %v", err)
+	}
+
+	want := []string{"native-feature", "adapters", "service-feature"}
+	if len(spec.Features) != len(want) {
+		t.Fatalf("Features = %v, want %v", spec.Features, want)
+	}
+	for i := range want {
+		if spec.Features[i] != want[i] {
+			t.Fatalf("Features = %v, want stable union %v", spec.Features, want)
+		}
+	}
+}
+
 // TestApplyProfileCopyOverrides_ModelSourcesAutoDeriveFallback verifies
 // that when overrides.ModelId is unset, modelSources[0].modelId still
 // auto-derives onto the result (historical convenience for

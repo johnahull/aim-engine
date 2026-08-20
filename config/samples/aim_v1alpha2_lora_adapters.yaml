@@ -1,8 +1,8 @@
 # LoRA adapter support — minimal MVP worked example.
 #
 # MVP contract (see docs/docs/explanation/lora-adapters.md):
-#   * The operator pre-creates the parent base-model AIMArtifact with an
-#     `adapterDisk` block (AIMProfileCache auto-propagation is deferred).
+#   * Adapter-enabled profile caches request a shared adapter disk
+#     automatically. Configure a RWX-capable storage class through RuntimeConfig.
 #   * Adapters are reference-only. spec.adapterMode selects the contract:
 #     static (the default, shown here) mounts the adapter disk with a
 #     create-time-fixed set and freezes spec.adapters; dynamic allows editing
@@ -10,9 +10,14 @@
 #     add/remove never restarts the pod. adapterMode is immutable after creation.
 #   * The resolved profile must have exactly one model source, and the base
 #     model must be cached with `Shared` caching and an exact sourceUri match.
+#   * The resolved profile must advertise features: [adapters]. For a legacy or
+#     custom profile whose image is known to support the adapter contract, set
+#     spec.profileOverrides.features: [adapters] explicitly.
 ---
-# 1. Parent base model with an adapter disk (operator-created bootstrap).
-#    Provisions two PVCs: the model cache PVC and a shared RWX adapter disk.
+# 1. Optional pre-created parent base model with an adapter disk. This keeps the
+#    sample standalone; normally an adapter-enabled profile cache creates or
+#    updates the model artifact and requests the adapter disk automatically.
+#    The artifact provisions two PVCs: model cache and shared RWX adapter disk.
 apiVersion: aim.eai.amd.com/v1alpha1
 kind: AIMArtifact
 metadata:

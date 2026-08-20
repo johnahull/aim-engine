@@ -404,6 +404,25 @@ spec:
                       - readOnly: true
                     (env[?name == 'AIM_ADAPTER_SOURCE']):
                       - value: /adapters
+                    (env[?name == 'AIM_ADAPTER_MAX_RANK']):
+                      - value: "32"
+
+    - name: Assert the dynamic ceiling is the built-in default
+      description: |
+        Dynamic mode cannot infer a ceiling from the declared set (future
+        adapters are unknown), so with no service or RuntimeConfig value it
+        resolves the built-in default of 32 — and holds it even at zero
+        adapters, since the ceiling is a startup property of the pod.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: adapters-dynamic-service
+              status:
+                adapterMaxRank: 32
 
     - name: Verify the service subtree has no adapter directories left
       try:

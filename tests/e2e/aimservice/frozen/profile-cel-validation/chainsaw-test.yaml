@@ -6,6 +6,8 @@
 # - spec.profile and spec.template are mutually exclusive
 # - spec.profileOverrides requires spec.profile
 # - at least one of spec.model or spec.profile must be specified
+# - spec.adapterRuntime.maxRank accepts only vLLM-supported rank ceilings
+# - spec.adapterRuntime.maxRank is only valid in dynamic adapter mode
 #
 # Also validates that version-independent fields work across API versions:
 # - v1alpha1 can use spec.profile (no version gating)
@@ -156,6 +158,41 @@ spec:
                 template:
                   name: some-template
 
+    - name: Reject unsupported adapter max rank
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMService
+              metadata:
+                name: test-cel-invalid-adapter-max-rank
+              spec:
+                model:
+                  image: registry.example.com/test-image:1.0.0
+                adapterMode: dynamic
+                adapterRuntime:
+                  maxRank: 48
+
+    - name: Reject adapter max rank when mode defaults to static
+      try:
+        - apply:
+            expect:
+              - check:
+                  ($error != null): true
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMService
+              metadata:
+                name: test-cel-static-adapter-max-rank
+              spec:
+                model:
+                  image: registry.example.com/test-image:1.0.0
+                adapterRuntime:
+                  maxRank: 64
+
     # --- Acceptance cases ---
 
     - name: Accept v1alpha2 service with profile only
@@ -261,6 +298,27 @@ spec:
               kind: AIMService
               metadata:
                 name: test-cel-v1a2-model
+
+    - name: Accept supported adapter max rank
+      try:
+        - apply:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMService
+              metadata:
+                name: test-cel-valid-adapter-max-rank
+              spec:
+                model:
+                  image: registry.example.com/test-image:1.0.0
+                adapterMode: dynamic
+                adapterRuntime:
+                  maxRank: 320
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: test-cel-valid-adapter-max-rank
 
     # --- Ratcheting cases (optionalOldSelf) ---
 

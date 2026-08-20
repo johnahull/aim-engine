@@ -57,6 +57,9 @@ func hasProfileOverrides(o *aimv1alpha1.AIMServiceProfileOverrides) bool {
 	if len(o.ModelSources) > 0 {
 		return true
 	}
+	if len(o.Features) > 0 {
+		return true
+	}
 	if o.AcceleratorModel != "" {
 		return true
 	}
@@ -81,6 +84,14 @@ func hasProfileOverrides(o *aimv1alpha1.AIMServiceProfileOverrides) bool {
 	return false
 }
 
+// needsServiceOverlay is the single decision used by both fetch and compose.
+// Keeping it shared is important: if ComposeState can plan an overlay that
+// FetchRemoteState never observes, the overlay remains perpetually "not ready"
+// and the service never advances to its profile cache or InferenceService.
+func needsServiceOverlay(service *aimv1alpha1.AIMService) bool {
+	return hasProfileOverrides(service.Spec.ProfileOverrides)
+}
+
 // asProfileOverrides reshapes the service-level override block onto the shared
 // aimv1alpha1.ProfileOverrides type that aimprofile.ApplyProfileCopyOverrides
 // expects. The two types intentionally have the same field set; this is a
@@ -92,6 +103,7 @@ func asProfileOverrides(o *aimv1alpha1.AIMServiceProfileOverrides) *aimv1alpha1.
 	}
 	return &aimv1alpha1.ProfileOverrides{
 		ModelSources:                o.ModelSources,
+		Features:                    o.Features,
 		AcceleratorModel:            o.AcceleratorModel,
 		AcceleratorVendor:           o.AcceleratorVendor,
 		AcceleratorCount:            o.AcceleratorCount,

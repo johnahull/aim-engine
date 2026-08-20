@@ -113,11 +113,44 @@ type AIMScaleFromZeroConfig struct {
 	ActivationMetricQueryTemplate string `json:"activationMetricQueryTemplate,omitempty"`
 }
 
+// AIMAdapterRuntimeConfig configures the inference runtime's LoRA adapter
+// capacity. It is shared by AIMService and namespace/cluster RuntimeConfigs so
+// services can override administrator-provided defaults.
+type AIMAdapterRuntimeConfig struct {
+	// MaxRank is the startup-time LoRA rank ceiling for dynamic adapter mode.
+	// A service-level value takes precedence over namespace and cluster
+	// RuntimeConfig values. When unset, the controller uses a conservative
+	// built-in default.
+	//
+	// Static adapter services infer the required maximum rank from their declared
+	// AIMArtifact objects. A service-level value is rejected in static mode;
+	// inherited RuntimeConfig values are ignored because one RuntimeConfig may
+	// serve both static and dynamic services.
+	//
+	// Allowed values mirror vLLM's MaxLoRARanks:
+	// 1, 8, 16, 32, 64, 128, 256, 320, and 512.
+	//
+	// Changing this value changes the inference container contract and rolls the
+	// serving workload. Increases take effect immediately. A decrease is deferred
+	// while any declared adapter artifact's rank is unresolved; the controller
+	// retains the last resolved ceiling until every rank can be checked against
+	// the lower value.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:XValidation:rule="self in [1, 8, 16, 32, 64, 128, 256, 320, 512]",message="maxRank must be one of 1, 8, 16, 32, 64, 128, 256, 320, or 512"
+	MaxRank *int32 `json:"maxRank,omitempty"`
+}
+
 // AIMServiceRuntimeConfig contains runtime configuration fields that apply to services.
 // This struct is shared between AIMService.spec (inlined) and AIMRuntimeConfigCommon,
 // allowing services to override these specific runtime settings while inheriting defaults
 // from namespace/cluster RuntimeConfigs.
 type AIMServiceRuntimeConfig struct {
+	// AdapterRuntime configures LoRA adapter capacity for inference containers.
+	// Service values override namespace and cluster RuntimeConfig defaults.
+	// +optional
+	AdapterRuntime *AIMAdapterRuntimeConfig `json:"adapterRuntime,omitempty"`
+
 	// Storage configures storage defaults for this service's PVCs and caches.
 	// When set, these values override namespace/cluster runtime config defaults.
 	// +optional

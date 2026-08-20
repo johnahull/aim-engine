@@ -1,0 +1,223 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# AIMService GPU E2E: explicit adapter feature override
+#
+# This reproduces the validated live setup with public Hugging Face artifacts:
+#   base model: Qwen/Qwen3-8B
+#   adapter:    XinyuanWang/qwen3-8b-medical-lora (rank 16)
+#   image:      amdenterpriseai/aim-base:0.13
+#
+# The seed AIMProfile intentionally does NOT advertise features: [adapters].
+# The service explicitly sets profileOverrides.features: [adapters], which must:
+#   1. fork a service-owned overlay carrying the asserted adapter feature;
+#   2. infer AIM_ADAPTER_MAX_RANK=16 from the adapter artifact;
+#   3. stage and mount the adapter subtree read-only at /adapters; and
+#   4. expose the adapter as a usable OpenAI model.
+#
+# Requires:
+# - AMD MI300X GPU capacity.
+# - Longhorn (RWX) for the adapter disk.
+#
+# Run against the current vcluster:
+#   make test-chainsaw ENV=gpu \
+#     CHAINSAW_TEST_DIR=tests/e2e/aimservice/gpu/adapters-feature-override \
+#     CHAINSAW_ENV_SELECTOR=
+#
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: adapters-feature-override
+  labels:
+    requires: gpu
+    hf-access: anonymous
+spec:
+  description: >-
+    Serve the public Qwen3-8B medical LoRA through the full v1alpha2 pipeline
+    from a seed profile without the adapters feature, using an explicit
+    profile override; verify overlay materialisation, rank inference, disk
+    mounting, /v1/models registration, and an actual chat completion addressed
+    to the adapter model.
+  timeouts:
+    assert: 600s
+  steps:
+    - name: Create the runtime config with gateway routing
+      try:
+        - apply:
+            file: runtime-config.yaml
+
+    - name: Pre-create the Qwen3-8B artifact with an RWX adapter disk
+      try:
+        - apply:
+            file: base-artifact.yaml
+        - assert:
+            # First-time Qwen3-8B download is roughly 16 GiB.
+            timeout: 40m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: qwen3-8b-base
+              status:
+                status: Ready
+                (adapterPersistentVolumeClaim != ""): true
+
+    - name: Create the public rank-16 medical LoRA artifact
+      try:
+        - apply:
+            file: adapter-artifact.yaml
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMArtifact
+              metadata:
+                name: qwen3-8b-medical-lora
+              status:
+                status: Ready
+
+    - name: Create the feature-silent Qwen profile
+      try:
+        - apply:
+            file: profile.yaml
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: qwen3-8b-no-adapters-feature
+              status:
+                status: Ready
+
+    - name: Create the adapter-serving AIMService
+      try:
+        - apply:
+            file: service.yaml
+
+    - name: Assert the adapter is staged and rank 16 reaches service status
+      try:
+        - assert:
+            timeout: 15m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: qwen3-8b-medical-lora
+              status:
+                adapterMaxRank: 16
+                (adapters[?name == 'qwen3-8b-medical-lora']):
+                  - state: Downloaded
+      catch:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              echo "===== AIMService status ====="
+              kubectl get aimservice -n "$NAMESPACE" qwen3-8b-medical-lora -o yaml || true
+              echo "===== adapter staging Jobs ====="
+              kubectl get jobs -n "$NAMESPACE" -l aim.eai.amd.com/component=adapter-stage || true
+              kubectl logs -n "$NAMESPACE" -l aim.eai.amd.com/component=adapter-stage --tail=200 || true
+
+    - name: Assert the service resolves to a Ready service-owned overlay
+      try:
+        - assert:
+            timeout: 30m
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMService
+              metadata:
+                name: qwen3-8b-medical-lora
+              status:
+                status: Running
+                resolvedProfile:
+                  scope: Namespace
+                  (name != 'qwen3-8b-no-adapters-feature'): true
+      catch:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              echo "===== AIMService ====="
+              kubectl get aimservice -n "$NAMESPACE" qwen3-8b-medical-lora -o yaml || true
+              echo "===== profiles and caches ====="
+              kubectl get aimprofile,aimprofilecache -n "$NAMESPACE" -o yaml || true
+              echo "===== InferenceService ====="
+              kubectl get inferenceservice -n "$NAMESPACE" -o yaml || true
+              echo "===== predictor pods ====="
+              kubectl get pods -n "$NAMESPACE" -o wide || true
+              kubectl describe pods -n "$NAMESPACE" -l serving.kserve.io/inferenceservice || true
+              kubectl logs -n "$NAMESPACE" -l serving.kserve.io/inferenceservice --tail=200 --all-containers || true
+
+    - name: Assert the overlay carries the explicit adapter feature
+      description: |
+        The seed profile remains reusable and feature-silent. Its service-owned
+        overlay must contain the explicitly asserted adapters feature.
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                annotations:
+                  aim.eai.amd.com/overlay-service: qwen3-8b-medical-lora
+              spec:
+                (contains(features, 'adapters')): true
+
+    - name: Assert the seed profile still does not advertise adapter support
+      try:
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: qwen3-8b-no-adapters-feature
+              spec:
+                (contains(features || `[]`, 'adapters')): false
+
+    - name: Assert the adapter disk and rank contract reach the inference model
+      try:
+        - assert:
+            timeout: 5m
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: qwen3-8b-medical-lora
+              spec:
+                predictor:
+                  model:
+                    (volumeMounts[?mountPath == '/adapters']):
+                      - readOnly: true
+                        (subPath != ''): true
+                    (env[?name == 'AIM_ADAPTER_SOURCE']):
+                      - value: /adapters
+                    (env[?name == 'AIM_ADAPTER_MODE']):
+                      - value: static
+                    (env[?name == 'AIM_ADAPTER_MAX_RANK']):
+                      - value: "16"
+
+    - name: Verify the adapter is listed and can serve a chat completion
+      description: |
+        Registration in /v1/models proves the staged directory was loaded.
+        Sending a completion with model=qwen3-8b-medical-lora proves the adapter
+        is actually addressable for inference, not merely present on disk.
+      try:
+        - script:
+            timeout: 15m
+            env:
+              - name: ADAPTER_NAME
+                value: qwen3-8b-medical-lora
+              - name: VALIDATE_ADAPTER_COMPLETION
+                value: "true"
+              - name: ADAPTER_PROMPT
+                value: Reply with exactly OK.
+              - name: HTTP_RETRY_DEADLINE
+                value: "900"
+              - name: HTTP_BASE_PATH
+                value: (join('', ['/integration/adapters-feature-override/', $namespace, '/qwen3-8b-medical-lora/v1']))
+            content: bash ../_shared/validate-adapter-loaded.sh

@@ -215,6 +215,99 @@ spec:
                       - readOnly: true
                     (env[?name == 'AIM_ADAPTER_SOURCE']):
                       - value: /adapters
+                    (env[?name == 'AIM_ADAPTER_MAX_RANK']):
+                      - value: "16"
+
+    - name: Assert the resolved rank ceiling is reported on status
+      description: |
+        Static mode infers AIM_ADAPTER_MAX_RANK from the largest declared
+        adapter rank (16 here). status.adapterMaxRank mirrors the value that
+        actually reached the workload.
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: adapters-staged-service
+              status:
+                adapterMaxRank: 16
+
+    - name: A raised adapter rank re-resolves the ceiling
+      description: |
+        AIMArtifact.spec.rank is mutable and feeds the static ceiling, so a rank
+        edit must enqueue the consuming service rather than waiting for an
+        unrelated event. Regression: the adapter-artifact watch predicate
+        ignored spec.rank, so this change was silently dropped.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              kubectl patch aimartifact adapters-staged-lora -n "$NAMESPACE" \
+                --type=merge -p '{"spec":{"rank":64}}'
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: adapters-staged-service
+              status:
+                adapterMaxRank: 64
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: adapters-staged-service
+              spec:
+                predictor:
+                  model:
+                    (env[?name == 'AIM_ADAPTER_MAX_RANK']):
+                      - value: "64"
+
+    - name: A lowered adapter rank brings the ceiling back down
+      description: |
+        The static ceiling is recomputed from the current artifacts, not seeded
+        from status. Regression: seeding from status.adapterMaxRank made the
+        value monotonic, so a 64 -> 16 correction stayed at 64 forever.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              kubectl patch aimartifact adapters-staged-lora -n "$NAMESPACE" \
+                --type=merge -p '{"spec":{"rank":16}}'
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: adapters-staged-service
+              status:
+                adapterMaxRank: 16
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: adapters-staged-service
+              spec:
+                predictor:
+                  model:
+                    (env[?name == 'AIM_ADAPTER_MAX_RANK']):
+                      - value: "16"
 
     - name: Assert the service records the sticky adapter disk PVC
       description: |

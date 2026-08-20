@@ -217,7 +217,8 @@ func TestMergeRuntimeConfigs(t *testing.T) {
 			name: "priority overrides base",
 			priority: &aimv1alpha1.AIMRuntimeConfigCommon{
 				AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
-					Storage: &aimv1alpha1.AIMStorageConfig{PVCHeadroomPercent: ptr.To(int32(10))},
+					Storage:        &aimv1alpha1.AIMStorageConfig{PVCHeadroomPercent: ptr.To(int32(10))},
+					AdapterRuntime: &aimv1alpha1.AIMAdapterRuntimeConfig{MaxRank: ptr.To(int32(64))},
 				},
 			},
 			base: &aimv1alpha1.AIMRuntimeConfigCommon{
@@ -226,6 +227,7 @@ func TestMergeRuntimeConfigs(t *testing.T) {
 						PVCHeadroomPercent:      ptr.To(int32(20)),
 						DefaultStorageClassName: ptr.To("base-sc"),
 					},
+					AdapterRuntime: &aimv1alpha1.AIMAdapterRuntimeConfig{MaxRank: ptr.To(int32(32))},
 				},
 			},
 			validate: func(t *testing.T, result *aimv1alpha1.AIMRuntimeConfigCommon) {
@@ -237,6 +239,29 @@ func TestMergeRuntimeConfigs(t *testing.T) {
 				}
 				if result.Storage.DefaultStorageClassName == nil || *result.Storage.DefaultStorageClassName != "base-sc" {
 					t.Error("expected base value to be preserved for non-overridden field")
+				}
+				if result.AdapterRuntime == nil || result.AdapterRuntime.MaxRank == nil ||
+					*result.AdapterRuntime.MaxRank != 64 {
+					t.Errorf("expected priority adapter max rank 64, got %+v", result.AdapterRuntime)
+				}
+			},
+		},
+		{
+			name: "empty priority adapter runtime inherits base max rank",
+			priority: &aimv1alpha1.AIMRuntimeConfigCommon{
+				AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+					AdapterRuntime: &aimv1alpha1.AIMAdapterRuntimeConfig{},
+				},
+			},
+			base: &aimv1alpha1.AIMRuntimeConfigCommon{
+				AIMServiceRuntimeConfig: aimv1alpha1.AIMServiceRuntimeConfig{
+					AdapterRuntime: &aimv1alpha1.AIMAdapterRuntimeConfig{MaxRank: ptr.To(int32(32))},
+				},
+			},
+			validate: func(t *testing.T, result *aimv1alpha1.AIMRuntimeConfigCommon) {
+				if result == nil || result.AdapterRuntime == nil || result.AdapterRuntime.MaxRank == nil ||
+					*result.AdapterRuntime.MaxRank != 32 {
+					t.Errorf("expected inherited adapter max rank 32, got %+v", result)
 				}
 			},
 		},

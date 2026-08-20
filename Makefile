@@ -43,9 +43,9 @@ ZOT_CLUSTER_REGISTRY ?= $(ZOT_SERVICE).$(ZOT_NAMESPACE).svc.cluster.local:5000
 ZOT_AIM_DUMMY_REPO ?= $(ZOT_CLUSTER_REGISTRY)/aim-dummy
 # Zot creates an inotify watcher for configuration hot-reload at startup.
 # Shared CI hosts can exhaust the kernel's per-user instance limit while
-# multiple Kind clusters are running, so ensure a modest minimum before Zot
+# multiple Kind clusters are running, so ensure sufficient headroom before Zot
 # starts. Override this if the host has a stricter policy or a larger workload.
-ZOT_INOTIFY_MAX_USER_INSTANCES ?= 1024
+ZOT_INOTIFY_MAX_USER_INSTANCES ?= 8192
 
 # NVIDIA Kubernetes dependency versions
 NVIDIA_DEVICE_PLUGIN_VERSION ?= 0.19.3

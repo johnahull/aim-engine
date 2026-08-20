@@ -296,6 +296,15 @@ spec:
                     description: EngineEnv merges by key, overriding matching source
                       entries.
                     type: object
+                  features:
+                    description: |-
+                      Features adds optional runtime capabilities to the copied profile. Values
+                      are unioned with the source profile's features; an override cannot remove
+                      a capability advertised by the source.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
                   image:
                     description: |-
                       Image overrides the runtime container image used by the derived

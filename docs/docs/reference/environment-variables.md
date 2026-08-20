@@ -89,6 +89,7 @@ These are set on inference containers by the operator. The "Source" column lists
 | `AIM_PRECISION` | Profile / Template | Model precision (e.g., `fp16`, `fp8`). |
 | `AIM_MODEL_ID` | Profile / Template | Model identifier for custom models (base container deployments). Mutually exclusive with `AIM_ID`. |
 | `AIM_ENGINE_ARGS` | Merged | JSON-encoded engine arguments. v1alpha2: merged from service `profileOverrides.engineArgs`, profile `engineArgs`, runtime config, and profile defaults. v1alpha1: merged from service, template, runtime config, and profile. |
+| `AIM_ADAPTER_MAX_RANK` | Adapter controller | Static mode: inferred from the largest declared adapter rank. Dynamic mode: `AIMService.spec.adapterRuntime.maxRank`, then namespace/cluster RuntimeConfig, then default `32`. |
 
 ### Environment Variable Merge Order
 

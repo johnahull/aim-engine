@@ -333,14 +333,14 @@ const (
 	// VolumeAdapterDisk is the name of the adapter-disk volume on pods/jobs.
 	VolumeAdapterDisk = "adapter-disk"
 
-	// Conservative built-in defaults for the adapter container contract. A later
-	// iteration will source the caps from the resolved profile / runtime config;
-	// until then the controller emits these uniform defaults so they are visible
-	// in the pod spec.
+	// Conservative built-in defaults for the adapter container contract. The
+	// dynamic max-rank default is used only when neither the service nor its
+	// RuntimeConfig supplies one.
 	DefaultAIMAdapterRefreshIntervalSeconds = 30
 	DefaultAIMAdapterMaxCount               = 8
 	DefaultAIMAdapterMaxCPUCount            = 16
 	DefaultAIMAdapterMaxRank                = 32
+	DefaultAIMAdapterRank                   = 16
 
 	// LabelAdapterDynamicAllowed is the namespace label that opts a namespace in
 	// to dynamic adapter mode. Enforcement is not yet wired (see

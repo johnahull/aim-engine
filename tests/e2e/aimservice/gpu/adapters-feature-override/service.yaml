@@ -1,0 +1,19 @@
+# The seed profile intentionally has no adapter feature. The explicit
+# profileOverrides.features assertion makes AIM Engine fork an adapter-capable
+# overlay; spec.adapters then mounts the service's subtree at /adapters.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: qwen3-8b-medical-lora
+spec:
+  runtimeConfigName: adapters-feature-override
+  profile:
+    name: qwen3-8b-no-adapters-feature
+  profileOverrides:
+    features:
+      - adapters
+  adapterMode: static
+  adapters:
+    - name: qwen3-8b-medical-lora
+      kind: AIMArtifact
+  replicas: 1

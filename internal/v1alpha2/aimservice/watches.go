@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -553,7 +554,12 @@ func findServicesForClusterModel(c client.Client) handler.MapFunc {
 
 // adapterArtifactRelevantChangePredicate fires on adapter/model artifact events
 // that can change a service's adapter staging or gating: type, overall status,
-// adapterPath, canonical modelId, and the model's adapterPersistentVolumeClaim.
+// adapterPath, canonical modelId, rank, and the model's
+// adapterPersistentVolumeClaim.
+//
+// spec.rank is mutable and feeds the resolved AIM_ADAPTER_MAX_RANK for static
+// services, so a rank edit must enqueue consumers or the workload keeps serving
+// with a stale ceiling until some unrelated event happens to requeue it.
 func adapterArtifactRelevantChangePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc:  func(_ event.CreateEvent) bool { return true },
@@ -571,6 +577,7 @@ func adapterArtifactRelevantChangePredicate() predicate.Predicate {
 			}
 			return oldA.Status.Status != newA.Status.Status ||
 				oldA.Spec.ModelID != newA.Spec.ModelID ||
+				!ptr.Equal(oldA.Spec.Rank, newA.Spec.Rank) ||
 				oldA.Status.AdapterPath != newA.Status.AdapterPath ||
 				oldA.Status.AdapterPersistentVolumeClaim != newA.Status.AdapterPersistentVolumeClaim
 		},

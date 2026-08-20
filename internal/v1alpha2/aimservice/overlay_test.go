@@ -45,6 +45,7 @@ import (
 func TestHasProfileOverrides_DetectsRealOverrides(t *testing.T) {
 	cases := map[string]*aimv1alpha1.AIMServiceProfileOverrides{
 		"modelSources":     {ModelSources: []aimv1alpha1.AIMModelSource{{ModelID: "x", SourceURI: "hf://x"}}},
+		"features":         {Features: []string{"adapters"}},
 		"acceleratorModel": {AcceleratorModel: "MI325X"},
 		"acceleratorCount": {AcceleratorCount: ptr.To[int32](2)},
 		"containerEnv":     {ContainerEnv: []corev1.EnvVar{{Name: "X", Value: "y"}}},
@@ -72,6 +73,7 @@ func TestHasProfileOverrides_TreatsEmptyAsNoOp(t *testing.T) {
 		"empty": {},
 		"all-zero": {
 			ModelSources: []aimv1alpha1.AIMModelSource{},
+			Features:     []string{},
 			ContainerEnv: []corev1.EnvVar{},
 			EngineEnv:    map[string]string{},
 		},
@@ -99,6 +101,7 @@ func TestBuildServiceOverlayProfile_AppliesAllOverrides(t *testing.T) {
 	}
 	seed.EngineEnv = map[string]string{"K1": "v-from-profile", "K2": "stays"}
 	seed.EngineArgs = mustJSON(t, map[string]any{"max-model-len": 8192.0, "dtype": "auto"})
+	seed.Features = []string{"native-feature"}
 	seed.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "ghcr-secret"}}
 	seed.ServiceAccountName = "seed-sa"
 
@@ -114,6 +117,7 @@ func TestBuildServiceOverlayProfile_AppliesAllOverrides(t *testing.T) {
 				ModelSources: []aimv1alpha1.AIMModelSource{
 					{ModelID: "user/finetune-v2", SourceURI: "s3://bucket/weights/"},
 				},
+				Features:         []string{"adapters", "native-feature"},
 				AcceleratorModel: "MI325X",
 				AcceleratorCount: ptr.To[int32](2),
 				ContainerEnv: []corev1.EnvVar{
@@ -157,6 +161,11 @@ func TestBuildServiceOverlayProfile_AppliesAllOverrides(t *testing.T) {
 	}
 	if overlaySpec.AcceleratorCount != 2 {
 		t.Errorf("AcceleratorCount: got %d want 2", overlaySpec.AcceleratorCount)
+	}
+	if len(overlaySpec.Features) != 2 ||
+		overlaySpec.Features[0] != "native-feature" ||
+		overlaySpec.Features[1] != "adapters" {
+		t.Errorf("Features must be a stable set union, got %v", overlaySpec.Features)
 	}
 
 	envByName := make(map[string]string, len(overlaySpec.ContainerEnv))
@@ -647,5 +656,74 @@ func TestFilterNamespaceProfilesBySpec_ExcludesOverlays(t *testing.T) {
 	}
 	if out[0].Name != "seed" {
 		t.Fatalf("filter returned overlay %q; expected only the non-overlay seed", out[0].Name)
+	}
+}
+
+// Adapter capability is an explicit assertion about the selected image, not
+// something inferred from service intent. A feature override creates a private
+// overlay carrying that assertion.
+func TestBuildServiceOverlayProfile_AppliesExplicitAdapterFeatureOverride(t *testing.T) {
+	t.Parallel()
+
+	seed := sampleProfileSpec()
+	seed.Features = nil
+
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns", UID: types.UID("svc-uid")},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			ProfileOverrides: &aimv1alpha1.AIMServiceProfileOverrides{
+				Features: []string{aimv1alpha2.ProfileFeatureAdapters},
+			},
+			Adapters: []aimv1alpha1.AIMServiceAdapterReference{
+				{Name: "lora-a", Kind: aimv1alpha1.AdapterKindAIMArtifact},
+			},
+		},
+	}
+	obs := ServiceObservation{resolvedProfileSpec: seed, profileName: "seed-profile"}
+
+	_, overlaySpec, err := buildServiceOverlayProfile(service, obs)
+	if err != nil {
+		t.Fatalf("buildServiceOverlayProfile() error = %v", err)
+	}
+	if !overlaySpec.SupportsAdapters() {
+		t.Errorf("overlay must advertise adapters, got features %v", overlaySpec.Features)
+	}
+}
+
+// Declaring adapters alone must not manufacture capability metadata or fork an
+// overlay. The resolved profile must advertise adapters, either at the source
+// or through an explicit profileOverrides.features assertion.
+func TestNeedsServiceOverlay_DoesNotInferAdapterFeatureFromServiceIntent(t *testing.T) {
+	t.Parallel()
+
+	service := &aimv1alpha1.AIMService{
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Adapters: []aimv1alpha1.AIMServiceAdapterReference{
+				{Name: "lora-a", Kind: aimv1alpha1.AdapterKindAIMArtifact},
+			},
+		},
+	}
+
+	if needsServiceOverlay(service) {
+		t.Fatal("spec.adapters alone must not create a service-owned overlay")
+	}
+}
+
+func TestNeedsServiceOverlay_IncludesExplicitAdapterFeatureOverride(t *testing.T) {
+	t.Parallel()
+
+	service := &aimv1alpha1.AIMService{
+		Spec: aimv1alpha1.AIMServiceSpec{
+			ProfileOverrides: &aimv1alpha1.AIMServiceProfileOverrides{
+				Features: []string{aimv1alpha2.ProfileFeatureAdapters},
+			},
+			Adapters: []aimv1alpha1.AIMServiceAdapterReference{
+				{Name: "medical-lora", Kind: aimv1alpha1.AdapterKindAIMArtifact},
+			},
+		},
+	}
+
+	if !needsServiceOverlay(service) {
+		t.Fatal("explicit features override must create a service-owned overlay")
 	}
 }

@@ -322,6 +322,7 @@ func ApplyProfileCopyOverrides(
 			result.ModelId = result.ModelSources[0].ModelID
 		}
 	}
+	result.Features = MergeFeatures(result.Features, overrides.Features)
 	if overrides.AcceleratorModel != "" {
 		result.AcceleratorModel = overrides.AcceleratorModel
 	}
@@ -345,6 +346,31 @@ func ApplyProfileCopyOverrides(
 	result.EngineArgs = mergedArgs
 
 	return result, nil
+}
+
+// MergeFeatures returns the stable set union of two feature-token lists.
+// Source order is preserved and new values are appended in declaration order.
+//
+// Feature tokens are additive by construction: they are projected into the
+// runtime profile YAML as metadata.features, which the image reads to decide
+// which capabilities to build. Removing a token the source advertised would
+// disable a capability the profile author enabled, so union is the only
+// sound merge.
+func MergeFeatures(source, overrides []string) []string {
+	if len(source) == 0 && len(overrides) == 0 {
+		return nil
+	}
+
+	result := make([]string, 0, len(source)+len(overrides))
+	seen := make(map[string]struct{}, len(source)+len(overrides))
+	for _, feature := range append(append([]string(nil), source...), overrides...) {
+		if _, exists := seen[feature]; exists {
+			continue
+		}
+		seen[feature] = struct{}{}
+		result = append(result, feature)
+	}
+	return result
 }
 
 // MergeContainerEnv merges env vars by name, overriding matching base entries.

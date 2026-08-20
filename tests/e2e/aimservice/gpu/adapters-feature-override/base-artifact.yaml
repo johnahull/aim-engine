@@ -1,0 +1,18 @@
+# Pre-created Qwen3-8B model artifact with the shared RWX adapter disk used by
+# both the staging Job and the inference pod.
+#
+# The profile cache adopts this artifact because modelId/sourceUri match the
+# profile exactly. Pre-creating it makes the storage contract explicit and
+# keeps this live test independent from cluster-wide adapter-disk defaults.
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMArtifact
+metadata:
+  name: qwen3-8b-base
+spec:
+  type: model
+  modelId: Qwen/Qwen3-8B
+  sourceUri: hf://Qwen/Qwen3-8B
+  size: 25Gi
+  adapterDisk:
+    size: 5Gi
+    storageClassName: longhorn

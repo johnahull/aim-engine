@@ -37,6 +37,48 @@ import (
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 )
 
+func TestDecorateStatusRecordsObservedGeneration(t *testing.T) {
+	t.Run("namespace profile", func(t *testing.T) {
+		profile := &aimv1alpha2.AIMProfile{
+			ObjectMeta: metav1.ObjectMeta{Generation: 7},
+		}
+		obs := ProfileObservation{
+			ProfileFetchResult: ProfileFetchResult{profile: profile},
+		}
+		status := &aimv1alpha2.AIMProfileStatus{}
+
+		(&ProfileReconciler{}).DecorateStatus(
+			status,
+			controllerutils.NewConditionManager(nil),
+			obs,
+		)
+
+		if status.ObservedGeneration != profile.Generation {
+			t.Errorf("ObservedGeneration = %d, want %d", status.ObservedGeneration, profile.Generation)
+		}
+	})
+
+	t.Run("cluster profile", func(t *testing.T) {
+		profile := &aimv1alpha2.AIMClusterProfile{
+			ObjectMeta: metav1.ObjectMeta{Generation: 11},
+		}
+		obs := ClusterProfileObservation{
+			ClusterProfileFetchResult: ClusterProfileFetchResult{profile: profile},
+		}
+		status := &aimv1alpha2.AIMProfileStatus{}
+
+		(&ClusterProfileReconciler{}).DecorateStatus(
+			status,
+			controllerutils.NewConditionManager(nil),
+			obs,
+		)
+
+		if status.ObservedGeneration != profile.Generation {
+			t.Errorf("ObservedGeneration = %d, want %d", status.ObservedGeneration, profile.Generation)
+		}
+	})
+}
+
 func TestBuildComponentHealth(t *testing.T) {
 	tests := []struct {
 		name        string

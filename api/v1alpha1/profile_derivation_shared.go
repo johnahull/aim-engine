@@ -264,7 +264,7 @@ type ProfileSelector struct {
 // ProfileOverrides mutates selected source profiles when creating derived copies.
 //
 // Identity fields (`aimId`, `modelId`, `profileId`) and behavioural fields
-// (`image`, `acceleratorModel`, `acceleratorCount`, env, args, modelSources)
+// (`image`, `features`, `acceleratorModel`, `acceleratorCount`, env, args, modelSources)
 // always WRITE onto the derived profile. They are the "stamp on the output"
 // half of the derivation contract — the `selector` half FILTERS source
 // candidates and never mutates anything. Keeping these halves separated is
@@ -300,6 +300,13 @@ type ProfileOverrides struct {
 	// explicit overrides.modelId always wins.
 	// +optional
 	ModelSources []AIMModelSource `json:"modelSources,omitempty"`
+
+	// Features adds optional runtime capabilities to the copied profile. Values
+	// are unioned with the source profile's features; an override cannot remove
+	// a capability advertised by the source.
+	// +optional
+	// +listType=set
+	Features []string `json:"features,omitempty"`
 
 	// Image overrides the runtime container image used by the derived
 	// profiles. When empty the deployment image is rebased onto the source

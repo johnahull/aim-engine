@@ -634,3 +634,44 @@ func TestFindServicesForAdapterArtifact_FansOutByExactAndLogicalCompatibility(t 
 		}
 	}
 }
+
+// TestAdapterArtifactRelevantChangePredicate_RankChange covers the gap that let
+// a mutable spec.rank edit go unnoticed: rank feeds the resolved
+// AIM_ADAPTER_MAX_RANK for static services, so a change must enqueue consumers
+// rather than waiting for an unrelated event to requeue them.
+func TestAdapterArtifactRelevantChangePredicate_RankChange(t *testing.T) {
+	pred := adapterArtifactRelevantChangePredicate()
+
+	oldA := &aimv1alpha1.AIMArtifact{
+		ObjectMeta: metav1.ObjectMeta{Name: "lora-a", Namespace: "ns"},
+		Spec: aimv1alpha1.AIMArtifactSpec{
+			Type: aimv1alpha1.ArtifactTypeAdapter,
+			Rank: ptr.To[int32](16),
+		},
+	}
+
+	t.Run("rank raised", func(t *testing.T) {
+		newA := oldA.DeepCopy()
+		newA.Spec.Rank = ptr.To[int32](64)
+		if !pred.Update(event.UpdateEvent{ObjectOld: oldA, ObjectNew: newA}) {
+			t.Error("expected a rank change to fire the predicate")
+		}
+	})
+
+	t.Run("rank cleared", func(t *testing.T) {
+		newA := oldA.DeepCopy()
+		newA.Spec.Rank = nil
+		if !pred.Update(event.UpdateEvent{ObjectOld: oldA, ObjectNew: newA}) {
+			t.Error("expected clearing rank to fire the predicate")
+		}
+	})
+
+	t.Run("rank unchanged is still filtered", func(t *testing.T) {
+		newA := oldA.DeepCopy()
+		newA.Spec.Rank = ptr.To[int32](16)
+		newA.ResourceVersion = "2"
+		if pred.Update(event.UpdateEvent{ObjectOld: oldA, ObjectNew: newA}) {
+			t.Error("an equal rank must not fire the predicate")
+		}
+	})
+}

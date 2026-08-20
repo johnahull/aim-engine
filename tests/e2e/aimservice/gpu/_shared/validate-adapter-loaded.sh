@@ -16,6 +16,9 @@
 #   HTTP_NS, HTTP_SVC, HTTP_PORT  Gateway service coordinates (defaults below).
 #   HTTP_TIMEOUT, HTTP_RETRY_DEADLINE, HTTP_RETRY_INTERVAL  Polling budget (s).
 #   OPENAI_API_KEY  Sent as a bearer token if set.
+#   VALIDATE_ADAPTER_COMPLETION  When "true", also POST a chat completion using
+#                                ADAPTER_NAME as the requested model.
+#   ADAPTER_PROMPT  Prompt used by that completion check.
 set -euo pipefail
 
 NS="${HTTP_NS:-envoy-gateway-system}"
@@ -31,6 +34,8 @@ TIMEOUT="${HTTP_TIMEOUT:-60}"
 # polls the disk ~every 30s; static loads at launch). Poll generously.
 RETRY_DEADLINE="${HTTP_RETRY_DEADLINE:-300}"
 RETRY_INTERVAL="${HTTP_RETRY_INTERVAL:-5}"
+VALIDATE_COMPLETION="${VALIDATE_ADAPTER_COMPLETION:-false}"
+ADAPTER_PROMPT="${ADAPTER_PROMPT:-Reply with exactly OK.}"
 
 : "${ADAPTER_NAME:?ADAPTER_NAME is required (the AIMArtifact/adapter id expected in /v1/models)}"
 
@@ -78,6 +83,7 @@ echo "Waiting for adapter '${ADAPTER_NAME}' to appear in $MODELS_URL (up to ${RE
 deadline=$(( SECONDS + RETRY_DEADLINE ))
 BODY=""
 attempt=0
+adapter_found=false
 while (( SECONDS < deadline )); do
   attempt=$(( attempt + 1 ))
   RESP="$(curl -sS -w '\n%{http_code}' --max-time "$TIMEOUT" "${AUTH_HEADER[@]}" "$MODELS_URL" 2>&1 || true)"
@@ -88,7 +94,8 @@ while (( SECONDS < deadline )); do
       echo "✅ adapter '${ADAPTER_NAME}' is loaded (present in /v1/models) after ${attempt} attempt(s)"
       echo "Loaded models:"
       echo "$BODY" | jq -r '.data[].id'
-      exit 0
+      adapter_found=true
+      break
     fi
     echo "attempt $attempt: HTTP 200 but adapter not listed yet"
   else
@@ -97,7 +104,61 @@ while (( SECONDS < deadline )); do
   sleep "$RETRY_INTERVAL"
 done
 
-echo "ERROR: adapter '${ADAPTER_NAME}' did not appear in /v1/models within ${RETRY_DEADLINE}s"
-echo "Last /v1/models body:"
-echo "$BODY" | head -c 800; echo
+if [[ "$adapter_found" != "true" ]]; then
+  echo "ERROR: adapter '${ADAPTER_NAME}' did not appear in /v1/models within ${RETRY_DEADLINE}s"
+  echo "Last /v1/models body:"
+  echo "$BODY" | head -c 800; echo
+  exit 1
+fi
+
+if [[ "$VALIDATE_COMPLETION" != "true" ]]; then
+  exit 0
+fi
+
+# A /models entry proves registration. A successful request addressed to the
+# adapter id proves that the runtime can actually execute inference with it.
+CHAT_URL="http://127.0.0.1:${PROXY_PORT}/api/v1/namespaces/${NS}/services/${SVC}:${SVC_PORT}/proxy${BASE_PATH}/chat/completions"
+PAYLOAD="$(jq -n \
+  --arg model "$ADAPTER_NAME" \
+  --arg prompt "$ADAPTER_PROMPT" \
+  '{
+    model: $model,
+    messages: [{role: "user", content: $prompt}],
+    max_tokens: 32,
+    temperature: 0
+  }')"
+
+echo "POST $CHAT_URL using adapter model '${ADAPTER_NAME}'"
+deadline=$(( SECONDS + RETRY_DEADLINE ))
+CHAT_BODY=""
+CHAT_CODE=""
+attempt=0
+while (( SECONDS < deadline )); do
+  attempt=$(( attempt + 1 ))
+  CHAT_RESP="$(curl -sS -w '\n%{http_code}' --max-time "$TIMEOUT" \
+    -H 'Content-Type: application/json' "${AUTH_HEADER[@]}" \
+    -d "$PAYLOAD" "$CHAT_URL" 2>&1 || true)"
+  CHAT_BODY="$(echo "$CHAT_RESP" | head -n -1)"
+  CHAT_CODE="$(echo "$CHAT_RESP" | tail -n 1)"
+
+  if [[ "$CHAT_CODE" == "200" ]] &&
+    echo "$CHAT_BODY" | jq -e --arg a "$ADAPTER_NAME" '
+      .model == $a and
+      .object == "chat.completion" and
+      (.choices | type == "array" and length > 0) and
+      (.choices[0].message.content | type == "string" and length > 0)
+    ' >/dev/null 2>&1; then
+    echo "✅ adapter completion succeeded after ${attempt} attempt(s)"
+    echo "Assistant response:"
+    echo "$CHAT_BODY" | jq -r '.choices[0].message.content'
+    exit 0
+  fi
+
+  echo "attempt $attempt: HTTP $CHAT_CODE (adapter completion not ready)"
+  sleep "$RETRY_INTERVAL"
+done
+
+echo "ERROR: adapter completion did not succeed within ${RETRY_DEADLINE}s"
+echo "Last /v1/chat/completions body:"
+echo "$CHAT_BODY" | head -c 1200; echo
 exit 1

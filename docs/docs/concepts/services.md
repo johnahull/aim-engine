@@ -197,7 +197,10 @@ What happens:
 3. Downstream (cache, ConfigMap, KServe wiring) keys off the overlay — so the override participates in cache-key computation, not just runtime env wiring.
 4. The overlay is owner-referenced by the service and garbage-collected on service deletion.
 
-The override field set mirrors [`ProfileOverrides`](profilesets.md#overrides) used by AIMProfileSet derivation — the same internal primitive applies both.
+The override field set mirrors [`ProfileOverrides`](profilesets.md#overrides)
+used by AIMProfileSet derivation — the same internal primitive applies both.
+Feature overrides are additive and can explicitly assert capabilities such as
+`adapters` when a legacy or custom profile omits the corresponding metadata.
 
 `spec.profileOverrides` requires `spec.profile.name`; it can't be combined with a selector-based resolution shape.
 

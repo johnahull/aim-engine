@@ -52,6 +52,8 @@ const (
 	testServiceName        = "svc"
 	testModelIDFP8         = "qwen/qwen3-32b-fp8"
 	testClusterProfileName = "cluster-profile"
+	testAcceleratorNext    = "MI325X"
+	testAcceleratorPrev    = "MI300X"
 
 	componentNameInferenceService = "InferenceService"
 	componentNameHTTPRoute        = "HTTPRoute"
@@ -204,6 +206,201 @@ func TestComposeState_NamespaceProfileResolved(t *testing.T) {
 	if obs.resolvedProfileSpec == nil {
 		t.Errorf("resolved profile spec should be populated")
 	}
+}
+
+// A stale observed overlay must never be the thing new spec.profileOverrides
+// are validated against. The overlay always lags by one reconcile after an
+// override edit, and an invalid spec blocks apply — so validating against the
+// observed copy would prevent the corrected overlay from ever being written,
+// wedging the service permanently rather than transiently.
+func TestComposeState_OverlayValidatesAgainstDesiredNotObserved(t *testing.T) {
+	r := &ProfileServiceReconciler{}
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			ProfileOverrides: &aimv1alpha1.AIMServiceProfileOverrides{
+				AcceleratorModel: testAcceleratorNext,
+			},
+		},
+	}
+	profile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: testProfileA, Namespace: "ns"},
+		Spec: aimv1alpha2.AIMProfileSpec{
+			AIMProfileSpecCommon: *sampleProfileSpec(),
+		},
+		Status: aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+	}
+	profile.Spec.ModelSources = []aimv1alpha1.AIMModelSource{{
+		ModelID: testModelIDFP8, SourceURI: "hf://qwen/qwen3-32b-fp8",
+	}}
+
+	// The overlay on the cluster still carries the pre-edit accelerator.
+	staleOverlay := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "stale-overlay", Namespace: "ns", Generation: 3},
+		Spec: aimv1alpha2.AIMProfileSpec{
+			AIMProfileSpecCommon: *sampleProfileSpec(),
+		},
+		Status: aimv1alpha2.AIMProfileStatus{
+			ObservedGeneration: 3,
+			Status:             constants.AIMStatusReady,
+		},
+	}
+	staleOverlay.Spec.ModelSources = profile.Spec.ModelSources
+	staleOverlay.Spec.AcceleratorModel = testAcceleratorPrev
+
+	fetch := ServiceFetchResult{
+		service:        service,
+		profile:        controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+		overlayProfile: controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: staleOverlay},
+	}
+	obs := r.ComposeState(context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha1.AIMService]{Object: service},
+		fetch,
+	)
+
+	if obs.configErr != nil {
+		t.Fatalf("unexpected config error: %v", obs.configErr)
+	}
+	if obs.resolvedProfileSpec == nil {
+		t.Fatal("overlay spec should be resolved")
+	}
+	if got := obs.resolvedProfileSpec.AcceleratorModel; got != testAcceleratorNext {
+		t.Errorf("resolvedProfileSpec.AcceleratorModel = %q, want the desired %q (not the stale observed overlay)", got, testAcceleratorNext)
+	}
+	if obs.resolvedProfileStatus != nil {
+		t.Error("status from an overlay whose spec does not match the desired overlay must be ignored")
+	}
+	if obs.profileReadyForService() {
+		t.Error("stale Ready status must not authorize downstream service resources")
+	}
+}
+
+func TestComposeState_OverlayStatusRequiresCurrentGeneration(t *testing.T) {
+	r := &ProfileServiceReconciler{}
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			ProfileOverrides: &aimv1alpha1.AIMServiceProfileOverrides{
+				AcceleratorModel: testAcceleratorNext,
+			},
+		},
+	}
+	profile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: testProfileA, Namespace: "ns"},
+		Spec: aimv1alpha2.AIMProfileSpec{
+			AIMProfileSpecCommon: *sampleProfileSpec(),
+		},
+	}
+	observedOverlay := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "overlay", Namespace: "ns", Generation: 4},
+		Spec: aimv1alpha2.AIMProfileSpec{
+			AIMProfileSpecCommon: *sampleProfileSpec(),
+		},
+		Status: aimv1alpha2.AIMProfileStatus{
+			ObservedGeneration: 3,
+			Status:             constants.AIMStatusReady,
+		},
+	}
+	observedOverlay.Spec.AcceleratorModel = testAcceleratorNext
+
+	compose := func() ServiceObservation {
+		return r.ComposeState(
+			context.Background(),
+			controllerutils.ReconcileContext[*aimv1alpha1.AIMService]{Object: service},
+			ServiceFetchResult{
+				service:        service,
+				profile:        controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+				overlayProfile: controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: observedOverlay},
+			},
+		)
+	}
+
+	obs := compose()
+	if obs.resolvedProfileStatus != nil {
+		t.Fatal("Ready status from the previous overlay generation must be ignored")
+	}
+
+	observedOverlay.Status.ObservedGeneration = observedOverlay.Generation
+	obs = compose()
+	if obs.resolvedProfileStatus == nil {
+		t.Fatal("status must become authoritative after the profile controller observes the current generation")
+	}
+}
+
+func TestComposeState_AdapterCapabilityUsesEffectiveProfile(t *testing.T) {
+	t.Run("feature-silent profile is rejected", func(t *testing.T) {
+		r := &ProfileServiceReconciler{}
+		service := &aimv1alpha1.AIMService{
+			ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+			Spec: aimv1alpha1.AIMServiceSpec{
+				Profile:     &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
+				AdapterMode: aimv1alpha1.AdapterModeDynamic,
+			},
+		}
+		profile := &aimv1alpha2.AIMProfile{
+			ObjectMeta: metav1.ObjectMeta{Name: testProfileA, Namespace: "ns"},
+			Spec: aimv1alpha2.AIMProfileSpec{
+				AIMProfileSpecCommon: *sampleProfileSpec(),
+			},
+			Status: aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+		}
+
+		obs := r.ComposeState(
+			context.Background(),
+			controllerutils.ReconcileContext[*aimv1alpha1.AIMService]{Object: service},
+			ServiceFetchResult{
+				service: service,
+				profile: controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+			},
+		)
+
+		if obs.adapterState.ConfigErr == nil {
+			t.Fatal("expected adapter capability error for a feature-silent profile")
+		}
+		if obs.desiredOverlayProfile != nil {
+			t.Fatal("adapter mode must not manufacture a service-owned overlay")
+		}
+	})
+
+	t.Run("explicit feature override is accepted", func(t *testing.T) {
+		r := &ProfileServiceReconciler{}
+		service := &aimv1alpha1.AIMService{
+			ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+			Spec: aimv1alpha1.AIMServiceSpec{
+				Profile:     &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
+				AdapterMode: aimv1alpha1.AdapterModeDynamic,
+				ProfileOverrides: &aimv1alpha1.AIMServiceProfileOverrides{
+					Features: []string{aimv1alpha2.ProfileFeatureAdapters},
+				},
+			},
+		}
+		profile := &aimv1alpha2.AIMProfile{
+			ObjectMeta: metav1.ObjectMeta{Name: testProfileA, Namespace: "ns"},
+			Spec: aimv1alpha2.AIMProfileSpec{
+				AIMProfileSpecCommon: *sampleProfileSpec(),
+			},
+			Status: aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady},
+		}
+
+		obs := r.ComposeState(
+			context.Background(),
+			controllerutils.ReconcileContext[*aimv1alpha1.AIMService]{Object: service},
+			ServiceFetchResult{
+				service: service,
+				profile: controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+			},
+		)
+
+		if obs.adapterState.ConfigErr != nil {
+			t.Fatalf("explicit feature override should satisfy the adapter gate: %v", obs.adapterState.ConfigErr)
+		}
+		if obs.desiredOverlayProfile == nil {
+			t.Fatal("explicit feature override must materialise a service-owned overlay")
+		}
+		if obs.resolvedProfileSpec == nil || !obs.resolvedProfileSpec.SupportsAdapters() {
+			t.Fatalf("effective profile must advertise adapters, got %#v", obs.resolvedProfileSpec)
+		}
+	})
 }
 
 func TestComposeState_ClusterProfileFallback(t *testing.T) {
