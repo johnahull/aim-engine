@@ -335,7 +335,7 @@ Conditions on the profile set carry the actionable detail; the model just summar
 
 ## Related documentation
 
-- [AIM Models](models.md) — Three flows that synthesise profile sets
+- [AIM Models](models.md) — Derivation flows that synthesise profile sets
 - [Profiles](profiles.md) — What derived profiles carry; provenance labels
 - [Fine-Tuned Models](../guides/fine-tuned-models.md) — End-to-end derivation walkthrough (deployable sources)
 - [Custom Models](../guides/custom-models.md) — End-to-end derivation walkthrough (base-profile sources)

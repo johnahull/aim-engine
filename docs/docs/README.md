@@ -1,6 +1,6 @@
 # AIM Engine
 
-AIM (AMD Inference Microservice) Engine is a Kubernetes operator that simplifies the deployment and management of AI inference workloads on AMD GPUs. It provides a declarative, cloud-native approach to running ML models at scale.
+AIM (AMD Inference Microservice) Engine is a Kubernetes operator that simplifies the deployment and management of AI inference workloads on supported AMD and NVIDIA GPUs. It provides a declarative, cloud-native approach to running ML models at scale.
 
 ## Quick example
 
@@ -26,7 +26,7 @@ spec:
     name: qwen3-32b
 ```
 
-AIM images (like `amdenterpriseai/aim-qwen-qwen3-32b`) package open-source models optimized for AMD Instinct GPUs. Each image includes the model weights and a serving runtime tuned for specific GPU configurations and precision modes.
+AIM images (like `amdenterpriseai/aim-qwen-qwen3-32b`) package a serving runtime and discovery metadata tuned for specific GPU configurations and precision modes. Model weights are referenced by the discovered profiles and downloaded separately into the model cache.
 
 The `AIMModel` runs discovery on the image and publishes one `AIMProfile` per supported (GPU, precision, metric) combination. The `AIMService` resolves to the best deployable profile for your hardware, pre-warms the model cache, and creates a KServe `InferenceService`.
 
@@ -35,13 +35,15 @@ The `AIMModel` runs discovery on the image and publishes one `AIMProfile` per su
 
 AIMService dispatch is decided by **spec shape**, not by `apiVersion`. During the v1alpha1 → v1alpha2 migration window, `spec.model.name` and `spec.model.image` default to the legacy template pipeline so existing deployments keep working unchanged. The annotation forces this service onto the v1alpha2 profile pipeline, which resolves `qwen3-32b` to one of the `AIMClusterProfile`s produced by the `AIMClusterModel` above. The annotation becomes unnecessary once v1alpha1 is removed — see [Migration window](admin/upgrading.md#migration-window) for the full dispatch table.
 :::
-## Three model flows
+## Four model flows
 
-How you onboard a model depends on its relationship to AMD's published catalog:
+How you onboard a model depends on its source and the runtime available for the
+cluster hardware:
 
 | Flow | Use when | Read more |
 |---|---|---|
 | **Official** | Deploying a published AMD-supported AIM model unmodified | [AIM Models](concepts/models.md#flow-1-official-aim-model) |
+| **Generated** | Deploying model weights by model ID with a platform-provided generic runtime | [AIM Models](concepts/models.md#flow-2-generated-runtime-profile) |
 | **Fine-tuned** | Deploying a fine-tune of a published architecture | [Fine-Tuned Models](guides/fine-tuned-models.md) |
 | **Custom** | Deploying a model whose architecture isn't in the catalog | [Custom Models](guides/custom-models.md) |
 
@@ -74,9 +76,9 @@ Browse the model catalog, deploy fine-tunes or custom models, tune inference par
 
 ## Key features
 
-- **Three-flow model onboarding** — official AIM images, fine-tuned models, and custom models that bring their own weights, all expressed through a single `AIMModel` shape.
+- **Four-flow model onboarding** — official AIM images, generated runtime profiles for model IDs, fine-tuned models, and custom models that bring their own weights, all expressed through a single `AIMModel` shape.
 - **Profile-driven deployment** — `AIMService` resolves to a self-contained `AIMProfile` with everything the runtime needs (image, accelerator, engine config, model sources).
-- **Smart selection** — pick a profile by name, by model, by selector, or by model+selector; the controller ranks candidates by `primary > type > version`.
+- **Smart selection** — pick a profile by name, by model, by selector, or by model+selector; the controller applies deterministic ranking across recommendation, optimization, hardware, metric, precision, resource count/type, and version.
 - **Profile overlays** — `spec.profileOverrides` rebases a published profile onto custom weights without forking it.
 - **Model caching** — pre-download artifacts to shared PVCs for faster startup; HuggingFace downloader falls back across XET / HF_TRANSFER / HTTP protocols.
 - **HTTP routing** — expose services through Gateway API with customizable path templates.
@@ -120,7 +122,7 @@ Task-oriented walkthroughs for common workflows:
 ### Concepts
 
 - [AIM Services](concepts/services.md) — Resolution shapes, overlays, caching, status
-- [AIM Models](concepts/models.md) — The three model flows
+- [AIM Models](concepts/models.md) — The four model flows
 - [Profiles](concepts/profiles.md) — Self-contained runtime configurations
 - [Inference Engines](concepts/inference-engines.md) — vLLM and vLLM-Omni runtime behavior
 - [AIM Profile Sets](concepts/profilesets.md) — Derivation engine

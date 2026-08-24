@@ -31,7 +31,12 @@ spec:
 :::{admonition} Migration window
 :class: note
 
-Until v1alpha1 is removed, the `aim.eai.amd.com/reconciler-pipeline: profile` annotation is required on `spec.model.image` services that should be reconciled by the v1alpha2 profile pipeline. See [Migration window](../admin/upgrading.md#migration-window). To skip the annotation, reference an existing AIMProfile (`spec.profile.name`) or AIMModel (`spec.model.name`) instead.
+Until v1alpha1 is removed, the
+`aim.eai.amd.com/reconciler-pipeline: profile` annotation is required on
+model-only services using either `spec.model.image` or `spec.model.name`.
+To skip the annotation, reference an existing AIMProfile with
+`spec.profile.name`, or include a `spec.profile.selector`. See
+[Migration window](../admin/upgrading.md#migration-window).
 :::
 ## Autoscaling with KEDA
 

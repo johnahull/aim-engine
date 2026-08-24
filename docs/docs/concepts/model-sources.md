@@ -5,7 +5,12 @@
 :::{admonition} API version
 :class: note
 
-`AIMClusterModelSource` remains under `aim.eai.amd.com/v1alpha1`. The `AIMClusterModel` resources it creates use the v1alpha2 shape (`spec.image` set) so they participate in v1alpha2 discovery and produce `AIMProfile` resources. This deliberately decouples discovery from the v1alpha1 → v1alpha2 migration window.
+`AIMClusterModelSource` remains under `aim.eai.amd.com/v1alpha1`.
+Registry-discovered images are created through v1alpha1 with `spec.image`
+set, while entries declared under `spec.models` are created through v1alpha2
+because `spec.modelId` is v1alpha2-only. Both API versions address the same
+stored v1alpha2 `AIMClusterModel`, and both flows produce `AIMProfile`
+resources.
 :::
 ## Overview
 
@@ -416,7 +421,12 @@ spec:
 
 Model sources create `AIMClusterModel` resources with auto-generated names based on the image URI. These models are owned by the source via an owner reference.
 
-Created models use the v1alpha2 shape (`spec.image` set) and immediately enter the **official flow** — the model controller runs in-cluster image discovery and materialises one `AIMClusterProfile` per supported (accelerator, precision, metric) combination. See [AIM Models — Flow 1](models.md#flow-1-official-aim-model) for the lifecycle.
+Registry-discovered models are written through v1alpha1 with `spec.image` set.
+Because v1alpha1 and v1alpha2 share the stored v1alpha2 object, they immediately
+enter the **official flow**: the model controller runs in-cluster image
+discovery and materialises one `AIMClusterProfile` per supported (accelerator,
+precision, metric) combination. See
+[AIM Models — Flow 1](models.md#flow-1-official-aim-model) for the lifecycle.
 
 During the v1alpha1 → v1alpha2 migration window the same model **also runs the legacy OCI-discovery path** in parallel, emitting one `AIMClusterServiceTemplate` per `RecommendedDeployment` from the image's metadata so v1alpha1-shaped services still resolve. The two output sets (profiles and templates) coexist and describe the same image — pick the one that matches the consumer pipeline. To suppress the legacy template emission on a per-model basis, set `spec.discovery.createServiceTemplates: false`. See [Migration window](../admin/upgrading.md#migration-window) for the dispatch story.
 

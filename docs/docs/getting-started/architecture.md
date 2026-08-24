@@ -1,6 +1,6 @@
 # Architecture
 
-AIM Engine is a Kubernetes operator that orchestrates the full lifecycle of AI inference workloads on AMD GPUs. It bridges the gap between model artifacts and production-ready inference endpoints by coordinating several Kubernetes-native components.
+AIM Engine is a Kubernetes operator that orchestrates the full lifecycle of AI inference workloads on supported AMD and NVIDIA GPUs. It bridges the gap between model artifacts and production-ready inference endpoints by coordinating several Kubernetes-native components.
 
 ## High-level architecture
 
@@ -8,11 +8,13 @@ AIM Engine has two cooperating flows that meet at the `AIMProfile`: **onboarding
 
 ### Onboarding: from models to profiles
 
-Official models (via discovery), profile sets (via derivation), and hand-authored profiles all converge on a deployable `AIMProfile`.
+Official models (via image discovery), generated models (via RuntimeConfig
+fallbacks), profile sets (via derivation), and hand-authored profiles all
+converge on a deployable `AIMProfile`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../assets/diagrams/model-onboarding-dark.svg">
-  <img alt="Model onboarding flow: AIMClusterModelSource discovers AIMModels; the Model controller runs image discovery and derivation; profile sets and hand-authored profiles also resolve to deployable AIMProfiles." src="../assets/diagrams/model-onboarding.svg">
+  <img alt="Model onboarding flow: AIMClusterModelSource discovers images or declares model IDs; the Model controller runs image discovery, generated-profile resolution through RuntimeConfig fallbacks, or profile derivation; profile sets and hand-authored profiles also resolve to deployable AIMProfiles." src="../assets/diagrams/model-onboarding.svg">
 </picture>
 
 ### Serving: from profile to endpoint
@@ -108,12 +110,12 @@ Each step is idempotent: the operator converges toward the desired state on ever
 | **KServe** | Underlying model serving runtime. AIM Engine creates and manages `InferenceService` resources. |
 | **Gateway API** | HTTP routing. When routing is enabled, AIM Engine creates `HTTPRoute` resources attached to a configured Gateway. |
 | **Persistent Volumes** | Back the caching system. `AIMProfileCache` downloads model artifacts once to shared (or dedicated) PVCs. |
-| **AMD GPUs + NFD** | Detected via node labels (`feature.node.kubernetes.io/aim-accelerator.<model>`) written by the AcceleratorDetector DaemonSet. The profile selector filters candidates by node label availability. |
+| **AMD/NVIDIA GPUs + NFD** | Detected through model and vendor labels (`feature.node.kubernetes.io/aim-accelerator.*`) written by the AcceleratorDetector DaemonSets. Profile resolution filters candidates by node-label availability and vendor-specific device capacity. |
 
 ## Where to read next
 
 - [Quickstart](quickstart.md) — Deploy a service in minutes
-- [AIM Models](../concepts/models.md) — Three model flows in detail
+- [AIM Models](../concepts/models.md) — Four model flows in detail
 - [Services](../concepts/services.md) — Resolution shapes, overlays, caching
 - [Profiles](../concepts/profiles.md) — Self-contained runtime configurations
 - [AIM Profile Sets](../concepts/profilesets.md) — Derivation engine

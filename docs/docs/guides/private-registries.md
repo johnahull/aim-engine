@@ -19,6 +19,8 @@ kind: AIMService
 metadata:
   name: qwen-chat
   namespace: ml-team
+  annotations:
+    aim.eai.amd.com/reconciler-pipeline: profile
 spec:
   model:
     name: qwen-qwen3-32b
@@ -160,22 +162,28 @@ connection is present, setting both `AWS_ACCESS_KEY_ID` and
 selects the credential chain. Typed fields take precedence over corresponding
 legacy variables.
 
-!!! warning "Absent credentials do not mean anonymous"
-    Leaving both key variables unset means "resolve credentials the normal way",
-    because that is exactly how every role-based source presents itself — IRSA,
-    Pod Identity and instance profiles all deliberately leave
-    `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` empty. Treating that as a
-    public bucket would send unsigned requests and turn a private bucket into an
-    opaque `403 AccessDenied`. To read a public bucket, explicitly set
-    `auth.mode: anonymous` (or `AIM_S3_ANONYMOUS=true` for legacy configuration).
+:::{warning}
+Absent credentials do not mean anonymous
 
-!!! note "Role-based credentials need a ServiceAccount you can annotate"
-    Chain mode resolves whatever the download Pod's environment offers. Download
-    Jobs currently run under the namespace's `default` ServiceAccount and
-    `AIMArtifact` has no field to select a different one, so IRSA and EKS Pod
-    Identity require annotating that `default` ServiceAccount — which grants the
-    role to every Pod in the namespace. EC2 instance profiles, shared profiles
-    and credential processes need no ServiceAccount changes.
+Leaving both key variables unset means "resolve credentials the normal way",
+because that is exactly how every role-based source presents itself — IRSA,
+Pod Identity and instance profiles all deliberately leave
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` empty. Treating that as a
+public bucket would send unsigned requests and turn a private bucket into an
+opaque `403 AccessDenied`. To read a public bucket, explicitly set
+`auth.mode: anonymous` (or `AIM_S3_ANONYMOUS=true` for legacy configuration).
+:::
+
+:::{note}
+Role-based credentials need a ServiceAccount you can annotate
+
+Chain mode resolves whatever the download Pod's environment offers. Download
+Jobs currently run under the namespace's `default` ServiceAccount and
+`AIMArtifact` has no field to select a different one, so IRSA and EKS Pod
+Identity require annotating that `default` ServiceAccount — which grants the
+role to every Pod in the namespace. EC2 instance profiles, shared profiles
+and credential processes need no ServiceAccount changes.
+:::
 
 ### S3 control knobs
 
@@ -203,24 +211,33 @@ reported as an invalid configuration rather than copied into the transfer Job.
 | `AIM_S3_MAX_CONCURRENCY` | boto3 default (`10`) | Multipart threads per object; artifact values must be integers from 1 through 64. |
 | `AIM_S3_MULTIPART_CHUNKSIZE_MB` | boto3 default (`8`) | Multipart chunk size in MiB; artifact values must be integers from 5 through 5120. |
 
-!!! note "Effective connection fan-out"
-    Total in-flight connections is roughly `AIM_S3_MAX_WORKERS` × `AIM_S3_MAX_CONCURRENCY` (default 8 × 10 = 80). On small/constrained gateways (single-node MinIO, on-prem RGW) consider lowering one of these.
+:::{note}
+Effective connection fan-out
 
-!!! tip "Keep secrets out of the manifest"
-    Use `artifact.s3.auth.credentialsSecretRef` for static credentials. AIM
-    Engine mounts the selected keys and configures the downloader through
-    `_FILE` variables, keeping values out of both the resource and the process
-    environment.
+Total in-flight connections is roughly `AIM_S3_MAX_WORKERS` ×
+`AIM_S3_MAX_CONCURRENCY` (default 8 × 10 = 80). On small/constrained gateways
+(single-node MinIO, on-prem RGW) consider lowering one of these.
+:::
+
+:::{tip}
+Keep secrets out of the manifest
+
+Use `artifact.s3.auth.credentialsSecretRef` for static credentials. AIM Engine
+mounts the selected keys and configures the downloader through `_FILE`
+variables, keeping values out of both the resource and the process environment.
+:::
 
 S3 downloads bind each transfer to object metadata collected before the body is
 written. The downloader verifies the resulting file size before its atomic
 rename, so a truncated or partial transfer is never published.
 
-!!! danger "Disabling TLS verification"
-    `insecureSkipVerify: true` disables both certificate-chain and hostname
-    verification. It is mutually exclusive with `caBundleRef`, emits a warning
-    event, and should only be used briefly while diagnosing a certificate
-    problem.
+:::{danger}
+Disabling TLS verification
+
+`insecureSkipVerify: true` disables both certificate-chain and hostname
+verification. It is mutually exclusive with `caBundleRef`, emits a warning
+event, and should only be used briefly while diagnosing a certificate problem.
+:::
 
 ## Credential Scope
 

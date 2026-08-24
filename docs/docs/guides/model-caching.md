@@ -21,6 +21,8 @@ apiVersion: aim.eai.amd.com/v1alpha2
 kind: AIMService
 metadata:
   name: qwen-chat
+  annotations:
+    aim.eai.amd.com/reconciler-pipeline: profile
 spec:
   model:
     name: qwen-qwen3-32b

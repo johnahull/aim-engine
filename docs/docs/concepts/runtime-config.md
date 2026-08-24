@@ -298,6 +298,8 @@ metadata:
   namespace: ml-team
   labels:
     project: conversational-ai
+  annotations:
+    aim.eai.amd.com/reconciler-pipeline: profile
 spec:
   model:
     name: qwen-qwen3-32b
@@ -472,6 +474,8 @@ metadata:
     org.example/cost-center: "eng-ml"
     org.example/department: "engineering"
     org.example/project: "chatbot-v2"
+  annotations:
+    aim.eai.amd.com/reconciler-pipeline: profile
 spec:
   model:
     name: qwen-qwen3-32b

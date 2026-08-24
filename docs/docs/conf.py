@@ -57,7 +57,6 @@ external_projects = []
 # A set, because rocm-docs-core unions it with the extensions it already enables
 # (colon_fence, substitution, html_image, ...).
 myst_enable_extensions = {
-    "linkify",
     "deflist",
     "tasklist",
     "attrs_inline",

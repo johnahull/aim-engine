@@ -17,6 +17,8 @@ kind: AIMService
 metadata:
   name: qwen-chat
   namespace: ml-team
+  annotations:
+    aim.eai.amd.com/reconciler-pipeline: profile
 spec:
   model:
     name: qwen-qwen3-32b
@@ -33,7 +35,7 @@ v1alpha2 supports five ways to reach an `AIMProfile`. Pick the shape that matche
 | Shape | Spec | Use when |
 |---|---|---|
 | [By name](#by-name) | `spec.profile.name` | You know the exact profile to deploy |
-| [By model name](#by-model) | `spec.model.name` | You know the model; let the controller pick |
+| [By model name](#by-model) | `spec.model.name` + migration annotation | You know the model; let the controller pick |
 | [Model + selector](#model--selector) | `spec.model.name` + `spec.profile.selector` | Narrow a model's pool by hardware or precision |
 | [Global selector](#global-selector) | `spec.profile.selector` | Reach profiles via labels alone |
 | [By image](#by-image) | `spec.model.image` + annotation | One-shot deploy from just an AIM container image |
@@ -49,15 +51,24 @@ Every shape except **By name** produces a candidate pool that the controller fil
 3. **Hardware filter** — drop candidates whose `acceleratorModel` is not present in the cluster (via the AcceleratorDetector node labels).
 4. **Deployable filter** — drop profiles with `status.deployable=false` (base profiles).
 5. **Scope preference** — namespace `AIMProfile` outranks cluster `AIMClusterProfile` when both match within the selected pass.
-6. **Rank** — order the survivors by `primary > type > version > name`, where:
+6. **Rank** — compare survivors in this order:
     - `primary: true` beats `primary: false`.
     - `type` ranks `optimized > general > preview > unoptimized`.
+    - `acceleratorModel` follows the built-in hardware preference order.
+    - `metric` ranks `latency > throughput`.
+    - `precision` ranks `fp4 > int4 > fp8 > int8 > fp16 > bf16 > fp32 > fp64`.
+    - A lower positive `acceleratorCount` wins; zero or unspecified ranks last.
+    - `acceleratorType: gpu` ranks ahead of other accelerator types.
     - `version` is the highest semver from the profile's container-image tag.
     - Alphabetical name is the final, deterministic tiebreaker.
 
-A single winner is selected. If two profiles tie on every ranking axis, the alphabetical name tiebreak makes the choice deterministic. The fields a user typically narrows on (`metric`, `precision`, `acceleratorModel`, `acceleratorCount`) are **filters**, not ranking axes — the way to influence the choice is to constrain the selector until exactly the desired profile survives, then let ranking pick among any remaining ties.
+A single winner is selected. Fields set on `spec.profile.selector` are filters;
+the same profile properties can also act as ranking axes among the candidates
+that survive filtering. Constrain the selector when a specific hardware,
+metric, or precision choice is required rather than relying on default ranking.
 
-The v1alpha1 template selector performs the same filtering (availability → unoptimized → service overrides → GPU availability → namespace-over-cluster) and applies an analogous tier-based preference. The v1alpha2 ranking just centralises it on profile primary/type/version metadata.
+The v1alpha1 template selector has its own analogous filtering and preference
+logic. The order above describes the v1alpha2 profile pipeline.
 
 ### By name
 
@@ -81,6 +92,11 @@ spec:
   model:
     name: qwen-qwen3-32b
 ```
+
+During the v1alpha1 → v1alpha2 migration window, a complete model-only
+`AIMService` must also set
+`aim.eai.amd.com/reconciler-pipeline: profile`. A service that includes
+`spec.profile.*` selects the profile pipeline by spec shape.
 
 The candidate pool is every deployable profile produced by `AIMModel/qwen-qwen3-32b` (or `AIMClusterModel` of the same name). Ranking picks the best.
 

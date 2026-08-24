@@ -260,7 +260,7 @@ spec:
 ```
 
 The full set of objects is also available under
-[`config/samples/aim_v1alpha2_lora_adapters.yaml`](https://github.com/silogen/aim-engine/blob/main/config/samples/aim_v1alpha2_lora_adapters.yaml).
+[`config/samples/aim_v1alpha2_lora_adapters.yaml`](https://github.com/amd-enterprise-ai/aim-engine/blob/main/config/samples/aim_v1alpha2_lora_adapters.yaml).
 
 The same adapters can be served from the **template pipeline** by declaring
 `spec.adapters` on a `v1alpha1` service (the parent base model is then resolved

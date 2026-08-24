@@ -112,7 +112,8 @@ When an `AIMService` references a model without naming a specific template (`spe
 3. Excludes templates whose GPU isn't present in the cluster.
 4. Selects the single remaining candidate or surfaces an ambiguity / not-found condition.
 
-For the v1alpha2 equivalent (ranking deployable profiles by `primary > type > version`), see [Services → Resolution shapes](../concepts/services.md#resolution-shapes).
+For the v1alpha2 equivalent, including its deterministic multi-axis profile
+ranking, see [Services → Resolution shapes](../concepts/services.md#resolution-shapes).
 
 ## v1alpha2 replacements at a glance
 

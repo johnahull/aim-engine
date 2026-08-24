@@ -48,7 +48,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | Size is the requested size of the adapter disk PVC.<br />Defaults to 50Gi when unset (a cascade default may override it). |  | Optional: \{\} <br /> |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | Size is the requested size of the adapter disk PVC.<br />Defaults to 50Gi when unset (a cascade default may override it). |  | Optional: \{\} <br /> |
 | `storageClassName` _string_ | StorageClassName specifies the storage class for the adapter disk.<br />When empty, the cluster default storage class is used.<br />The access mode is fixed at ReadWriteMany by the controller. |  | Optional: \{\} <br /> |
 
 
@@ -145,7 +145,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMArtifact` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMArtifactSpec](#aimartifactspec)_ |  |  |  |
 | `status` _[AIMArtifactStatus](#aimartifactstatus)_ |  |  |  |
 
@@ -185,7 +185,7 @@ AIMArtifactList contains a list of AIMArtifact
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMArtifactList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMArtifact](#aimartifact) array_ |  |  |  |
 
 
@@ -228,11 +228,11 @@ _Appears in:_
 | `adapterDisk` _[AIMAdapterDisk](#aimadapterdisk)_ | AdapterDisk, when set on a type=model artifact, provisions a shared ReadWriteMany<br />adapter disk owned by this model artifact and partitioned per consuming service.<br />Only allowed when type=model. |  | Optional: \{\} <br /> |
 | `modelId` _string_ | ModelID is the canonical identifier in \{org\}/\{name\} format.<br />Determines the cache download path: /workspace/cache/\{modelId\}<br />For HuggingFace sources, this is typically derived from the URI (e.g., "meta-llama/Llama-3-8B").<br />For S3 sources, this must be explicitly provided (e.g., "my-team/fine-tuned-llama").<br />When not specified, derived from SourceURI for HuggingFace sources. |  | Pattern: `^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$` <br />Optional: \{\} <br /> |
 | `storageClassName` _string_ | StorageClassName specifies the storage class for the cache volume.<br />When not specified, uses the cluster default storage class. |  | Optional: \{\} <br /> |
-| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | Size specifies the size of the cache volume |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env lists environment variables used when downloading the artifact.<br />For a typed S3 connection, artifact-level env is restricted to bounded<br />downloader tuning; configure proxy, transport, trust, and credential<br />providers through the administrator-owned RuntimeConfig. |  | Optional: \{\} <br /> |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | Size specifies the size of the cache volume |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env lists environment variables used when downloading the artifact.<br />For a typed S3 connection, artifact-level env is restricted to bounded<br />downloader tuning; configure proxy, transport, trust, and credential<br />providers through the administrator-owned RuntimeConfig. |  | Optional: \{\} <br /> |
 | `modelDownloadImage` _string_ | ModelDownloadImage specifies the container image used to download and<br />initialize the artifact. Direct S3 artifacts using typed S3 configuration<br />always use the controller's built-in image so administrator-managed<br />credentials and trust settings are not exposed to an arbitrary image.<br />When not specified, the controller uses its built-in default. |  | Optional: \{\} <br /> |
 | `downloadFilter` _[AIMDownloadFilter](#aimdownloadfilter)_ | DownloadFilter controls which files are included or excluded when downloading from HuggingFace.<br />Overrides any filter set in the runtime config's storage.downloadFilter.<br />When neither is set, subdirectory files are excluded by default (equivalent to exclude: ["*/*"]).<br />To download all files including subdirectories, set this to an empty object: downloadFilter: \{\}.<br />This field is immutable — to change the filter, recreate the artifact. |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets references secrets for pulling AIM container images. |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets references secrets for pulling AIM container images. |  | Optional: \{\} <br /> |
 | `retentionPriority` _integer_ | RetentionPriority marks this artifact as eligible for automatic eviction<br />when storage quota is exceeded. Lower values are evicted first.<br />Artifacts without this field are only evictable if a defaultRetentionPriority<br />is configured in the runtime config. Use the aim.eai.amd.com/eviction-protected<br />annotation to exempt an artifact from eviction entirely. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `runtimeConfigName` _string_ | Name is the name of the runtime config to use for this resource. If a runtime config with this name exists both<br />as a namespace and a cluster runtime config, the values are merged together, the namespace config taking priority<br />over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster<br />runtime config with the name `default` is used, if it exists. |  | Optional: \{\} <br /> |
 
@@ -251,16 +251,16 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ |  |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions represent the latest available observations of the artifact's state |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions represent the latest available observations of the artifact's state |  |  |
 | `status` _[AIMStatus](#aimstatus)_ | Status represents the current status of the artifact | Pending | Enum: [Pending Progressing Ready Degraded Failed NotAvailable] <br /> |
 | `progress` _[DownloadProgress](#downloadprogress)_ | Progress represents the download progress when Status is Progressing |  | Optional: \{\} <br /> |
 | `download` _[DownloadState](#downloadstate)_ | Download represents the current download attempt state, patched by the downloader pod.<br />Shows which protocol is active, what attempt we're on, etc. |  | Optional: \{\} <br /> |
 | `displaySize` _string_ | DisplaySize is the human-readable effective size (spec or discovered) |  | Optional: \{\} <br /> |
-| `lastUsed` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta)_ | LastUsed represents the last time a model was deployed that used this cache |  |  |
+| `lastUsed` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#time-v1-meta)_ | LastUsed represents the last time a model was deployed that used this cache |  |  |
 | `persistentVolumeClaim` _string_ | PersistentVolumeClaim represents the name of the created PVC |  |  |
 | `mode` _[AIMArtifactMode](#aimartifactmode)_ | Mode indicates the ownership mode of this artifact, derived from owner references.<br />- Dedicated: Has owner references, will be garbage collected when owners are deleted.<br />- Shared: No owner references, persists independently and can be shared. |  | Enum: [Dedicated Shared] <br />Optional: \{\} <br /> |
 | `discoveredSizeBytes` _integer_ | DiscoveredSizeBytes is the model size discovered via check-size job.<br />Populated when spec.size is not provided. |  | Optional: \{\} <br /> |
-| `allocatedSize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | AllocatedSize is the actual PVC size requested (including headroom). |  | Optional: \{\} <br /> |
+| `allocatedSize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | AllocatedSize is the actual PVC size requested (including headroom). |  | Optional: \{\} <br /> |
 | `headroomPercent` _integer_ | HeadroomPercent is the headroom percentage that was applied to the PVC size. |  | Optional: \{\} <br /> |
 | `resolvedSourceUri` _string_ | DEPRECATED: ResolvedSourceURI was populated when the removed embedded<br />Hugging Face-to-S3 cache rewrote a source URI. It is retained temporarily<br />for API compatibility and is no longer populated. |  | Optional: \{\} <br /> |
 | `adapterPersistentVolumeClaim` _string_ | AdapterPersistentVolumeClaim is the name of the shared adapter disk PVC<br />provisioned for a type=model artifact that declares an adapterDisk. Empty<br />otherwise. |  | Optional: \{\} <br /> |
@@ -284,8 +284,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `clusterLimit` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | ClusterLimit is the maximum total allocated storage for all AIMArtifacts cluster-wide.<br />When the sum of all artifact PVC sizes across all namespaces would exceed this limit,<br />new artifact PVCs are blocked until evictable artifacts are cleaned up or the limit is raised. |  | Optional: \{\} <br /> |
-| `defaultNamespaceLimit` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | DefaultNamespaceLimit is the default maximum allocated storage for AIMArtifacts per namespace.<br />Can be overridden for individual namespaces via the aim.eai.amd.com/artifact-storage-quota annotation. |  | Optional: \{\} <br /> |
+| `clusterLimit` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | ClusterLimit is the maximum total allocated storage for all AIMArtifacts cluster-wide.<br />When the sum of all artifact PVC sizes across all namespaces would exceed this limit,<br />new artifact PVCs are blocked until evictable artifacts are cleaned up or the limit is raised. |  | Optional: \{\} <br /> |
+| `defaultNamespaceLimit` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | DefaultNamespaceLimit is the default maximum allocated storage for AIMArtifacts per namespace.<br />Can be overridden for individual namespaces via the aim.eai.amd.com/artifact-storage-quota annotation. |  | Optional: \{\} <br /> |
 
 
 #### AIMArtifactType
@@ -354,7 +354,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMClusterModel` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMModelSpec](#aimmodelspec)_ |  |  |  |
 | `status` _[AIMModelStatus](#aimmodelstatus)_ |  |  |  |
 
@@ -373,7 +373,7 @@ AIMClusterModelList contains a list of AIMClusterModel.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMClusterModelList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMClusterModel](#aimclustermodel) array_ |  |  |  |
 
 
@@ -392,7 +392,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMClusterModelSource` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMClusterModelSourceSpec](#aimclustermodelsourcespec)_ |  |  |  |
 | `status` _[AIMClusterModelSourceStatus](#aimclustermodelsourcestatus)_ |  |  |  |
 
@@ -411,7 +411,7 @@ AIMClusterModelSourceList contains a list of AIMClusterModelSource.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMClusterModelSourceList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMClusterModelSource](#aimclustermodelsource) array_ |  |  |  |
 
 
@@ -448,11 +448,11 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `registry` _string_ | Registry to sync from (e.g., docker.io, ghcr.io, gcr.io).<br />Defaults to docker.io if not specified. | docker.io | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets contains references to secrets for authenticating to private registries.<br />Secrets must exist in the operator namespace (typically aim-system).<br />Used for both registry catalog listing and image metadata extraction. |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets contains references to secrets for authenticating to private registries.<br />Secrets must exist in the operator namespace (typically aim-system).<br />Used for both registry catalog listing and image metadata extraction. |  | Optional: \{\} <br /> |
 | `filters` _[ModelSourceFilter](#modelsourcefilter) array_ | Filters define which images to discover and sync.<br />Each filter specifies an image selector with optional version constraints and exclusions.<br />Multiple filters are combined with OR logic (any match includes the image).<br />Use this field for advanced matching options. For simple explicit image lists, use Images instead. |  | MaxItems: 100 <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `images` _string array_ | Images defines a simple explicit list of images to discover and sync.<br />Use this for straightforward static declarations without per-filter options.<br />Supported image formats:<br />- Repository with tag: "amdenterpriseai/aim-qwen-qwen3-32b:0.8.4"<br />- Repository without tag: "amdenterpriseai/aim-qwen-qwen3-32b" (uses Versions if set)<br />- Full URI with tag: "ghcr.io/silogen/aim-llama:1.0.0"<br />Must not be set together with Filters. |  | MaxItems: 100 <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `models` _[AIMClusterModelSourceModel](#aimclustermodelsourcemodel) array_ | Models declares canonical model identifiers to materialize as<br />v1alpha2 AIMClusterModel resources. Models may be combined with either<br />Filters or Images.<br />Lifecycle differs from registry discovery in one respect. Discovered<br />images are a snapshot of an external registry, so they are only ever<br />appended. A declaration is desired state the user edits in this spec, so<br />models this source owns are kept in sync with their declaration —<br />editing aimId, source, or accelerator updates the existing model in<br />place. Neither kind is ever deleted: removing a declaration leaves its<br />AIMClusterModel behind for an operator to remove deliberately. |  | MaxItems: 100 <br />MinItems: 1 <br />Optional: \{\} <br /> |
-| `syncInterval` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#duration-v1-meta)_ | SyncInterval defines how often to sync with the registry.<br />Defaults to 1h. Minimum recommended interval is 15m to avoid rate limiting.<br />Format: duration string (e.g., "30m", "1h", "2h30m"). | 1h | Optional: \{\} <br /> |
+| `syncInterval` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#duration-v1-meta)_ | SyncInterval defines how often to sync with the registry.<br />Defaults to 1h. Minimum recommended interval is 15m to avoid rate limiting.<br />Format: duration string (e.g., "30m", "1h", "2h30m"). | 1h | Optional: \{\} <br /> |
 | `versions` _string array_ | Versions specifies global semantic version constraints applied to all filters.<br />Individual filters can override this with their own version constraints.<br />Constraints use semver syntax: >=1.0.0, <2.0.0, ~1.2.0, ^1.0.0, etc.<br />Non-semver tags (e.g., "latest", "dev") are silently skipped.<br />Version ranges work on all registries (including ghcr.io, gcr.io) when combined with<br />exact repository names (no wildcards). The controller uses the Tags List API to fetch<br />all tags for the repository and filters them by the semver constraint.<br />Example: registry=ghcr.io, filters=[\{image: "silogen/aim-llama"\}], versions=[">=1.0.0"]<br />will fetch all tags from ghcr.io/silogen/aim-llama and include only those >=1.0.0. |  | Optional: \{\} <br /> |
 | `maxModels` _integer_ | MaxModels is the maximum number of AIMClusterModel resources to create from this source.<br />Once this limit is reached, no new models will be created, even if more matching images are discovered.<br />Existing models are never deleted.<br />This prevents runaway model creation from overly broad filters. | 100 | Maximum: 10000 <br />Minimum: 1 <br />Optional: \{\} <br /> |
 
@@ -471,11 +471,11 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `status` _string_ | Status represents the overall state of the model source. |  | Enum: [Pending Starting Progressing Ready Running Degraded NotAvailable Failed] <br />Optional: \{\} <br /> |
-| `lastSyncTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta)_ | LastSyncTime is the timestamp of the last successful registry sync.<br />Updated after each successful sync operation. |  | Optional: \{\} <br /> |
+| `lastSyncTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#time-v1-meta)_ | LastSyncTime is the timestamp of the last successful registry sync.<br />Updated after each successful sync operation. |  | Optional: \{\} <br /> |
 | `discoveredModels` _integer_ | DiscoveredModels is the count of AIMClusterModel resources managed by this source.<br />Includes both existing and newly created models. |  | Optional: \{\} <br /> |
 | `availableModels` _integer_ | AvailableModels is the total count of images discovered in the registry that match the filters.<br />This may be higher than DiscoveredModels if maxModels limit was reached. |  | Optional: \{\} <br /> |
 | `modelsLimitReached` _boolean_ | ModelsLimitReached indicates whether the maxModels limit has been reached.<br />When true, no new models will be created even if more matching images are discovered. |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions represent the latest available observations of the source's state.<br />Standard conditions: Ready, Syncing, RegistryReachable. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions represent the latest available observations of the source's state.<br />Standard conditions: Ready, Syncing, RegistryReachable. |  | Optional: \{\} <br /> |
 | `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec. |  | Optional: \{\} <br /> |
 
 
@@ -501,7 +501,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMClusterRuntimeConfig` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMClusterRuntimeConfigSpec](#aimclusterruntimeconfigspec)_ |  |  |  |
 | `status` _[AIMRuntimeConfigStatus](#aimruntimeconfigstatus)_ |  |  |  |
 
@@ -520,7 +520,7 @@ AIMClusterRuntimeConfigList contains a list of AIMClusterRuntimeConfig.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMClusterRuntimeConfigList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMClusterRuntimeConfig](#aimclusterruntimeconfig) array_ |  |  |  |
 
 
@@ -541,7 +541,7 @@ _Appears in:_
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `model` _[AIMModelConfig](#aimmodelconfig)_ | Model controls model creation and discovery defaults.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifact` _[AIMArtifactConfig](#aimartifactconfig)_ | Artifact controls artifact-level defaults such as eviction policy.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifactCache` _[ArtifactCacheConfig](#artifactcacheconfig)_ | DEPRECATED: The embedded Hugging Face-to-S3 artifact cache has been<br />removed. This field is retained temporarily for API compatibility and is<br />no longer honored by the controller. Use direct s3:// model sources with<br />Artifact.S3 connection settings instead. |  | Optional: \{\} <br /> |
@@ -574,7 +574,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMClusterServiceTemplate` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMClusterServiceTemplateSpec](#aimclusterservicetemplatespec)_ |  |  |  |
 | `status` _[AIMServiceTemplateStatus](#aimservicetemplatestatus)_ |  |  |  |
 
@@ -593,7 +593,7 @@ AIMClusterServiceTemplateList contains a list of AIMClusterServiceTemplate.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMClusterServiceTemplateList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMClusterServiceTemplate](#aimclusterservicetemplate) array_ |  |  |  |
 
 
@@ -620,13 +620,13 @@ _Appears in:_
 | `aimId` _string_ | AimId is the AIM product family identifier (e.g., "meta-llama/Llama-3-8B").<br />Required when customProfile is set; used to assemble the profile YAML aim_id field<br />and to compute the custom profile ID for AIM_PROFILE_ID. |  | Optional: \{\} <br /> |
 | `modelId` _string_ | ModelId is the specific model identifier / HuggingFace URI (e.g., "Qwen/Qwen3-32B-FP8").<br />Required when customProfile is set; used for profile YAML model_id field<br />and for weight pre-caching via the discovery job. |  | Optional: \{\} <br /> |
 | `customProfile` _[AIMCustomProfile](#aimcustomprofile)_ | CustomProfile defines inline custom profile data for the inference engine.<br />When set, the controller assembles a profile YAML from this data and template metadata,<br />creates a ConfigMap, and mounts it into discovery and inference containers.<br />Requires aimId, modelId, hardware, metric, and precision to also be set. |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets containing credentials for pulling container images.<br />These secrets are used for:<br />- Discovery dry-run jobs that inspect the model container<br />- Pulling the image for inference services<br />The secrets are merged with any model or runtime config defaults.<br />For namespace-scoped templates, secrets must exist in the same namespace.<br />For cluster-scoped templates, secrets must exist in the operator namespace. |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets containing credentials for pulling container images.<br />These secrets are used for:<br />- Discovery dry-run jobs that inspect the model container<br />- Pulling the image for inference services<br />The secrets are merged with any model or runtime config defaults.<br />For namespace-scoped templates, secrets must exist in the same namespace.<br />For cluster-scoped templates, secrets must exist in the operator namespace. |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName specifies the Kubernetes service account to use for workloads related to this template.<br />This includes discovery dry-run jobs and inference services created from this template.<br />If empty, the default service account for the namespace is used. |  | Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources defines the default container resource requirements applied to services derived from this template.<br />Service-specific values override the template defaults. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources defines the default container resource requirements applied to services derived from this template.<br />Service-specific values override the template defaults. |  | Optional: \{\} <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources specifies the model sources required to run this template.<br />When provided, the discovery dry-run will be skipped and these sources will be used directly.<br />This allows users to explicitly declare model dependencies without requiring a discovery job.<br />If omitted, a discovery job will be run to automatically determine the required model sources. |  | Optional: \{\} <br /> |
 | `profileId` _string_ | ProfileId is the specific AIM profile ID that this template should use.<br />When set, the discovery job will be instructed to use this specific profile. |  | Optional: \{\} <br /> |
 | `type` _[AIMProfileType](#aimprofiletype)_ | Type indicates the optimization level of this template.<br />- optimized: Template has been tuned for performance<br />- preview: Template is experimental/pre-release<br />- general: General-purpose tuning between optimized and preview<br />- unoptimized: Default, no specific optimizations applied<br />When nil, the type is determined by discovery. When set, overrides discovery. |  | Enum: [optimized general preview unoptimized] <br />Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />These variables are passed to the inference runtime and can be used<br />to configure runtime behavior, authentication, or other settings. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />These variables are passed to the inference runtime and can be used<br />to configure runtime behavior, authentication, or other settings. |  | Optional: \{\} <br /> |
 
 
 #### AIMCpuRequirements
@@ -642,8 +642,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `requests` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | Requests is the number of CPU cores to request. Required and must be > 0. |  | Required: \{\} <br /> |
-| `limits` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | Limits is the maximum number of CPU cores to allow. |  | Optional: \{\} <br /> |
+| `requests` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | Requests is the number of CPU cores to request. Required and must be > 0. |  | Required: \{\} <br /> |
+| `limits` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | Limits is the maximum number of CPU cores to allow. |  | Optional: \{\} <br /> |
 
 
 #### AIMCustomModelSpec
@@ -684,7 +684,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains inference engine arguments as a free-form JSON object.<br />These are passed as CLI arguments to the inference engine (e.g., vLLM).<br />Do not include "model" — it is injected separately by the runtime. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
+| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains inference engine arguments as a free-form JSON object.<br />These are passed as CLI arguments to the inference engine (e.g., vLLM).<br />Do not include "model" — it is injected separately by the runtime. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
 | `envVars` _object (keys:string, values:string)_ | EnvVars contains environment variables applied to the inference engine process.<br />These are written into the profile YAML and applied by the AIM runtime via os.execv,<br />distinct from container-level Env which targets the AIM runtime container itself.<br />Keys must match ^[A-Z0-9_]+$ (uppercase with underscores). |  | Optional: \{\} <br /> |
 
 
@@ -706,7 +706,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the template name. If not provided, auto-generated from model name + profile. |  | MaxLength: 63 <br />Optional: \{\} <br /> |
 | `type` _[AIMProfileType](#aimprofiletype)_ | Type indicates the optimization status of this template.<br />- optimized: Template has been tuned for performance<br />- general: General-purpose tuning between optimized and preview<br />- preview: Template is experimental/pre-release<br />- unoptimized: Default, no specific optimizations applied | unoptimized | Enum: [optimized general preview unoptimized] <br />Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variable overrides when this template is selected.<br />These are container-level env vars applied to the AIM runtime container. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variable overrides when this template is selected.<br />These are container-level env vars applied to the AIM runtime container. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
 | `hardware` _[AIMHardwareRequirements](#aimhardwarerequirements)_ | Hardware specifies GPU and CPU requirements for this template.<br />Optional when spec.hardware is set (inherits from spec).<br />When both are set, values are merged field-by-field with template taking precedence. |  | Optional: \{\} <br /> |
 | `profile` _[AIMTemplateProfile](#aimtemplateprofile)_ | Profile declares runtime profile variables for template selection.<br />Used when multiple templates exist to select based on metric/precision. |  | Optional: \{\} <br /> |
 | `aimId` _string_ | AimId is the AIM product family identifier (e.g., "meta-llama/Llama-3-8B").<br />Required when customProfile is set. |  | Optional: \{\} <br /> |
@@ -736,10 +736,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `engine_args` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains runtime-specific engine configuration as a free-form JSON object.<br />The structure depends on the inference engine being used (e.g., vLLM, TGI).<br />These arguments are passed to the runtime container to configure model loading and inference. |  | Schemaless: \{\} <br /> |
+| `engine_args` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains runtime-specific engine configuration as a free-form JSON object.<br />The structure depends on the inference engine being used (e.g., vLLM, TGI).<br />These arguments are passed to the runtime container to configure model loading and inference. |  | Schemaless: \{\} <br /> |
 | `env_vars` _object (keys:string, values:string)_ | EnvVars contains environment variables required by the runtime for this profile.<br />These may include engine-specific settings, optimization flags, or hardware configuration. |  | Optional: \{\} <br /> |
 | `metadata` _[AIMProfileMetadata](#aimprofilemetadata)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `originalDiscoveryOutput` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | OriginalDiscoveryOutput contains the raw discovery job JSON output.<br />This preserves the complete discovery result from the dry-run container,<br />including all fields that may not be mapped to structured fields above. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
+| `originalDiscoveryOutput` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | OriginalDiscoveryOutput contains the raw discovery job JSON output.<br />This preserves the complete discovery result from the dry-run container,<br />including all fields that may not be mapped to structured fields above. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
 
 
 
@@ -808,7 +808,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `requests` _integer_ | Requests is the number of GPUs to set as requests/limits.<br />Set to 0 to target GPU nodes without consuming GPU resources (useful for testing). |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `model` _string_ | Model limits deployment to a specific GPU model.<br />Example: "MI300X"<br />Cannot be combined with minVram. |  | MaxLength: 64 <br />Optional: \{\} <br /> |
-| `minVram` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | MinVRAM limits deployment to GPUs having at least this much VRAM.<br />Used for capacity planning when the model size is known but any GPU with<br />sufficient VRAM is acceptable.<br />Cannot be combined with model. |  | Optional: \{\} <br /> |
+| `minVram` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | MinVRAM limits deployment to GPUs having at least this much VRAM.<br />Used for capacity planning when the model size is known but any GPU with<br />sufficient VRAM is acceptable.<br />Cannot be combined with model. |  | Optional: \{\} <br /> |
 | `resourceName` _string_ | ResourceName is the Kubernetes resource name for GPU resources.<br />Defaults to "amd.com/gpu" if not specified. | amd.com/gpu | Optional: \{\} <br /> |
 
 
@@ -880,7 +880,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMModel` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMModelSpec](#aimmodelspec)_ |  |  |  |
 | `status` _[AIMModelStatus](#aimmodelstatus)_ |  |  |  |
 
@@ -1018,7 +1018,7 @@ AIMModelList contains a list of AIMModel.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMModelList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMModel](#aimmodel) array_ |  |  |  |
 
 
@@ -1110,9 +1110,9 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `modelId` _string_ | ModelID is the canonical identifier in \{org\}/\{name\} format.<br />Determines the cache mount path: /workspace/cache/\{modelId\}<br />For HuggingFace sources, this typically mirrors the URI path (e.g., meta-llama/Llama-3-8B).<br />For S3 sources, users define their own organizational structure. |  | Pattern: `^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$` <br />Required: \{\} <br /> |
 | `sourceUri` _string_ | SourceURI is the location from which the model should be downloaded.<br />Supported schemes:<br />- hf://org/model - Hugging Face Hub model<br />- s3://bucket/key - S3-compatible storage |  | Pattern: `^(hf\|s3)://[^ \t\r\n]+$` <br /> |
-| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | Size is the expected storage space required for this model artifact.<br />Used for PVC sizing and capacity planning during cache creation.<br />Optional - if not specified, the download job will discover the size automatically.<br />Can be set explicitly to pre-allocate storage or override auto-discovery. |  | Optional: \{\} <br /> |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | Size is the expected storage space required for this model artifact.<br />Used for PVC sizing and capacity planning during cache creation.<br />Optional - if not specified, the download job will discover the size automatically.<br />Can be set explicitly to pre-allocate storage or override auto-discovery. |  | Optional: \{\} <br /> |
 | `precision` _[AIMPrecision](#aimprecision)_ | Precision describes the runtime precision this source is compatible with.<br />Used to match model sources to profiles during custom weight onboarding. |  | Enum: [fp4 fp8 fp16 fp32 fp64 bf16 int4 int8] <br />Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies per-source credential overrides.<br />These variables are used for authentication when downloading this specific source.<br />Takes precedence over base-level env for the same variable name. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies per-source credential overrides.<br />These variables are used for authentication when downloading this specific source.<br />Takes precedence over base-level env for the same variable name. |  | Optional: \{\} <br /> |
 
 
 #### AIMModelSourceLocation
@@ -1132,9 +1132,9 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `uri` _string_ | URI is the location from which model weights are downloaded. When<br />omitted, modelId-backed models default to hf://<modelId>. |  | Pattern: `^(hf\|s3)://[^ \t\r\n]+$` <br />Optional: \{\} <br /> |
-| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | Size is the expected model artifact size. |  | Optional: \{\} <br /> |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | Size is the expected model artifact size. |  | Optional: \{\} <br /> |
 | `precision` _[AIMPrecision](#aimprecision)_ | Precision describes the runtime precision of the source weights. |  | Enum: [fp4 fp8 fp16 fp32 bf16 int4 int8] <br />Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies source-specific credential overrides. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies source-specific credential overrides. |  | Optional: \{\} <br /> |
 
 
 #### AIMModelSourceType
@@ -1196,10 +1196,10 @@ _Appears in:_
 | `customTemplates` _[AIMCustomTemplate](#aimcustomtemplate) array_ | CustomTemplates defines explicit template configurations for this model.<br />These templates are created directly without running a discovery job.<br />Can be used with or without modelSources to define custom deployment configurations.<br />If omitted when modelSources is set, a single template is auto-generated<br />using the custom.hardware requirements. |  | MaxItems: 16 <br />Optional: \{\} <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources specifies the model sources to use for this model.<br />When specified, these sources are used instead of auto-discovery from the container image.<br />This enables pre-creating custom models with explicit model sources.<br />The size field is optional - if not specified, it will be discovered by the download job.<br />AIM runtime currently supports only one model source. |  | MaxItems: 1 <br />Optional: \{\} <br /> |
 | `runtimeConfigName` _string_ | Name is the name of the runtime config to use for this resource. If a runtime config with this name exists both<br />as a namespace and a cluster runtime config, the values are merged together, the namespace config taking priority<br />over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster<br />runtime config with the name `default` is used, if it exists. |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets containing credentials for pulling the model container image.<br />These secrets are used for:<br />- OCI registry metadata extraction during discovery<br />- Pulling the image for inference services<br />The secrets are merged with any runtime config defaults.<br />For namespace-scoped models, secrets must exist in the same namespace.<br />For cluster-scoped models, secrets must exist in the operator namespace. |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for authentication during model discovery and metadata extraction.<br />These variables are used for authentication with model registries (e.g., HuggingFace tokens). |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets containing credentials for pulling the model container image.<br />These secrets are used for:<br />- OCI registry metadata extraction during discovery<br />- Pulling the image for inference services<br />The secrets are merged with any runtime config defaults.<br />For namespace-scoped models, secrets must exist in the same namespace.<br />For cluster-scoped models, secrets must exist in the operator namespace. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for authentication during model discovery and metadata extraction.<br />These variables are used for authentication with model registries (e.g., HuggingFace tokens). |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName specifies the Kubernetes service account to use for workloads related to this model.<br />This includes metadata extraction jobs and any other model-related operations.<br />If empty, the default service account for the namespace is used. |  | Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources defines the default resource requirements for services using this model.<br />Template- or service-level values override these defaults. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources defines the default resource requirements for services using this model.<br />Template- or service-level values override these defaults. |  | Optional: \{\} <br /> |
 | `imageMetadata` _[ImageMetadata](#imagemetadata)_ | ImageMetadata is the metadata that is used to determine which recommended service templates to create,<br />and to drive clients with richer metadata regarding this particular model. For most cases the user does<br />not need to set this field manually, for images that have the supported labels embedded in them<br />the `AIM(Cluster)Model.status.imageMetadata` field is automatically filled from the container image labels.<br />This field is intended to be used when there are network restrictions, or in other similar situations.<br />If this field is set, the remote extraction will not be performed at all. |  |  |
 
 
@@ -1219,7 +1219,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller |  |  |
 | `status` _[AIMStatus](#aimstatus)_ | Status represents the overall status of the image based on its templates | Pending | Enum: [Pending Progressing Ready Degraded Failed NotAvailable] <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions represent the latest available observations of the model's state |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions represent the latest available observations of the model's state |  |  |
 | `resolvedRuntimeConfig` _[AIMResolvedReference](#aimresolvedreference)_ | ResolvedRuntimeConfig captures metadata about the runtime config that was resolved. |  | Optional: \{\} <br /> |
 | `imageMetadata` _[ImageMetadata](#imagemetadata)_ | ImageMetadata is the metadata extracted from an AIM image |  | Optional: \{\} <br /> |
 | `sourceType` _[AIMModelSourceType](#aimmodelsourcetype)_ | SourceType indicates how this model's artifacts are sourced.<br />- "Image": Model discovered from container image labels<br />- "Custom": Model uses explicit spec.modelSources<br />Set by the controller based on whether spec.modelSources is populated.<br />Note: only populated by the v1alpha1 controller; v1alpha2 consumers<br />should read .status.kind instead, which distinguishes fine-tunes<br />(Derived) from BYO base-image overlays (Custom). |  | Enum: [Image Custom] <br />Optional: \{\} <br /> |
@@ -1365,11 +1365,11 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `image` _string_ | Image is the serving container image. |  | MinLength: 1 <br /> |
 | `engine` _string_ | Engine identifies the inference engine, for example vllm. |  | MinLength: 1 <br /> |
-| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs overrides or extends generated engine CLI arguments. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
+| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | EngineArgs overrides or extends generated engine CLI arguments. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
 | `engineEnv` _object (keys:string, values:string)_ | EngineEnv contains inference-engine subprocess environment variables. |  | Optional: \{\} <br /> |
-| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | ContainerEnv contains pod-level environment variables. |  | Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources overrides generated Kubernetes resource requirements. |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets contains credentials for pulling the serving image. |  | Optional: \{\} <br /> |
+| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | ContainerEnv contains pod-level environment variables. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources overrides generated Kubernetes resource requirements. |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets contains credentials for pulling the serving image. |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName selects the serving workload service account. |  | Optional: \{\} <br /> |
 
 
@@ -1421,7 +1421,7 @@ _Appears in:_
 | `version` _string_ | Version pins matching to a specific source profile version when VersionPolicy is pinned. |  | Optional: \{\} <br /> |
 | `image` _string_ | Image overrides the runtime image used by the derived profiles. |  | Optional: \{\} <br /> |
 | `overrides` _[ProfileOverrides](#profileoverrides)_ | Overrides mutates the copied profile spec after selection and version filtering. |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets used for inspecting and pulling container images. |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets used for inspecting and pulling container images. |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName is propagated to managed profiles for downstream workloads. |  | Optional: \{\} <br /> |
 
 
@@ -1551,7 +1551,7 @@ _Appears in:_
 | `namespace` _string_ | Namespace identifies where the resource was found when namespace-scoped.<br />Empty indicates a cluster-scoped resource. |  |  |
 | `scope` _[AIMResolutionScope](#aimresolutionscope)_ | Scope indicates whether the resolved resource was namespace or cluster scoped. |  | Enum: [Namespace Cluster Merged Unknown] <br /> |
 | `kind` _string_ | Kind is the fully-qualified kind of the resolved reference, when known. |  | Optional: \{\} <br /> |
-| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#uid-types-pkg)_ | UID captures the unique identifier of the resolved reference, when known. |  | Optional: \{\} <br /> |
+| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#uid-types-pkg)_ | UID captures the unique identifier of the resolved reference, when known. |  | Optional: \{\} <br /> |
 
 
 #### AIMRuntimeConfig
@@ -1569,7 +1569,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMRuntimeConfig` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMRuntimeConfigSpec](#aimruntimeconfigspec)_ |  |  |  |
 | `status` _[AIMRuntimeConfigStatus](#aimruntimeconfigstatus)_ |  |  |  |
 
@@ -1594,7 +1594,7 @@ _Appears in:_
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `model` _[AIMModelConfig](#aimmodelconfig)_ | Model controls model creation and discovery defaults.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifact` _[AIMArtifactConfig](#aimartifactconfig)_ | Artifact controls artifact-level defaults such as eviction policy.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifactCache` _[ArtifactCacheConfig](#artifactcacheconfig)_ | DEPRECATED: The embedded Hugging Face-to-S3 artifact cache has been<br />removed. This field is retained temporarily for API compatibility and is<br />no longer honored by the controller. Use direct s3:// model sources with<br />Artifact.S3 connection settings instead. |  | Optional: \{\} <br /> |
@@ -1636,7 +1636,7 @@ AIMRuntimeConfigList contains a list of AIMRuntimeConfig.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMRuntimeConfigList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMRuntimeConfig](#aimruntimeconfig) array_ |  |  |  |
 
 
@@ -1657,7 +1657,7 @@ _Appears in:_
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 | `model` _[AIMModelConfig](#aimmodelconfig)_ | Model controls model creation and discovery defaults.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifact` _[AIMArtifactConfig](#aimartifactconfig)_ | Artifact controls artifact-level defaults such as eviction policy.<br />This field only applies to RuntimeConfig/ClusterRuntimeConfig and is not available for services. |  | Optional: \{\} <br /> |
 | `artifactCache` _[ArtifactCacheConfig](#artifactcacheconfig)_ | DEPRECATED: The embedded Hugging Face-to-S3 artifact cache has been<br />removed. This field is retained temporarily for API compatibility and is<br />no longer honored by the controller. Use direct s3:// model sources with<br />Artifact.S3 connection settings instead. |  | Optional: \{\} <br /> |
@@ -1681,7 +1681,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the last reconciled generation. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions communicate reconciliation progress. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions communicate reconciliation progress. |  |  |
 
 
 #### AIMRuntimeParameters
@@ -1729,7 +1729,7 @@ _Appears in:_
 | `gatewayRef` _[ParentReference](#parentreference)_ | GatewayRef specifies the Gateway API Gateway resource that should receive HTTPRoutes.<br />This identifies the parent gateway for routing traffic to inference services.<br />The gateway can be in any namespace (cross-namespace references are supported).<br />If routing is enabled but GatewayRef is not specified, service reconciliation will fail<br />with a validation error. |  | Optional: \{\} <br /> |
 | `hostnames` _Hostname array_ | Hostnames pins generated HTTPRoutes to these hostnames so a route only<br />attaches to the matching Gateway listener instead of every listener on<br />the parent gateway. Without a hostname, an HTTPRoute matches all of the<br />parent gateway's listener hostnames, which can expose a service on<br />listeners that do not enforce the intended authentication.<br />This field is required when the parent gateway exposes more than one<br />listener: in that case a service with routing enabled but no hostnames<br />configured will not get an HTTPRoute and reports ConfigValid=False with<br />reason RouteHostnameRequired. When the parent gateway has a single<br />listener, leaving this empty preserves the existing behavior (the route<br />inherits that listener's hostnames).<br />Individual services can override this list via spec.routing.hostnames. |  | Optional: \{\} <br /> |
 | `pathTemplate` _string_ | PathTemplate defines the HTTP path template for routes, evaluated using JSONPath expressions.<br />The template is rendered against the AIMService object to generate unique paths.<br />Example templates:<br />- `/\{.metadata.namespace\}/\{.metadata.name\}` - namespace and service name<br />- `/\{.metadata.namespace\}/\{.metadata.labels['team']\}/inference` - with label<br />- `/models/\{.metadata.name\}` - based on service name<br />The template must:<br />- Use valid JSONPath expressions wrapped in \{...\}<br />- Reference fields that exist on the service<br />- Produce a path ≤ 200 characters after rendering<br />- Result in valid URL path segments (lowercase, RFC 1123 compliant)<br />If evaluation fails, the service enters Degraded state with PathTemplateInvalid reason.<br />Individual services can override this template via spec.routing.pathTemplate. |  | Optional: \{\} <br /> |
-| `requestTimeout` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#duration-v1-meta)_ | RequestTimeout defines the HTTP request timeout for routes.<br />This sets the maximum duration for a request to complete before timing out.<br />The timeout applies to the entire request/response cycle.<br />If not specified, no timeout is set on the route.<br />Individual services can override this value via spec.routing.requestTimeout. |  | Optional: \{\} <br /> |
+| `requestTimeout` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#duration-v1-meta)_ | RequestTimeout defines the HTTP request timeout for routes.<br />This sets the maximum duration for a request to complete before timing out.<br />The timeout applies to the entire request/response cycle.<br />If not specified, no timeout is set on the route.<br />Individual services can override this value via spec.routing.requestTimeout. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations defines default annotations to add to all HTTPRoute resources.<br />Services can add additional annotations or override these via spec.routing.annotations.<br />When both are specified, service annotations take precedence for conflicting keys.<br />Common use cases include ingress controller settings, rate limiting, monitoring labels,<br />and security policies that should apply to all services using this config. |  | Optional: \{\} <br /> |
 
 
@@ -1771,7 +1771,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMService` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMServiceSpec](#aimservicespec)_ |  |  |  |
 | `status` _[AIMServiceStatus](#aimservicestatus)_ |  |  |  |
 
@@ -1836,7 +1836,7 @@ _Appears in:_
 | `modelId` _string_ | ModelID is the adapter's canonical model id (mirrored from the artifact). |  | Optional: \{\} <br /> |
 | `state` _[AIMAdapterState](#aimadapterstate)_ | State is the disk-side state of the adapter for this service. |  | Enum: [Pending Downloading Downloaded Failed Deleting Loaded LoadRejected] <br />Optional: \{\} <br /> |
 | `loadedReplicas` _string_ | LoadedReplicas reports how many serving replicas have the adapter loaded,<br />as "loaded/total" (e.g. "3/3"). RESERVED: engine-reported, not yet populated. |  | Optional: \{\} <br /> |
-| `lastObserved` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta)_ | LastObserved is when the controller last observed this adapter's state. |  | Optional: \{\} <br /> |
+| `lastObserved` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#time-v1-meta)_ | LastObserved is when the controller last observed this adapter's state. |  | Optional: \{\} <br /> |
 | `lastError` _string_ | LastError carries the most recent error for this adapter (e.g. a mirrored<br />failing reason from the underlying artifact). |  | Optional: \{\} <br /> |
 
 
@@ -1902,7 +1902,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `mode` _[AIMCachingMode](#aimcachingmode)_ | Mode controls when to use caching.<br />Canonical values:<br />- Shared (default): reuse/create shared cache assets<br />- Dedicated: create service-owned dedicated cache assets<br />Legacy values are accepted and normalized:<br />- Always -> Shared<br />- Auto -> Shared<br />- Never -> Dedicated | Shared | Enum: [Dedicated Shared Auto Always Never] <br />Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env supplies credentials for model downloads (for example a HuggingFace<br />token via secretKeyRef). Unlike the inference container env, these<br />variables reach only the model-download Job, so download-only secrets are<br />never injected into the serving container. They are also reachable for<br />cluster-scoped and overlay profiles, where the profile's own caching.env<br />does not exist. Merged over the profile's caching.env (service wins). |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env supplies credentials for model downloads (for example a HuggingFace<br />token via secretKeyRef). Unlike the inference container env, these<br />variables reach only the model-download Job, so download-only secrets are<br />never injected into the serving container. They are also reachable for<br />cluster-scoped and overlay profiles, where the profile's own caching.env<br />does not exist. Merged over the profile's caching.env (service wins). |  | Optional: \{\} <br /> |
 
 
 #### AIMServiceList
@@ -1919,7 +1919,7 @@ AIMServiceList contains a list of AIMService.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMServiceList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMService](#aimservice) array_ |  |  |  |
 
 
@@ -2121,9 +2121,9 @@ _Appears in:_
 | `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor replaces the referenced profile's acceleratorVendor. |  | Enum: [amd nvidia] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount replaces the referenced profile's acceleratorCount. |  | Optional: \{\} <br /> |
 | `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode replaces the referenced profile's<br />acceleratorPartitioningMode. Complete replacement, not a merge — single<br />string, no substruct ambiguity. Empty string means "no override" (the<br />resolved overlay inherits the base profile's mode). Use this to deploy a<br />profile written for whole GPUs onto a partition slice. Whenever this<br />override is set (to any value, including "unpartitioned"), the CEL rule on<br />AIMService also requires an acceleratorCount override: partition mode<br />changes the per-unit interpretation of acceleratorCount, and CEL cannot<br />read the base profile to tell whether the meaning actually changed, so it<br />conservatively requires the count be restated. See<br />AcceleratorPartitioningMode on AIMProfileSpecCommon for the reserved<br />values ("unpartitioned", "partitioned", "<C>-<M>"). |  | Optional: \{\} <br /> |
-| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | ContainerEnv merges by env-var name on top of the profile's<br />containerEnv. Matching names override; new names are appended.<br />AIM framework variables (AIM_*) reserved for the controller are<br />applied after the overlay's containerEnv and cannot be overridden<br />here. |  | Optional: \{\} <br /> |
+| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | ContainerEnv merges by env-var name on top of the profile's<br />containerEnv. Matching names override; new names are appended.<br />AIM framework variables (AIM_*) reserved for the controller are<br />applied after the overlay's containerEnv and cannot be overridden<br />here. |  | Optional: \{\} <br /> |
 | `engineEnv` _object (keys:string, values:string)_ | EngineEnv merges by key on top of the profile's engineEnv. These<br />variables flow into the inference engine's runtime configuration. |  | Optional: \{\} <br /> |
-| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs shallow-merges on top of the profile's engineArgs,<br />overriding matching top-level keys. Values are passed verbatim<br />to the inference engine CLI. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
+| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | EngineArgs shallow-merges on top of the profile's engineArgs,<br />overriding matching top-level keys. Values are passed verbatim<br />to the inference engine CLI. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
 
 
 #### AIMServiceRoutingStatus
@@ -2165,7 +2165,7 @@ _Appears in:_
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
 
 
 #### AIMServiceRuntimeStatus
@@ -2226,10 +2226,10 @@ _Appears in:_
 | `storage` _[AIMStorageConfig](#aimstorageconfig)_ | Storage configures storage defaults for this service's PVCs and caches.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `routing` _[AIMRuntimeRoutingConfig](#aimruntimeroutingconfig)_ | Routing controls HTTP routing configuration for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
 | `scaleFromZero` _[AIMScaleFromZeroConfig](#aimscalefromzeroconfig)_ | ScaleFromZero configures the activation metric query for this service.<br />When set, these values override namespace/cluster runtime config defaults. |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources overrides the container resource requirements for this service.<br />When specified, these values take precedence over the template and image defaults. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />When set on AIMService, these take highest precedence in the merge hierarchy.<br />When set on RuntimeConfig, these provide namespace/cluster-level defaults.<br />Merge order (highest to lowest): Service.Env > Template.Env > RuntimeConfig.Env > Profile.Env |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources overrides the container resource requirements for this service.<br />When specified, these values take precedence over the template and image defaults. |  | Optional: \{\} <br /> |
 | `overrides` _[AIMServiceOverrides](#aimserviceoverrides)_ | Overrides allows overriding specific template parameters for this service.<br />When specified, these values take precedence over the template values. |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets references secrets for pulling AIM container images. |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets references secrets for pulling AIM container images. |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName specifies the Kubernetes service account to use for the inference workload.<br />This service account is used by the deployed inference pods.<br />If empty, the default service account for the namespace is used. |  | Optional: \{\} <br /> |
 | `priorityClassName` _string_ | PriorityClassName specifies the priority class for the inference pods.<br />This maps directly to the Kubernetes PriorityClassName field on the pod spec.<br />If empty, no priority class is set. |  | Optional: \{\} <br /> |
 
@@ -2248,7 +2248,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions represent the latest observations of template state. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions represent the latest observations of template state. |  |  |
 | `resolvedRuntimeConfig` _[AIMResolvedReference](#aimresolvedreference)_ | ResolvedRuntimeConfig captures metadata about the runtime config that was resolved. |  | Optional: \{\} <br /> |
 | `resolvedModel` _[AIMResolvedReference](#aimresolvedreference)_ | ResolvedModel captures metadata about the image that was resolved. |  | Optional: \{\} <br /> |
 | `status` _[AIMStatus](#aimstatus)_ | Status represents the current high‑level status of the service lifecycle.<br />Values: `Pending`, `Starting`, `Running`, `Degraded`, `Failed`. | Pending | Enum: [Pending Starting Running Degraded Failed] <br /> |
@@ -2281,7 +2281,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMServiceTemplate` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMServiceTemplateSpec](#aimservicetemplatespec)_ |  |  |  |
 | `status` _[AIMServiceTemplateStatus](#aimservicetemplatestatus)_ |  |  |  |
 
@@ -2317,7 +2317,7 @@ AIMServiceTemplateList contains a list of AIMServiceTemplate.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMServiceTemplateList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMServiceTemplate](#aimservicetemplate) array_ |  |  |  |
 
 
@@ -2361,13 +2361,13 @@ _Appears in:_
 | `aimId` _string_ | AimId is the AIM product family identifier (e.g., "meta-llama/Llama-3-8B").<br />Required when customProfile is set; used to assemble the profile YAML aim_id field<br />and to compute the custom profile ID for AIM_PROFILE_ID. |  | Optional: \{\} <br /> |
 | `modelId` _string_ | ModelId is the specific model identifier / HuggingFace URI (e.g., "Qwen/Qwen3-32B-FP8").<br />Required when customProfile is set; used for profile YAML model_id field<br />and for weight pre-caching via the discovery job. |  | Optional: \{\} <br /> |
 | `customProfile` _[AIMCustomProfile](#aimcustomprofile)_ | CustomProfile defines inline custom profile data for the inference engine.<br />When set, the controller assembles a profile YAML from this data and template metadata,<br />creates a ConfigMap, and mounts it into discovery and inference containers.<br />Requires aimId, modelId, hardware, metric, and precision to also be set. |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets containing credentials for pulling container images.<br />These secrets are used for:<br />- Discovery dry-run jobs that inspect the model container<br />- Pulling the image for inference services<br />The secrets are merged with any model or runtime config defaults.<br />For namespace-scoped templates, secrets must exist in the same namespace.<br />For cluster-scoped templates, secrets must exist in the operator namespace. |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets containing credentials for pulling container images.<br />These secrets are used for:<br />- Discovery dry-run jobs that inspect the model container<br />- Pulling the image for inference services<br />The secrets are merged with any model or runtime config defaults.<br />For namespace-scoped templates, secrets must exist in the same namespace.<br />For cluster-scoped templates, secrets must exist in the operator namespace. |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName specifies the Kubernetes service account to use for workloads related to this template.<br />This includes discovery dry-run jobs and inference services created from this template.<br />If empty, the default service account for the namespace is used. |  | Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources defines the default container resource requirements applied to services derived from this template.<br />Service-specific values override the template defaults. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources defines the default container resource requirements applied to services derived from this template.<br />Service-specific values override the template defaults. |  | Optional: \{\} <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources specifies the model sources required to run this template.<br />When provided, the discovery dry-run will be skipped and these sources will be used directly.<br />This allows users to explicitly declare model dependencies without requiring a discovery job.<br />If omitted, a discovery job will be run to automatically determine the required model sources. |  | Optional: \{\} <br /> |
 | `profileId` _string_ | ProfileId is the specific AIM profile ID that this template should use.<br />When set, the discovery job will be instructed to use this specific profile. |  | Optional: \{\} <br /> |
 | `type` _[AIMProfileType](#aimprofiletype)_ | Type indicates the optimization level of this template.<br />- optimized: Template has been tuned for performance<br />- preview: Template is experimental/pre-release<br />- general: General-purpose tuning between optimized and preview<br />- unoptimized: Default, no specific optimizations applied<br />When nil, the type is determined by discovery. When set, overrides discovery. |  | Enum: [optimized general preview unoptimized] <br />Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />These variables are passed to the inference runtime and can be used<br />to configure runtime behavior, authentication, or other settings. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />These variables are passed to the inference runtime and can be used<br />to configure runtime behavior, authentication, or other settings. |  | Optional: \{\} <br /> |
 | `caching` _[AIMTemplateCachingConfig](#aimtemplatecachingconfig)_ | Caching configures model caching behavior for this namespace-scoped template.<br />When enabled, models will be cached using the specified environment variables<br />during download. |  | Optional: \{\} <br /> |
 
 
@@ -2393,13 +2393,13 @@ _Appears in:_
 | `aimId` _string_ | AimId is the AIM product family identifier (e.g., "meta-llama/Llama-3-8B").<br />Required when customProfile is set; used to assemble the profile YAML aim_id field<br />and to compute the custom profile ID for AIM_PROFILE_ID. |  | Optional: \{\} <br /> |
 | `modelId` _string_ | ModelId is the specific model identifier / HuggingFace URI (e.g., "Qwen/Qwen3-32B-FP8").<br />Required when customProfile is set; used for profile YAML model_id field<br />and for weight pre-caching via the discovery job. |  | Optional: \{\} <br /> |
 | `customProfile` _[AIMCustomProfile](#aimcustomprofile)_ | CustomProfile defines inline custom profile data for the inference engine.<br />When set, the controller assembles a profile YAML from this data and template metadata,<br />creates a ConfigMap, and mounts it into discovery and inference containers.<br />Requires aimId, modelId, hardware, metric, and precision to also be set. |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets containing credentials for pulling container images.<br />These secrets are used for:<br />- Discovery dry-run jobs that inspect the model container<br />- Pulling the image for inference services<br />The secrets are merged with any model or runtime config defaults.<br />For namespace-scoped templates, secrets must exist in the same namespace.<br />For cluster-scoped templates, secrets must exist in the operator namespace. |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets containing credentials for pulling container images.<br />These secrets are used for:<br />- Discovery dry-run jobs that inspect the model container<br />- Pulling the image for inference services<br />The secrets are merged with any model or runtime config defaults.<br />For namespace-scoped templates, secrets must exist in the same namespace.<br />For cluster-scoped templates, secrets must exist in the operator namespace. |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName specifies the Kubernetes service account to use for workloads related to this template.<br />This includes discovery dry-run jobs and inference services created from this template.<br />If empty, the default service account for the namespace is used. |  | Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources defines the default container resource requirements applied to services derived from this template.<br />Service-specific values override the template defaults. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources defines the default container resource requirements applied to services derived from this template.<br />Service-specific values override the template defaults. |  | Optional: \{\} <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources specifies the model sources required to run this template.<br />When provided, the discovery dry-run will be skipped and these sources will be used directly.<br />This allows users to explicitly declare model dependencies without requiring a discovery job.<br />If omitted, a discovery job will be run to automatically determine the required model sources. |  | Optional: \{\} <br /> |
 | `profileId` _string_ | ProfileId is the specific AIM profile ID that this template should use.<br />When set, the discovery job will be instructed to use this specific profile. |  | Optional: \{\} <br /> |
 | `type` _[AIMProfileType](#aimprofiletype)_ | Type indicates the optimization level of this template.<br />- optimized: Template has been tuned for performance<br />- preview: Template is experimental/pre-release<br />- general: General-purpose tuning between optimized and preview<br />- unoptimized: Default, no specific optimizations applied<br />When nil, the type is determined by discovery. When set, overrides discovery. |  | Enum: [optimized general preview unoptimized] <br />Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />These variables are passed to the inference runtime and can be used<br />to configure runtime behavior, authentication, or other settings. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for inference containers.<br />These variables are passed to the inference runtime and can be used<br />to configure runtime behavior, authentication, or other settings. |  | Optional: \{\} <br /> |
 
 
 #### AIMServiceTemplateStatus
@@ -2417,12 +2417,12 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions represent the latest observations of template state. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions represent the latest observations of template state. |  |  |
 | `resolvedRuntimeConfig` _[AIMResolvedReference](#aimresolvedreference)_ | ResolvedRuntimeConfig captures metadata about the runtime config that was resolved. |  | Optional: \{\} <br /> |
 | `resolvedModel` _[AIMResolvedReference](#aimresolvedreference)_ | ResolvedModel captures metadata about the image that was resolved. |  | Optional: \{\} <br /> |
 | `resolvedCache` _[AIMResolvedReference](#aimresolvedreference)_ | ResolvedCache captures metadata about which cache is used for this template |  | Optional: \{\} <br /> |
 | `resolvedHardware` _[AIMHardwareRequirements](#aimhardwarerequirements)_ | ResolvedHardware contains the resolved hardware requirements for this template.<br />These values are computed from discovery results and spec defaults, and represent<br />what will actually be used when creating InferenceServices.<br />Resolution order: discovery output > spec values > defaults. |  | Optional: \{\} <br /> |
-| `resolvedNodeAffinity` _[NodeAffinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#nodeaffinity-v1-core)_ | ResolvedNodeAffinity contains the computed node affinity rules for GPU scheduling.<br />This is derived from GPU model and minVRAM requirements, merged with any user-specified<br />affinity from the spec. The service controller uses this directly when creating InferenceServices. |  | Optional: \{\} <br /> |
+| `resolvedNodeAffinity` _[NodeAffinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#nodeaffinity-v1-core)_ | ResolvedNodeAffinity contains the computed node affinity rules for GPU scheduling.<br />This is derived from GPU model and minVRAM requirements, merged with any user-specified<br />affinity from the spec. The service controller uses this directly when creating InferenceServices. |  | Optional: \{\} <br /> |
 | `hardwareSummary` _string_ | HardwareSummary is a human-readable display string for the hardware requirements.<br />Format: "\{count\} x \{model\}" for GPU (e.g., "2 x MI300X") or "CPU" for CPU-only.<br />This is a computed field for display purposes only. |  | Optional: \{\} <br /> |
 | `status` _[AIMStatus](#aimstatus)_ | Status represents the current high‑level status of the template lifecycle.<br />Values: `Pending`, `Progressing`, `Ready`, `Degraded`, `Failed`. | Pending | Enum: [Pending Progressing Ready Degraded Failed NotAvailable] <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources list the models that this template requires to run. These are the models that will be<br />cached, if this template is cached. |  |  |
@@ -2453,7 +2453,7 @@ _Appears in:_
 | `pvcHeadroomPercent` _integer_ | PVCHeadroomPercent specifies the percentage of extra space to add to PVCs<br />for model storage. This accounts for filesystem overhead and temporary files<br />during model loading. The value represents a percentage (e.g., 10 means 10% extra space).<br />If not specified, defaults to 10%. | 10 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `downloadFilter` _[AIMDownloadFilter](#aimdownloadfilter)_ | DownloadFilter controls which files are included or excluded during artifact downloads.<br />When set here, applies as the default for all artifacts using this runtime config.<br />Individual artifacts can override this with their own downloadFilter.<br />When no filter is configured at any level, subdirectory files are excluded by default.<br />Set to an empty object (downloadFilter: \{\}) to explicitly allow all files. |  | Optional: \{\} <br /> |
 | `adapterDiskStorageClassName` _string_ | AdapterDiskStorageClassName is the storage class for the shared<br />ReadWriteMany adapter disk. It must be RWX-capable (e.g. longhorn, NFS) and<br />is resolved before the (typically RWO) DefaultStorageClassName. |  | Optional: \{\} <br /> |
-| `adapterDiskSize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#quantity-resource-api)_ | AdapterDiskSize is the cluster default size for the shared adapter disk PVC<br />(built-in default when unset). An artifact's adapterDisk.size wins over it. |  | Optional: \{\} <br /> |
+| `adapterDiskSize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#quantity-resource-api)_ | AdapterDiskSize is the cluster default size for the shared adapter disk PVC<br />(built-in default when unset). An artifact's adapterDisk.size wins over it. |  | Optional: \{\} <br /> |
 
 
 #### AIMTemplateCache
@@ -2471,7 +2471,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMTemplateCache` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMTemplateCacheSpec](#aimtemplatecachespec)_ |  |  |  |
 | `status` _[AIMTemplateCacheStatus](#aimtemplatecachestatus)_ |  |  |  |
 
@@ -2490,7 +2490,7 @@ AIMTemplateCacheList contains a list of AIMTemplateCache.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha1` | | |
 | `kind` _string_ | `AIMTemplateCacheList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMTemplateCache](#aimtemplatecache) array_ |  |  |  |
 
 
@@ -2527,8 +2527,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `templateName` _string_ | TemplateName is the name of the AIMServiceTemplate or AIMClusterServiceTemplate to cache.<br />The controller will first look for a namespace-scoped AIMServiceTemplate in the same namespace.<br />If not found, it will look for a cluster-scoped AIMClusterServiceTemplate with the same name.<br />Namespace-scoped templates take priority over cluster-scoped templates. |  | MinLength: 1 <br /> |
 | `templateScope` _[AIMServiceTemplateScope](#aimservicetemplatescope)_ | TemplateScope indicates whether the template is namespace-scoped or cluster-scoped.<br />This field is set by the controller during template resolution. |  | Enum: [Namespace Cluster Unknown] <br />Required: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables to use for authentication when downloading models.<br />These variables are used for authentication with model registries (e.g., HuggingFace tokens). |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets references secrets for pulling AIM container images. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables to use for authentication when downloading models.<br />These variables are used for authentication with model registries (e.g., HuggingFace tokens). |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets references secrets for pulling AIM container images. |  | Optional: \{\} <br /> |
 | `storageClassName` _string_ | StorageClassName specifies the storage class for cache volumes.<br />When not specified, uses the cluster default storage class. |  | Optional: \{\} <br /> |
 | `downloadImage` _string_ | DownloadImage specifies the container image used to download and initialize artifacts.<br />When not specified, the controller uses the default model download image. |  | Optional: \{\} <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources specifies the model sources to cache for this template.<br />These sources are typically copied from the resolved template's model sources. |  | Optional: \{\} <br /> |
@@ -2550,7 +2550,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions represent the latest observations of the template cache state. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions represent the latest observations of the template cache state. |  |  |
 | `resolvedRuntimeConfig` _[AIMResolvedReference](#aimresolvedreference)_ | ResolvedRuntimeConfig captures metadata about the runtime config that was resolved. |  | Optional: \{\} <br /> |
 | `status` _[AIMStatus](#aimstatus)_ | Status represents the current high-level status of the template cache. | Pending | Enum: [Pending Progressing Ready Failed Degraded NotAvailable] <br /> |
 | `resolvedTemplateKind` _string_ | ResolvedTemplateKind indicates whether the template resolved to a namespace-scoped<br />AIMServiceTemplate or cluster-scoped AIMClusterServiceTemplate.<br />Values: "AIMServiceTemplate", "AIMClusterServiceTemplate" |  |  |
@@ -2571,7 +2571,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled controls whether caching is enabled for this template.<br />Defaults to `false`. | false |  |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables to use when downloading the model for caching.<br />These variables are available to the model download process and can be used<br />to configure download behavior, authentication, proxies, etc.<br />If not set, falls back to the template's top-level Env field. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables to use when downloading the model for caching.<br />These variables are available to the model download process and can be used<br />to configure download behavior, authentication, proxies, etc.<br />If not set, falls back to the template's top-level Env field. |  | Optional: \{\} <br /> |
 
 
 
@@ -2682,7 +2682,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled formerly controlled whether the embedded S3 artifact cache was<br />active. It is retained for API compatibility and has no effect. |  | Optional: \{\} <br /> |
 | `s3Uri` _string_ | S3URI formerly selected the base S3 path for cached artifacts. It is<br />retained for API compatibility and has no effect. |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env formerly provided S3 endpoint and credential configuration for the<br />embedded cache. It is retained for API compatibility and has no effect. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env formerly provided S3 endpoint and credential configuration for the<br />embedded cache. It is retained for API compatibility and has no effect. |  | Optional: \{\} <br /> |
 
 
 #### DiscoveredProfileCounts
@@ -2737,11 +2737,11 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `attempts` _integer_ | Attempts is the number of discovery job attempts that have been made.<br />This counter increments each time a new discovery job is created after a failure. |  | Optional: \{\} <br /> |
-| `lastAttemptTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta)_ | LastAttemptTime is the timestamp of the most recent discovery job creation.<br />Used to calculate exponential backoff before the next retry. |  | Optional: \{\} <br /> |
+| `lastAttemptTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#time-v1-meta)_ | LastAttemptTime is the timestamp of the most recent discovery job creation.<br />Used to calculate exponential backoff before the next retry. |  | Optional: \{\} <br /> |
 | `lastFailureReason` _string_ | LastFailureReason captures the reason for the most recent discovery failure.<br />Used to classify failures as terminal vs transient. |  | Optional: \{\} <br /> |
 | `specHash` _string_ | SpecHash is a hash of the template spec fields that affect discovery.<br />When the spec changes, the circuit breaker resets to allow fresh attempts. |  | Optional: \{\} <br /> |
 | `identityCheckHash` _string_ | IdentityCheckHash records the hash from the most recent identity<br />rediscovery attempt for a Ready template. When the current hash matches<br />this value, the controller will not invalidate a Ready template just to<br />retry identity (aimId/modelId) extraction. Bumping the operator-internal<br />hash version forces a one-shot revisit across all eligible templates<br />without operator intervention. |  | Optional: \{\} <br /> |
-| `lastIdentityCheckTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta)_ | LastIdentityCheckTime is the timestamp of the most recent identity<br />rediscovery attempt initiation. Acts as a hard floor against rediscovery<br />thrashing in the presence of bugs that prevent IdentityCheckHash from<br />being recorded. |  | Optional: \{\} <br /> |
+| `lastIdentityCheckTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#time-v1-meta)_ | LastIdentityCheckTime is the timestamp of the most recent identity<br />rediscovery attempt initiation. Acts as a hard floor against rediscovery<br />thrashing in the presence of bugs that prevent IdentityCheckHash from<br />being recorded. |  | Optional: \{\} <br /> |
 
 
 #### DownloadProgress
@@ -2846,7 +2846,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `attempts` _integer_ | Attempts is the number of discovery job attempts that have been made.<br />Increments each time a new discovery job is created after a failure. |  | Optional: \{\} <br /> |
-| `lastAttemptTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta)_ | LastAttemptTime is the timestamp of the most recent discovery job creation.<br />Used to calculate exponential backoff before the next retry. |  | Optional: \{\} <br /> |
+| `lastAttemptTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#time-v1-meta)_ | LastAttemptTime is the timestamp of the most recent discovery job creation.<br />Used to calculate exponential backoff before the next retry. |  | Optional: \{\} <br /> |
 | `lastFailureReason` _string_ | LastFailureReason captures the reason for the most recent discovery failure. |  | Optional: \{\} <br /> |
 | `specHash` _string_ | SpecHash is a hash of the model spec fields that invalidate cached discovery<br />(image, imagePullSecrets, serviceAccountName, discoveryCommandVersion).<br />When it changes, the operator drops the cache and re-runs the discovery Job. |  | Optional: \{\} <br /> |
 
@@ -3054,9 +3054,9 @@ _Appears in:_
 | `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor replaces the copied profile's acceleratorVendor. |  | Enum: [amd nvidia] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount replaces the copied profile's acceleratorCount. |  | Optional: \{\} <br /> |
 | `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode replaces the copied profile's<br />acceleratorPartitioningMode. Complete replacement, not a merge; an empty<br />override string leaves the source profile's mode untouched. Same reserved<br />values as AIMProfileSpecCommon.AcceleratorPartitioningMode. Whenever this<br />override is set (to any value, including "unpartitioned"), the CEL rule on the<br />enclosing spec also requires AcceleratorCount to be set: partition mode<br />changes the per-unit interpretation of acceleratorCount, and CEL cannot<br />read the base profile to tell whether the meaning actually changed, so it<br />conservatively requires the count be restated. |  | Optional: \{\} <br /> |
-| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | ContainerEnv merges by env var name, overriding matching source entries. |  | Optional: \{\} <br /> |
+| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | ContainerEnv merges by env var name, overriding matching source entries. |  | Optional: \{\} <br /> |
 | `engineEnv` _object (keys:string, values:string)_ | EngineEnv merges by key, overriding matching source entries. |  | Optional: \{\} <br /> |
-| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs shallow-merges on top of the source engineArgs, overriding matching keys. |  | Type: object <br />Optional: \{\} <br /> |
+| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | EngineArgs shallow-merges on top of the source engineArgs, overriding matching keys. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### ProfileSelector
@@ -3087,7 +3087,7 @@ _Appears in:_
 | `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode filters candidates by their declared<br />partitioning mode. Partial-order match (NOT strict equality):<br />  ""              - no filter on this field.<br />  "unpartitioned" - matches profiles with mode "" or "unpartitioned".<br />  "partitioned"   - matches profiles whose mode is non-trivial (anything<br />                    other than "" / "unpartitioned").<br />  "<C>"           - selector-only convenience: matches profiles with mode<br />                    "<C>-*" (prefix on the scheme). Not a valid profile-spec<br />                    value (e.g. selector "CPX" matches "CPX-NPS1", "CPX-NPS4").<br />  "<C>-<M>"       - exact-string match on the scheme. |  | Optional: \{\} <br /> |
 | `acceleratorType` _[AcceleratorType](#acceleratortype)_ | AcceleratorType filters by accelerator resource type. |  | Enum: [gpu cpu] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount filters by accelerator unit count. |  | Optional: \{\} <br /> |
-| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs partially matches source engineArgs: every provided top-level key must<br />exist in the source object with an equal value. |  | Type: object <br />Optional: \{\} <br /> |
+| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | EngineArgs partially matches source engineArgs: every provided top-level key must<br />exist in the source object with an equal value. |  | Type: object <br />Optional: \{\} <br /> |
 | `modelRef` _[ProfileSelectorModelRef](#profileselectormodelref)_ | ModelRef narrows candidates to those produced by a specific<br />AIM(Cluster)Model, matched via the `aim.eai.amd.com/source-model[-scope]`<br />labels stamped by the AIMModel reconcilers. Iteration 1 (v1alpha2 only). |  | Optional: \{\} <br /> |
 | `role` _[ProfileSelectorRole](#profileselectorrole)_ | Role filters by the `aim.eai.amd.com/profile-role` label. Defaults to<br />`deployable`. `base` filters to base profiles emitted by base-image<br />discovery (custom-model derivation source material). | deployable | Enum: [base deployable] <br />Optional: \{\} <br /> |
 | `origin` _[ProfileOrigin](#profileorigin)_ | Origin filters by the `aim.eai.amd.com/profile-origin` label. When unset<br />(empty) the selector does not filter by origin. Iteration 1 (v1alpha2<br />only). |  | Enum: [discovered derived generated user-authored] <br />Optional: \{\} <br /> |

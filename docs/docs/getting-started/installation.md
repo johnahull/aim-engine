@@ -6,8 +6,9 @@ This guide covers installing AIM Engine on a Kubernetes cluster.
 
 | Component | Minimum Version | Notes |
 |-----------|----------------|-------|
-| Kubernetes | 1.32+ | Cluster with AMD GPU nodes |
-| [AMD GPU Operator](https://github.com/ROCm/gpu-operator) | — | Advertises `amd.com/gpu` and the GPU node labels used for template selection |
+| Kubernetes | 1.32+ | Cluster with supported AMD or NVIDIA GPU nodes; CPU-only profiles are also supported |
+| [AMD GPU Operator](https://github.com/ROCm/gpu-operator) | — | AMD GPU stack; advertises `amd.com/gpu`, labels AMD nodes, and installs NFD |
+| [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator) | — | NVIDIA GPU stack; advertises `nvidia.com/gpu`, installs NFD, and provides the NVIDIA runtime |
 | KServe | v0.16.1 | See [KServe Configuration](../admin/kserve-configuration.md) |
 | Gateway API | v1.5.1+ | Required only when HTTP routing is enabled |
 | Envoy Gateway | v1.8.2 | Optional Gateway API data plane. Required only when that platform integration is selected. |
@@ -28,6 +29,11 @@ Optional components:
 | Component | Version | Purpose |
 |-----------|---------|---------|
 | Longhorn or similar CSI | — | ReadWriteMany storage for model caching |
+
+Install the GPU operator that matches the cluster hardware, or provide an
+equivalent device-plugin, NFD, and runtime setup. AIM Engine's
+[AcceleratorDetector](../concepts/accelerator-detection.md) uses NFD to publish
+normalized model, vendor, and partition labels for profile resolution.
 
 ## Install with Helm
 

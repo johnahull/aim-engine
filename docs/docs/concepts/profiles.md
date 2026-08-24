@@ -404,8 +404,15 @@ truthfully `unoptimized` without requiring every service to lower its floor.
 The default policy is `optimized`, so existing AMD preview and unoptimized
 profiles remain excluded.
 
-!!! warning "`manualSelectionOnly` is deprecated"
-    `spec.manualSelectionOnly` is no longer honored. Use `type` + `minimumType` for service-authored optimization-tier consent and `autoSelectionPolicy` for platform-authored automatic eligibility. The field is still accepted for backward compatibility but has no effect and will be removed in a future API version.
+:::{warning}
+`manualSelectionOnly` is deprecated
+
+`spec.manualSelectionOnly` is no longer honored. Use `type` + `minimumType` for
+service-authored optimization-tier consent and `autoSelectionPolicy` for
+platform-authored automatic eligibility. The field is still accepted for
+backward compatibility but has no effect and will be removed in a future API
+version.
+:::
 
 ## Examples
 
@@ -495,7 +502,7 @@ If the service uses `spec.profile.selector` or `spec.model.name`, the selector m
 
 ## Related documentation
 
-- [AIM Models](models.md) — Three model flows that produce profiles
+- [AIM Models](models.md) — Four model flows that produce profiles
 - [AIM Profile Sets](profilesets.md) — Derivation machinery
 - [Services](services.md) — How services resolve and rank profiles
 - [Model Caching](caching.md) — Cache lifecycle and configuration

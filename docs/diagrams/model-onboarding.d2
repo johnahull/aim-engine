@@ -4,6 +4,7 @@ direction: right
 ModelSource: AIMClusterModelSource {class: user}
 AIMModel: "AIMModel /\nAIMClusterModel" {class: user}
 ProfileSet: "AIMProfileSet /\nAIMClusterProfileSet" {class: user}
+RuntimeConfig: "AIMRuntimeConfig /\nAIMClusterRuntimeConfig" {class: user}
 HandProfile: "AIMProfile\n(hand-authored)" {class: user}
 
 ModelCtrl: Model controller {class: operator}
@@ -13,10 +14,12 @@ ProfileCtrl: Profile controller {class: operator}
 Discovery: "Discovery Job +\nConfigMap" {class: managed}
 Profile: "AIMProfile /\nAIMClusterProfile\n(deployable)" {class: resolved}
 
-ModelSource -> AIMModel: discovers
+ModelSource -> AIMModel: discovers / declares
 AIMModel -> ModelCtrl
-ModelCtrl -> Discovery: image discovery
-ModelCtrl -> ProfileSetCtrl: derivation
+ModelCtrl -> Discovery: spec.image
+RuntimeConfig -> ModelCtrl: generated fallback
+ModelCtrl -> Profile: spec.modelId
+ModelCtrl -> ProfileSetCtrl: spec.profiles
 ProfileSet -> ProfileSetCtrl
 Discovery -> Profile: yields
 ProfileSetCtrl -> Profile: derives

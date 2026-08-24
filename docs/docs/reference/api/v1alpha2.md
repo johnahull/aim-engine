@@ -45,7 +45,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMClusterModel` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMModelSpec](#aimmodelspec)_ |  |  |  |
 | `status` _[AIMModelStatus](#aimmodelstatus)_ |  |  |  |
 
@@ -64,7 +64,7 @@ AIMClusterModelList contains a list of AIMClusterModel.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMClusterModelList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMClusterModel](#aimclustermodel) array_ |  |  |  |
 
 
@@ -92,7 +92,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMClusterProfile` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMClusterProfileSpec](#aimclusterprofilespec)_ |  |  |  |
 | `status` _[AIMProfileStatus](#aimprofilestatus)_ |  |  |  |
 
@@ -111,7 +111,7 @@ AIMClusterProfileList contains a list of AIMClusterProfile.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMClusterProfileList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMClusterProfile](#aimclusterprofile) array_ |  |  |  |
 
 
@@ -130,7 +130,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMClusterProfileSet` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMProfileSetSpec](#aimprofilesetspec)_ |  |  |  |
 | `status` _[AIMProfileSetStatus](#aimprofilesetstatus)_ |  |  |  |
 
@@ -149,7 +149,7 @@ AIMClusterProfileSetList contains a list of AIMClusterProfileSet.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMClusterProfileSetList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMClusterProfileSet](#aimclusterprofileset) array_ |  |  |  |
 
 
@@ -177,18 +177,18 @@ _Appears in:_
 | `autoSelectionPolicy` _[AIMProfileAutoSelectionPolicy](#aimprofileautoselectionpolicy)_ | AutoSelectionPolicy controls which optimization tiers may participate in<br />automatic selection when the AIMService does not explicitly set<br />minimumType.<br />"optimized" applies the implicit optimized floor. "any" permits the<br />profile to participate in a second selection pass regardless of its type,<br />but only when no optimized candidate matched. It never overrides an<br />explicitly authored minimumType. Explicit spec.profile.name resolution is<br />unaffected. | optimized | Optional: \{\} <br /> |
 | `primary` _boolean_ | Primary marks this as a default/recommended profile. When true, the profile is<br />advertised for standard deployment and copied automatically for custom weight models.<br />Defaults to false when not specified. | false |  |
 | `manualSelectionOnly` _boolean_ | ManualSelectionOnly is DEPRECATED and no longer honored by the resolver.<br />It was a binary gate excluding a profile from automatic AIMService<br />selection. Optimization-tier consent is now expressed through the graded<br />`type` hierarchy combined with the selector's `minimumType` floor, while<br />eligibility for implicit any-tier automatic selection is expressed through<br />`autoSelectionPolicy`. The field is retained for backward compatibility<br />(existing objects and aim-build profile YAMLs still set it) but has no<br />effect on selection; it will be removed in a future API version.<br />Deprecated: superseded by `type`, selector `minimumType`, and<br />`autoSelectionPolicy`; ignored by the resolver. | false |  |
-| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains inference engine CLI arguments as a free-form JSON object.<br />Passed to the inference engine (e.g., vLLM) at startup. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
+| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains inference engine CLI arguments as a free-form JSON object.<br />Passed to the inference engine (e.g., vLLM) at startup. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
 | `engineEnv` _object (keys:string, values:string)_ | EngineEnv contains environment variables for the inference engine subprocess.<br />Applied via os.execv, distinct from container-level ContainerEnv. |  | Optional: \{\} <br /> |
 | `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor selects the vendor-specific device-plugin resource and<br />vendor node label used for this profile. A generic NVIDIA profile can set<br />this to "nvidia" without declaring an acceleratorModel; AIM Engine then<br />requests nvidia.com/gpu and matches NVIDIA GPU nodes of any model.<br />Empty preserves the legacy AMD behavior for profiles created before this<br />field existed. |  | Optional: \{\} <br /> |
 | `acceleratorModel` _string_ | AcceleratorModel is the accelerator identifier for node selection.<br />Maps to a node label key using the Exists operator:<br />  feature.node.kubernetes.io/aim-accelerator.\{value\}: Exists<br />Supports both specific models (e.g., "MI300X") and architecture-level<br />fallbacks (e.g., "EPYC_ZEN5") — the AcceleratorDetector labels nodes<br />with all applicable identifiers. |  | MaxLength: 63 <br />Pattern: `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$` <br />Optional: \{\} <br /> |
 | `acceleratorType` _[AcceleratorType](#acceleratortype)_ | AcceleratorType determines the resource derivation strategy: gpu or cpu.<br />AIM Engine computes default resource requests from this field combined<br />with AcceleratorCount and cluster-level configuration. |  | Enum: [gpu cpu] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount is the number of accelerator units required.<br />For AcceleratorType=gpu, this is the device count (e.g., 1, 2, 4, 8<br />for tensor-parallel sizes). For AcceleratorType=cpu, this is the<br />number of CPU cores (e.g., 128 for EPYC_ZEN5, 192 for EPYC_9965).<br />Combined with cluster-level configuration to compute default<br />resource requests in status.resources.<br />For AcceleratorType=gpu, the per-unit interpretation depends on<br />AcceleratorPartitioningMode: under "unpartitioned" (default) one unit is<br />one whole GPU; under "partitioned" or a specific scheme one unit is one<br />partition slice (e.g. CPX-NPS4 = 1/8 of a GPU). Host CPU and memory<br />defaults are scaled by the recognized compute partition density<br />(SPX=1, DPX=2, QPX=4, CPX=8). Geometry-agnostic "partitioned" and unknown<br />schemes require explicit host resources because a safe scale cannot be<br />inferred. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode declares the GPU partition state the profile<br />requires. Free-form string with reserved values:<br />  ""              - omitted; CRD-defaulted to "unpartitioned".<br />  "unpartitioned" - hardware-default partition state. Matches unpartitioned<br />                    MI300X (canonical SPX-NPS1) AND non-partitionable<br />                    hardware (Radeon, etc.) — any node whose detector<br />                    stamped aim-accelerator.partitioning-scheme.default.<br />  "partitioned"   - any actively partitioned mode. Excludes both<br />                    unpartitioned partitionable hardware and<br />                    non-partitionable hardware.<br />  "<C>-<M>"       - specific compute+memory scheme, e.g. "CPX-NPS4". Matches<br />                    only nodes carrying that exact scheme label; does not<br />                    match non-partitionable hardware.<br />Other values (e.g. "CPX" alone, or typos) are accepted but fail-safe to<br />zero matching nodes under this iteration's label schema — compute-only /<br />memory-only matching is not supported here. AIM Engine does NOT validate<br />against AMD's hardware compatibility matrix; invalid combinations simply<br />report MatchingNodes == 0.<br />Resolves to a single Exists or DoesNotExist node-affinity term on the<br />aim-accelerator.partitioning-scheme.* labels published by the<br />AcceleratorDetector, AND-ed with the acceleratorModel term. | unpartitioned | MaxLength: 63 <br />Pattern: `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$` <br />Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources is an optional override for K8s resource requests/limits.<br />When set, merged on top of the defaults that AIM Engine computes from<br />AcceleratorType, AcceleratorCount, and cluster-level configuration.<br />Generated values account for an explicit opposite-side value so partial<br />overrides cannot produce a request above its limit.<br />The resolved result is written to status.resources. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources is an optional override for K8s resource requests/limits.<br />When set, merged on top of the defaults that AIM Engine computes from<br />AcceleratorType, AcceleratorCount, and cluster-level configuration.<br />Generated values account for an explicit opposite-side value so partial<br />overrides cannot produce a request above its limit.<br />The resolved result is written to status.resources. |  | Optional: \{\} <br /> |
 | `image` _string_ | Image is the deployment container image. Required.<br />For purpose-built profiles: the full AIM image.<br />For custom weight profiles: the base image (e.g., aim-base:0.8.5). |  | MinLength: 1 <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources specifies model artifact sources for this profile.<br />Populated during discovery or set by user. |  | Optional: \{\} <br /> |
-| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | ContainerEnv specifies container-level env vars for the AIM runtime process (K8s pod spec). |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets for pulling container images. |  | Optional: \{\} <br /> |
+| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | ContainerEnv specifies container-level env vars for the AIM runtime process (K8s pod spec). |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets for pulling container images. |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName specifies the service account for workloads. |  | Optional: \{\} <br /> |
 | `features` _string array_ | Features lists optional capabilities the profile's image honours, e.g.<br />"adapters" for LoRA serving. A service declaring spec.adapters is rejected<br />(ConfigValid=False) unless its resolved profile lists "adapters" here. |  | Optional: \{\} <br /> |
 
@@ -229,7 +229,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMModel` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMModelSpec](#aimmodelspec)_ |  |  |  |
 | `status` _[AIMModelStatus](#aimmodelstatus)_ |  |  |  |
 
@@ -248,7 +248,7 @@ AIMModelList contains a list of AIMModel.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMModelList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMModel](#aimmodel) array_ |  |  |  |
 
 
@@ -279,7 +279,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMProfile` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMProfileSpec](#aimprofilespec)_ |  |  |  |
 | `status` _[AIMProfileStatus](#aimprofilestatus)_ |  |  |  |
 
@@ -301,7 +301,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMProfileCache` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMProfileCacheSpec](#aimprofilecachespec)_ |  |  |  |
 | `status` _[AIMProfileCacheStatus](#aimprofilecachestatus)_ |  |  |  |
 
@@ -320,7 +320,7 @@ AIMProfileCacheList contains a list of AIMProfileCache.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMProfileCacheList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMProfileCache](#aimprofilecache) array_ |  |  |  |
 
 
@@ -358,7 +358,7 @@ _Appears in:_
 | `profileName` _string_ | ProfileName is the name of the AIMProfile or AIMClusterProfile to cache.<br />The controller resolves model sources from the referenced profile's spec.modelSources. |  | MinLength: 1 <br /> |
 | `profileScope` _[AIMResolutionScope](#aimresolutionscope)_ | ProfileScope indicates whether the profile is namespace-scoped or cluster-scoped. |  | Enum: [Namespace Cluster] <br />Required: \{\} <br /> |
 | `storageClassName` _string_ | StorageClassName specifies the storage class for cache volumes.<br />When not specified, uses the cluster default storage class. |  | Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for authentication when downloading models.<br />These variables are used for authentication with model registries (e.g., HuggingFace tokens). |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for authentication when downloading models.<br />These variables are used for authentication with model registries (e.g., HuggingFace tokens). |  | Optional: \{\} <br /> |
 | `runtimeConfigName` _string_ | Name is the name of the runtime config to use for this resource. If a runtime config with this name exists both<br />as a namespace and a cluster runtime config, the values are merged together, the namespace config taking priority<br />over the cluster config when there are conflicts. If this field is empty or set to `default`, the namespace / cluster<br />runtime config with the name `default` is used, if it exists. |  | Optional: \{\} <br /> |
 | `mode` _[AIMProfileCacheMode](#aimprofilecachemode)_ | Mode controls the ownership behavior of artifacts created by this profile cache.<br />- Dedicated: artifacts are owned by this profile cache and garbage collected when it's deleted.<br />- Shared (default): artifacts have no owner references and persist independently. | Shared | Enum: [Dedicated Shared] <br />Optional: \{\} <br /> |
 | `requiresAdapterDisk` _boolean_ | RequiresAdapterDisk requests that the backing model artifact carry a shared<br />ReadWriteMany adapter disk for LoRA serving. Set by the AIMService planner<br />when the service serves adapters. When set, the cache stamps an adapterDisk<br />onto the artifact it creates and won't adopt one lacking a disk; size and<br />class come from AIMRuntimeConfig.Storage. |  | Optional: \{\} <br /> |
@@ -378,7 +378,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions represent the latest observations of the profile cache state. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions represent the latest observations of the profile cache state. |  |  |
 | `status` _[AIMStatus](#aimstatus)_ | Status represents the current high-level status of the profile cache. | Pending | Enum: [Pending Progressing Ready Failed Degraded NotAvailable] <br /> |
 | `artifacts` _object (keys:string, values:AIMResolvedArtifact)_ | Artifacts maps artifact names to their resolved AIMArtifact resources. |  | Optional: \{\} <br /> |
 
@@ -397,7 +397,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled controls whether caching is enabled for this profile. | false |  |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | Env specifies environment variables for model download during caching.<br />If not set, falls back to the profile's ContainerEnv. |  | Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | Env specifies environment variables for model download during caching.<br />If not set, falls back to the profile's ContainerEnv. |  | Optional: \{\} <br /> |
 
 
 #### AIMProfileList
@@ -414,7 +414,7 @@ AIMProfileList contains a list of AIMProfile.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMProfileList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMProfile](#aimprofile) array_ |  |  |  |
 
 
@@ -433,7 +433,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMProfileSet` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMProfileSetSpec](#aimprofilesetspec)_ |  |  |  |
 | `status` _[AIMProfileSetStatus](#aimprofilesetstatus)_ |  |  |  |
 
@@ -452,7 +452,7 @@ AIMProfileSetList contains a list of AIMProfileSet.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMProfileSetList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMProfileSet](#aimprofileset) array_ |  |  |  |
 
 
@@ -484,18 +484,18 @@ _Appears in:_
 | `autoSelectionPolicy` _[AIMProfileAutoSelectionPolicy](#aimprofileautoselectionpolicy)_ | AutoSelectionPolicy controls which optimization tiers may participate in<br />automatic selection when the AIMService does not explicitly set<br />minimumType.<br />"optimized" applies the implicit optimized floor. "any" permits the<br />profile to participate in a second selection pass regardless of its type,<br />but only when no optimized candidate matched. It never overrides an<br />explicitly authored minimumType. Explicit spec.profile.name resolution is<br />unaffected. | optimized | Optional: \{\} <br /> |
 | `primary` _boolean_ | Primary marks this as a default/recommended profile. When true, the profile is<br />advertised for standard deployment and copied automatically for custom weight models.<br />Defaults to false when not specified. | false |  |
 | `manualSelectionOnly` _boolean_ | ManualSelectionOnly is DEPRECATED and no longer honored by the resolver.<br />It was a binary gate excluding a profile from automatic AIMService<br />selection. Optimization-tier consent is now expressed through the graded<br />`type` hierarchy combined with the selector's `minimumType` floor, while<br />eligibility for implicit any-tier automatic selection is expressed through<br />`autoSelectionPolicy`. The field is retained for backward compatibility<br />(existing objects and aim-build profile YAMLs still set it) but has no<br />effect on selection; it will be removed in a future API version.<br />Deprecated: superseded by `type`, selector `minimumType`, and<br />`autoSelectionPolicy`; ignored by the resolver. | false |  |
-| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains inference engine CLI arguments as a free-form JSON object.<br />Passed to the inference engine (e.g., vLLM) at startup. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
+| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains inference engine CLI arguments as a free-form JSON object.<br />Passed to the inference engine (e.g., vLLM) at startup. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
 | `engineEnv` _object (keys:string, values:string)_ | EngineEnv contains environment variables for the inference engine subprocess.<br />Applied via os.execv, distinct from container-level ContainerEnv. |  | Optional: \{\} <br /> |
 | `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor selects the vendor-specific device-plugin resource and<br />vendor node label used for this profile. A generic NVIDIA profile can set<br />this to "nvidia" without declaring an acceleratorModel; AIM Engine then<br />requests nvidia.com/gpu and matches NVIDIA GPU nodes of any model.<br />Empty preserves the legacy AMD behavior for profiles created before this<br />field existed. |  | Optional: \{\} <br /> |
 | `acceleratorModel` _string_ | AcceleratorModel is the accelerator identifier for node selection.<br />Maps to a node label key using the Exists operator:<br />  feature.node.kubernetes.io/aim-accelerator.\{value\}: Exists<br />Supports both specific models (e.g., "MI300X") and architecture-level<br />fallbacks (e.g., "EPYC_ZEN5") — the AcceleratorDetector labels nodes<br />with all applicable identifiers. |  | MaxLength: 63 <br />Pattern: `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$` <br />Optional: \{\} <br /> |
 | `acceleratorType` _[AcceleratorType](#acceleratortype)_ | AcceleratorType determines the resource derivation strategy: gpu or cpu.<br />AIM Engine computes default resource requests from this field combined<br />with AcceleratorCount and cluster-level configuration. |  | Enum: [gpu cpu] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount is the number of accelerator units required.<br />For AcceleratorType=gpu, this is the device count (e.g., 1, 2, 4, 8<br />for tensor-parallel sizes). For AcceleratorType=cpu, this is the<br />number of CPU cores (e.g., 128 for EPYC_ZEN5, 192 for EPYC_9965).<br />Combined with cluster-level configuration to compute default<br />resource requests in status.resources.<br />For AcceleratorType=gpu, the per-unit interpretation depends on<br />AcceleratorPartitioningMode: under "unpartitioned" (default) one unit is<br />one whole GPU; under "partitioned" or a specific scheme one unit is one<br />partition slice (e.g. CPX-NPS4 = 1/8 of a GPU). Host CPU and memory<br />defaults are scaled by the recognized compute partition density<br />(SPX=1, DPX=2, QPX=4, CPX=8). Geometry-agnostic "partitioned" and unknown<br />schemes require explicit host resources because a safe scale cannot be<br />inferred. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode declares the GPU partition state the profile<br />requires. Free-form string with reserved values:<br />  ""              - omitted; CRD-defaulted to "unpartitioned".<br />  "unpartitioned" - hardware-default partition state. Matches unpartitioned<br />                    MI300X (canonical SPX-NPS1) AND non-partitionable<br />                    hardware (Radeon, etc.) — any node whose detector<br />                    stamped aim-accelerator.partitioning-scheme.default.<br />  "partitioned"   - any actively partitioned mode. Excludes both<br />                    unpartitioned partitionable hardware and<br />                    non-partitionable hardware.<br />  "<C>-<M>"       - specific compute+memory scheme, e.g. "CPX-NPS4". Matches<br />                    only nodes carrying that exact scheme label; does not<br />                    match non-partitionable hardware.<br />Other values (e.g. "CPX" alone, or typos) are accepted but fail-safe to<br />zero matching nodes under this iteration's label schema — compute-only /<br />memory-only matching is not supported here. AIM Engine does NOT validate<br />against AMD's hardware compatibility matrix; invalid combinations simply<br />report MatchingNodes == 0.<br />Resolves to a single Exists or DoesNotExist node-affinity term on the<br />aim-accelerator.partitioning-scheme.* labels published by the<br />AcceleratorDetector, AND-ed with the acceleratorModel term. | unpartitioned | MaxLength: 63 <br />Pattern: `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$` <br />Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources is an optional override for K8s resource requests/limits.<br />When set, merged on top of the defaults that AIM Engine computes from<br />AcceleratorType, AcceleratorCount, and cluster-level configuration.<br />Generated values account for an explicit opposite-side value so partial<br />overrides cannot produce a request above its limit.<br />The resolved result is written to status.resources. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources is an optional override for K8s resource requests/limits.<br />When set, merged on top of the defaults that AIM Engine computes from<br />AcceleratorType, AcceleratorCount, and cluster-level configuration.<br />Generated values account for an explicit opposite-side value so partial<br />overrides cannot produce a request above its limit.<br />The resolved result is written to status.resources. |  | Optional: \{\} <br /> |
 | `image` _string_ | Image is the deployment container image. Required.<br />For purpose-built profiles: the full AIM image.<br />For custom weight profiles: the base image (e.g., aim-base:0.8.5). |  | MinLength: 1 <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources specifies model artifact sources for this profile.<br />Populated during discovery or set by user. |  | Optional: \{\} <br /> |
-| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | ContainerEnv specifies container-level env vars for the AIM runtime process (K8s pod spec). |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets for pulling container images. |  | Optional: \{\} <br /> |
+| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | ContainerEnv specifies container-level env vars for the AIM runtime process (K8s pod spec). |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets for pulling container images. |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName specifies the service account for workloads. |  | Optional: \{\} <br /> |
 | `features` _string array_ | Features lists optional capabilities the profile's image honours, e.g.<br />"adapters" for LoRA serving. A service declaring spec.adapters is rejected<br />(ConfigValid=False) unless its resolved profile lists "adapters" here. |  | Optional: \{\} <br /> |
 | `caching` _[AIMProfileCachingConfig](#aimprofilecachingconfig)_ | Caching configures model caching behavior for this namespace-scoped profile. |  | Optional: \{\} <br /> |
@@ -529,18 +529,18 @@ _Appears in:_
 | `autoSelectionPolicy` _[AIMProfileAutoSelectionPolicy](#aimprofileautoselectionpolicy)_ | AutoSelectionPolicy controls which optimization tiers may participate in<br />automatic selection when the AIMService does not explicitly set<br />minimumType.<br />"optimized" applies the implicit optimized floor. "any" permits the<br />profile to participate in a second selection pass regardless of its type,<br />but only when no optimized candidate matched. It never overrides an<br />explicitly authored minimumType. Explicit spec.profile.name resolution is<br />unaffected. | optimized | Optional: \{\} <br /> |
 | `primary` _boolean_ | Primary marks this as a default/recommended profile. When true, the profile is<br />advertised for standard deployment and copied automatically for custom weight models.<br />Defaults to false when not specified. | false |  |
 | `manualSelectionOnly` _boolean_ | ManualSelectionOnly is DEPRECATED and no longer honored by the resolver.<br />It was a binary gate excluding a profile from automatic AIMService<br />selection. Optimization-tier consent is now expressed through the graded<br />`type` hierarchy combined with the selector's `minimumType` floor, while<br />eligibility for implicit any-tier automatic selection is expressed through<br />`autoSelectionPolicy`. The field is retained for backward compatibility<br />(existing objects and aim-build profile YAMLs still set it) but has no<br />effect on selection; it will be removed in a future API version.<br />Deprecated: superseded by `type`, selector `minimumType`, and<br />`autoSelectionPolicy`; ignored by the resolver. | false |  |
-| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains inference engine CLI arguments as a free-form JSON object.<br />Passed to the inference engine (e.g., vLLM) at startup. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
+| `engineArgs` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#json-v1-apiextensions-k8s-io)_ | EngineArgs contains inference engine CLI arguments as a free-form JSON object.<br />Passed to the inference engine (e.g., vLLM) at startup. |  | Schemaless: \{\} <br />Optional: \{\} <br /> |
 | `engineEnv` _object (keys:string, values:string)_ | EngineEnv contains environment variables for the inference engine subprocess.<br />Applied via os.execv, distinct from container-level ContainerEnv. |  | Optional: \{\} <br /> |
 | `acceleratorVendor` _[AcceleratorVendor](#acceleratorvendor)_ | AcceleratorVendor selects the vendor-specific device-plugin resource and<br />vendor node label used for this profile. A generic NVIDIA profile can set<br />this to "nvidia" without declaring an acceleratorModel; AIM Engine then<br />requests nvidia.com/gpu and matches NVIDIA GPU nodes of any model.<br />Empty preserves the legacy AMD behavior for profiles created before this<br />field existed. |  | Optional: \{\} <br /> |
 | `acceleratorModel` _string_ | AcceleratorModel is the accelerator identifier for node selection.<br />Maps to a node label key using the Exists operator:<br />  feature.node.kubernetes.io/aim-accelerator.\{value\}: Exists<br />Supports both specific models (e.g., "MI300X") and architecture-level<br />fallbacks (e.g., "EPYC_ZEN5") — the AcceleratorDetector labels nodes<br />with all applicable identifiers. |  | MaxLength: 63 <br />Pattern: `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$` <br />Optional: \{\} <br /> |
 | `acceleratorType` _[AcceleratorType](#acceleratortype)_ | AcceleratorType determines the resource derivation strategy: gpu or cpu.<br />AIM Engine computes default resource requests from this field combined<br />with AcceleratorCount and cluster-level configuration. |  | Enum: [gpu cpu] <br />Optional: \{\} <br /> |
 | `acceleratorCount` _integer_ | AcceleratorCount is the number of accelerator units required.<br />For AcceleratorType=gpu, this is the device count (e.g., 1, 2, 4, 8<br />for tensor-parallel sizes). For AcceleratorType=cpu, this is the<br />number of CPU cores (e.g., 128 for EPYC_ZEN5, 192 for EPYC_9965).<br />Combined with cluster-level configuration to compute default<br />resource requests in status.resources.<br />For AcceleratorType=gpu, the per-unit interpretation depends on<br />AcceleratorPartitioningMode: under "unpartitioned" (default) one unit is<br />one whole GPU; under "partitioned" or a specific scheme one unit is one<br />partition slice (e.g. CPX-NPS4 = 1/8 of a GPU). Host CPU and memory<br />defaults are scaled by the recognized compute partition density<br />(SPX=1, DPX=2, QPX=4, CPX=8). Geometry-agnostic "partitioned" and unknown<br />schemes require explicit host resources because a safe scale cannot be<br />inferred. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `acceleratorPartitioningMode` _string_ | AcceleratorPartitioningMode declares the GPU partition state the profile<br />requires. Free-form string with reserved values:<br />  ""              - omitted; CRD-defaulted to "unpartitioned".<br />  "unpartitioned" - hardware-default partition state. Matches unpartitioned<br />                    MI300X (canonical SPX-NPS1) AND non-partitionable<br />                    hardware (Radeon, etc.) — any node whose detector<br />                    stamped aim-accelerator.partitioning-scheme.default.<br />  "partitioned"   - any actively partitioned mode. Excludes both<br />                    unpartitioned partitionable hardware and<br />                    non-partitionable hardware.<br />  "<C>-<M>"       - specific compute+memory scheme, e.g. "CPX-NPS4". Matches<br />                    only nodes carrying that exact scheme label; does not<br />                    match non-partitionable hardware.<br />Other values (e.g. "CPX" alone, or typos) are accepted but fail-safe to<br />zero matching nodes under this iteration's label schema — compute-only /<br />memory-only matching is not supported here. AIM Engine does NOT validate<br />against AMD's hardware compatibility matrix; invalid combinations simply<br />report MatchingNodes == 0.<br />Resolves to a single Exists or DoesNotExist node-affinity term on the<br />aim-accelerator.partitioning-scheme.* labels published by the<br />AcceleratorDetector, AND-ed with the acceleratorModel term. | unpartitioned | MaxLength: 63 <br />Pattern: `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$` <br />Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources is an optional override for K8s resource requests/limits.<br />When set, merged on top of the defaults that AIM Engine computes from<br />AcceleratorType, AcceleratorCount, and cluster-level configuration.<br />Generated values account for an explicit opposite-side value so partial<br />overrides cannot produce a request above its limit.<br />The resolved result is written to status.resources. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources is an optional override for K8s resource requests/limits.<br />When set, merged on top of the defaults that AIM Engine computes from<br />AcceleratorType, AcceleratorCount, and cluster-level configuration.<br />Generated values account for an explicit opposite-side value so partial<br />overrides cannot produce a request above its limit.<br />The resolved result is written to status.resources. |  | Optional: \{\} <br /> |
 | `image` _string_ | Image is the deployment container image. Required.<br />For purpose-built profiles: the full AIM image.<br />For custom weight profiles: the base image (e.g., aim-base:0.8.5). |  | MinLength: 1 <br /> |
 | `modelSources` _[AIMModelSource](#aimmodelsource) array_ | ModelSources specifies model artifact sources for this profile.<br />Populated during discovery or set by user. |  | Optional: \{\} <br /> |
-| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#envvar-v1-core) array_ | ContainerEnv specifies container-level env vars for the AIM runtime process (K8s pod spec). |  | Optional: \{\} <br /> |
-| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets for pulling container images. |  | Optional: \{\} <br /> |
+| `containerEnv` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#envvar-v1-core) array_ | ContainerEnv specifies container-level env vars for the AIM runtime process (K8s pod spec). |  | Optional: \{\} <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#localobjectreference-v1-core) array_ | ImagePullSecrets lists secrets for pulling container images. |  | Optional: \{\} <br /> |
 | `serviceAccountName` _string_ | ServiceAccountName specifies the service account for workloads. |  | Optional: \{\} <br /> |
 | `features` _string array_ | Features lists optional capabilities the profile's image honours, e.g.<br />"adapters" for LoRA serving. A service declaring spec.adapters is rejected<br />(ConfigValid=False) unless its resolved profile lists "adapters" here. |  | Optional: \{\} <br /> |
 
@@ -568,11 +568,11 @@ _Appears in:_
 | `baseImage` _string_ | BaseImage is the AIM_BASE_IMAGE_REF the inspector extracted from the<br />source image when this profile was materialised by AIMModel discovery.<br />Used by derivation flows (AIMService overlays, AIMProfileSet) to rebase<br />the deployment image onto the source's base when overriding model<br />sources, so private mirrors stay self-contained. Empty for<br />user-authored profiles. |  | Optional: \{\} <br /> |
 | `matchingNodes` _integer_ | MatchingNodes is the count of cluster nodes matching both the accelerator<br />model label and status.resources requests. Zero means NotAvailable. |  | Optional: \{\} <br /> |
 | `hardwareSummary` _string_ | HardwareSummary is a human-readable string describing the hardware requirements.<br />Format: "\{count\} x \{model\}" for GPU (e.g., "1 x MI300X") or "CPU" for CPU-only. |  | Optional: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#resourcerequirements-v1-core)_ | Resources contains the definitive K8s resource requests/limits used for deployment.<br />Computed by AIM Engine from AcceleratorType, AcceleratorCount, and cluster-level<br />configuration, then merged with any spec.resources override. |  | Optional: \{\} <br /> |
-| `resolvedNodeAffinity` _[NodeAffinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#nodeaffinity-v1-core)_ | ResolvedNodeAffinity contains the computed node affinity rules derived from<br />spec.acceleratorModel. Used by AIMService when building InferenceService pods. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#resourcerequirements-v1-core)_ | Resources contains the definitive K8s resource requests/limits used for deployment.<br />Computed by AIM Engine from AcceleratorType, AcceleratorCount, and cluster-level<br />configuration, then merged with any spec.resources override. |  | Optional: \{\} <br /> |
+| `resolvedNodeAffinity` _[NodeAffinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#nodeaffinity-v1-core)_ | ResolvedNodeAffinity contains the computed node affinity rules derived from<br />spec.acceleratorModel. Used by AIMService when building InferenceService pods. |  | Optional: \{\} <br /> |
 | `projectedRuntimeName` _string_ | ProjectedRuntimeName is the name of the per-profile KServe<br />ServingRuntime / ClusterServingRuntime this profile projects<br />(aim-<truncated-profile>-<hash>). Because that object name is truncated and<br />hashed for length-safety and collision-freedom, it is not reversible; this<br />field is the authoritative profile→runtime lookup for humans and tooling.<br />Set alongside RuntimeProjected=True. It follows the projection's<br />additive/degrade lifecycle: it is kept in place when the projection gate<br />later flips but the runtime is retained (RuntimeProjected=Degraded), and is<br />empty when no per-profile runtime is projected (e.g. Reduced mode, or a<br />profile that was never projectable). |  | Optional: \{\} <br /> |
 | `projectedModelSlugRuntimeName` _string_ | ProjectedModelSlugRuntimeName is the name of the readable model-slug<br />primary runtime (aim-<model-slug>) this profile publishes when it is its<br />model's primary under Reduced or Both projection mode. Empty otherwise<br />(Exhaustive mode, or a non-primary / non-projectable profile). Like<br />ProjectedRuntimeName it follows the additive/degrade lifecycle and is not<br />cleared when the gate flips while the runtime survives. |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta) array_ | Conditions represent the latest observations of profile state. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions represent the latest observations of profile state. |  |  |
 
 
 
@@ -594,7 +594,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMService` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[AIMServiceSpec](#aimservicespec)_ |  |  |  |
 | `status` _[AIMServiceStatus](#aimservicestatus)_ |  |  |  |
 
@@ -613,7 +613,7 @@ AIMServiceList contains a list of AIMService.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `aim.eai.amd.com/v1alpha2` | | |
 | `kind` _string_ | `AIMServiceList` | | |
-| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `metadata` _[ListMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#listmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `items` _[AIMService](#aimservice) array_ |  |  |  |
 
 

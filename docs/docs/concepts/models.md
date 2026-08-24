@@ -373,8 +373,8 @@ kubectl get aimprofileset $(kubectl get aimmodel <name> \
 
 ## Related documentation
 
-- [Fine-Tuned Models](../guides/fine-tuned-models.md) — End-to-end walkthrough for flow 2
-- [Custom Models](../guides/custom-models.md) — End-to-end walkthrough for flow 3
+- [Fine-Tuned Models](../guides/fine-tuned-models.md) — End-to-end walkthrough for flow 3
+- [Custom Models](../guides/custom-models.md) — End-to-end walkthrough for flow 4
 - [Profiles](profiles.md) — Base vs deployable, provenance labels, status fields
 - [AIM Profile Sets](profilesets.md) — Derivation machinery underneath `spec.profiles`
 - [Services](services.md) — How `AIMService` resolves models and profiles

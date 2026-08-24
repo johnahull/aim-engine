@@ -3,81 +3,119 @@
 :::{admonition} AcceleratorDetector
 :class: note
 
-AIM Engine includes an [AcceleratorDetector](../concepts/accelerator-detection.md) that detects GPUs and CPUs via NFD, writing labels under `feature.node.kubernetes.io/aim-accelerator.*`. It is enabled by default. The k8s-device-plugin labels documented below remain supported as a fallback.
+AIM Engine includes an
+[AcceleratorDetector](../concepts/accelerator-detection.md) that detects AMD
+GPUs, NVIDIA GPUs, and CPUs through NFD. It writes normalized labels under
+`feature.node.kubernetes.io/aim-accelerator.*` and is enabled by default.
 :::
-AIM Engine detects available GPUs in the cluster and uses this information for profile resolution (v1alpha2) / template selection (v1alpha1) and node scheduling.
+AIM Engine uses detected accelerators for profile resolution, resource
+requests, and inference-pod scheduling.
 
 ## GPU Detection
 
-AIM Engine detects GPUs through node labels set by the AMD GPU device plugin.
-
-### AMD GPU Labels
+AIM Engine's detector DaemonSets publish a common label contract regardless of
+GPU vendor:
 
 | Label | Description | Example |
-|-------|-------------|---------|
-| `amd.com/gpu.device-id` | PCI device ID | `74a1` |
-| `amd.com/gpu.family` | GPU family | `MI300X` |
-| `amd.com/gpu.vram` | VRAM in MiB | `196608` |
+|---|---|---|
+| `feature.node.kubernetes.io/aim-accelerator.<model>` | Accelerator model and count | `feature.node.kubernetes.io/aim-accelerator.MI300X=8` |
+| `feature.node.kubernetes.io/aim-accelerator.vendor.GPU.<vendor>` | GPU vendor and count | `feature.node.kubernetes.io/aim-accelerator.vendor.GPU.NVIDIA=8` |
+| `feature.node.kubernetes.io/aim-accelerator.partitioning-scheme.<mode>` | GPU partition state | `feature.node.kubernetes.io/aim-accelerator.partitioning-scheme.default=8` |
 
-Legacy labels with `beta.amd.com/` prefix are also supported.
+AMD detection uses `aim-runtime detect-hardware` and `amd-smi`; NVIDIA
+detection uses `nvidia-smi`. Product names are normalized to profile-compatible
+tokens such as `MI300X`, `H100`, and `RTX4090`.
+
+The device plugins separately advertise schedulable resources:
+
+| Vendor | Kubernetes resource | Supporting operator |
+|---|---|---|
+| AMD | `amd.com/gpu` | AMD GPU Operator |
+| NVIDIA | `nvidia.com/gpu` | NVIDIA GPU Operator |
+
+The AMD device plugin may also publish compatibility metadata such as
+`amd.com/gpu.device-id`, `amd.com/gpu.family`, and `amd.com/gpu.vram`.
+Legacy labels with the `beta.amd.com/` prefix remain relevant to the deprecated
+template pipeline; v1alpha2 profile matching uses the normalized
+`aim-accelerator.*` labels.
 
 ## GPU-Aware Resolution
 
-During [profile resolution](../concepts/services.md#resolution-shapes), AIM Engine filters profiles to only those whose required GPU is available in the cluster. A profile requiring MI325X GPUs is excluded if no MI325X nodes exist. The v1alpha1 template pipeline applies the same filter to candidate templates.
+During [profile resolution](../concepts/services.md#resolution-shapes), AIM
+Engine filters profiles to those whose required vendor, model, partition state,
+and resource capacity are available. For example, an H100 profile is excluded
+when only AMD nodes are present, and an MI325X profile is excluded when no
+MI325X node exists.
 
-GPU preference scoring (highest to lowest): MI325X > MI300X > MI250X > MI210 > R9700 > W7900. Models outside this list tie at the bottom of the ranking.
+When otherwise-equivalent profiles remain, AMD GPU preference scoring is
+MI325X > MI300X > MI250X > MI210 > R9700 > W7900. Models outside this list,
+including NVIDIA models, tie at the bottom and are resolved by the remaining
+profile-ranking and deterministic name rules.
 
 ## GPU Resource Requests
 
-Profiles (v1alpha2) and templates (v1alpha1) specify GPU requirements that translate to Kubernetes resource requests:
+`AIMProfile` and `AIMClusterProfile` use flat accelerator fields. AIM Engine
+derives the vendor-specific device request from those fields:
 
 ::::{tab-set}
-:::{tab-item} Profile (v1alpha2)
+:::{tab-item} AMD profile
 ```yaml
 # In an AIMProfile / AIMClusterProfile
 spec:
-  accelerator:
-    model: MI300X
-  resources:
-    requests:
-      amd.com/gpu: "4"
+  acceleratorVendor: amd
+  acceleratorModel: MI300X
+  acceleratorType: gpu
+  acceleratorCount: 4
 ```
 :::
 
-:::{tab-item} Template (v1alpha1, deprecated)
+:::{tab-item} NVIDIA profile
 ```yaml
-# In an AIMServiceTemplate
-hardware:
-  gpu:
-    model: MI300X
-    requests: 4
+# In an AIMProfile / AIMClusterProfile
+spec:
+  acceleratorVendor: nvidia
+  acceleratorModel: H100
+  acceleratorType: gpu
+  acceleratorCount: 4
 ```
 :::
 ::::
 
-Both result in the inference pod requesting `amd.com/gpu: 4`. Profiles use standard Kubernetes `ResourceRequirements` directly, while templates use a simplified `hardware` abstraction.
+The AMD profile requests and limits `amd.com/gpu: 4`; the NVIDIA profile
+requests and limits `nvidia.com/gpu: 4`. If `acceleratorVendor` is omitted, the
+backward-compatible default is AMD. Explicit `spec.resources` entries are
+merged over the derived defaults and win for the same resource key.
 
 ## Node Affinity
 
-AIM Engine automatically configures node affinity on inference pods to schedule them on nodes with the correct GPU. It matches the `amd.com/gpu.device-id` label against the device IDs for the required GPU model.
+AIM Engine writes required node affinity from the profile's accelerator fields.
+`acceleratorVendor` selects the normalized vendor label,
+`acceleratorModel` selects the model label, and
+`acceleratorPartitioningMode` selects the partition label. These requirements
+are combined so a pod cannot cross vendors or land on an incompatible GPU
+shape.
 
 ## Verifying GPU Availability
 
-Check which GPU labels are present on your nodes:
-
-```bash
-kubectl get nodes -o custom-columns='NAME:.metadata.name,DEVICE_ID:.metadata.labels.amd\.com/gpu\.device-id,FAMILY:.metadata.labels.amd\.com/gpu\.family,VRAM:.metadata.labels.amd\.com/gpu\.vram'
-```
-
-If the AcceleratorDetector is deployed, also check for `aim-accelerator.*` labels:
+Check the normalized accelerator labels:
 
 ```bash
 kubectl get nodes --show-labels | grep aim-accelerator
 ```
+
+Check the GPU resources advertised by each device plugin:
+
+```bash
+kubectl get nodes \
+  -o custom-columns='NAME:.metadata.name,AMD_GPU:.status.allocatable.amd\.com/gpu,NVIDIA_GPU:.status.allocatable.nvidia\.com/gpu'
+```
+
+If the expected detector labels are absent, inspect the matching AMD or NVIDIA
+AcceleratorDetector DaemonSet and verify that NFD is running.
 
 ## Next Steps
 
 - [Accelerator Detection](../concepts/accelerator-detection.md) — Unified hardware detection and NFD labels
 - [AIM Services](../concepts/services.md) — Profile resolution and ranking
 - [Profiles](../concepts/profiles.md) — Self-contained runtime configurations and GPU requirements
-- [Service Templates (v1alpha1)](../legacy/service-templates.md) — Legacy template pipeline reference
+- [Installation](../getting-started/installation.md) — GPU operator prerequisites

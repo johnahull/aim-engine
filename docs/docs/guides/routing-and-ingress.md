@@ -19,6 +19,8 @@ kind: AIMService
 metadata:
   name: qwen-chat
   namespace: ml-team
+  annotations:
+    aim.eai.amd.com/reconciler-pipeline: profile
 spec:
   model:
     name: qwen-qwen3-32b
@@ -85,8 +87,16 @@ spec:
 
 `hostnames` can be set on the service (`spec.routing.hostnames`) or as a default on the runtime config (`AIMRuntimeConfig` / `AIMClusterRuntimeConfig`), following the same precedence as other routing fields. The service-level list overrides the runtime config list as a whole.
 
-!!! warning "Required for multi-listener gateways"
-    When the parent Gateway exposes **more than one listener**, a hostname is required. A routing-enabled service with no hostnames in that case does **not** get an `HTTPRoute` and reports `ConfigValid=False` with reason `RouteHostnameRequired` (condition `RouteConfigReady=False`). Set `hostnames` to clear it. Single-listener gateways are unaffected: leaving `hostnames` empty keeps the route attached to that one listener.
+:::{warning}
+Required for multi-listener gateways
+
+When the parent Gateway exposes **more than one listener**, a hostname is
+required. A routing-enabled service with no hostnames in that case does **not**
+get an `HTTPRoute` and reports `ConfigValid=False` with reason
+`RouteHostnameRequired` (condition `RouteConfigReady=False`). Set `hostnames`
+to clear it. Single-listener gateways are unaffected: leaving `hostnames`
+empty keeps the route attached to that one listener.
+:::
 
 ## Request Timeout
 

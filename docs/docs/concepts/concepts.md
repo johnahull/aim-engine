@@ -9,7 +9,7 @@ SPDX-License-Identifier: MIT
 Understand the resources and mechanics behind AIM Engine.
 
 - [AIM Services](services.md) — Resolution shapes, overlays, caching, status
-- [AIM Models](models.md) — The three model flows
+- [AIM Models](models.md) — The four model flows
 - [Profiles](profiles.md) — Self-contained runtime configurations
 - [Inference Engines](inference-engines.md) — vLLM and vLLM-Omni runtime behavior
 - [AIM Profile Sets](profilesets.md) — Derivation engine

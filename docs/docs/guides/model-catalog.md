@@ -23,13 +23,17 @@ kubectl get aimmodels --all-namespaces
 The default kubectl printcolumns show status and key counts:
 
 ```
-NAME                    STATUS   AIMID                                   MANAGED   READY   BASE   AGE
-qwen-qwen3-32b          Ready    qwen/qwen3-32b                          5         5       0      3d
-llama-3-8b-official     Ready    meta-llama/Llama-3-8B-Instruct          7         7       0      3d
-aim-base-vllm           Ready                                            8         8       8      1d
+NAME                    STATUS   KIND    AIMID                                   VERSION   MANAGED   READY   BASE   AGE
+qwen-qwen3-32b          Ready    Image   qwen/qwen3-32b                          0.8.5     5         5       0      3d
+llama-3-8b-official     Ready    Image   meta-llama/Llama-3-8B-Instruct          0.9.0     7         7       0      3d
+aim-base-vllm           Ready    Image                                           0.11      8         8       8      1d
 ```
 
-`BASE > 0` identifies a base-image model. See [AIM Models](../concepts/models.md) for the three model flows.
+`KIND` identifies the model onboarding flow: `Image`, `Generated`, `Derived`,
+or `Custom`. `VERSION` is the effective image tag and can be empty for flows
+without an image. `BASE > 0` identifies a base-image model (which also has
+`KIND=Image`). See [AIM Models](../concepts/models.md) for the model flows and
+status-field details.
 
 ### View model details
 
@@ -42,11 +46,13 @@ Key fields:
 | Field | Purpose |
 |---|---|
 | `spec.image` | Discovery image (Official flow) |
+| `spec.modelId` | Canonical model identity used to generate a profile from RuntimeConfig fallbacks (Generated flow) |
 | `spec.profiles` | Derivation spec (Fine-tuned / Custom flow) |
 | `status.aimId` | Resolved architecture identifier |
 | `status.managedProfiles` | Counts: `total`, `ready`, `deployable`, `base` |
 | `status.discoveryCacheRef` | Reference to the discovery cache `ConfigMap` |
 | `status.profileSetRef` | Child profile set (derivation flows only) |
+| `status.profileGeneration` | Resolution strategy and matched RuntimeConfig fallbacks (Generated flow only) |
 
 ## Applying models manually
 
@@ -74,6 +80,48 @@ metadata:
 spec:
   image: amdenterpriseai/aim-qwen-qwen3-32b:0.8.5
 ```
+
+### Generated flow
+
+Apply a canonical model ID when the platform provides a generic runtime for the
+cluster hardware:
+
+```yaml
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMModel
+metadata:
+  name: qwen3-5-0-8b
+  namespace: ml-team
+spec:
+  modelId: Qwen/Qwen3.5-0.8B
+```
+
+By default, `aimId` is the same as `modelId`, the source URI is
+`hf://<modelId>`, and one accelerator is requested. Override those fields when
+the weights or hardware shape differ:
+
+```yaml
+spec:
+  modelId: acme/qwen-finetune
+  aimId: Qwen/Qwen3.5-0.8B
+  source:
+    uri: s3://customer-models/qwen-finetune
+  accelerator:
+    vendor: nvidia
+    model: H100
+    count: 4
+```
+
+The model becomes ready when a matching
+`AIMRuntimeConfig`/`AIMClusterRuntimeConfig` profile-generation fallback and
+compatible hardware are available. The default Helm installation includes a
+generic NVIDIA vLLM fallback; platform administrators can replace or extend it
+for their fleet.
+
+See [AIM Models](../concepts/models.md#flow-2-generated-runtime-profile) for
+status and resolution details, and
+[Runtime Configuration](../concepts/runtime-config.md#model-profile-generation-fallbacks)
+for fallback configuration.
 
 ### Fine-tuned flow
 
@@ -123,11 +171,12 @@ spec:
     derivedFrom:
       selector:
         role: base
-        aimId: acme/custom-transformer
         modelRef:
           name: aim-base-vllm
     versionPolicy: all
     overrides:
+      aimId: acme/custom-transformer
+      modelId: acme/custom-transformer
       modelSources:
         - modelId: acme/custom-transformer
           sourceUri: s3://acme-models/custom-transformer
@@ -155,12 +204,15 @@ spec:
   maxModels: 500
 ```
 
-The discovered `AIMClusterModel` resources are then reconciled the same way as manually-applied ones. They use the v1alpha2 spec shape (`spec.image` set).
+The discovered `AIMClusterModel` resources are then reconciled the same way as manually applied image-based models. Registry-discovered images are written through the v1alpha1 API with `spec.image` set.
 
 :::{admonition} v1alpha1 source resource
 :class: note
 
-`AIMClusterModelSource` itself remains under `v1alpha1` while the resources it creates use the v1alpha2 `AIMModel` shape. This intentionally avoids gating discovery on a migration.
+`AIMClusterModelSource` itself remains under `v1alpha1`. Registry-discovered
+images are also created through v1alpha1, while entries declared under
+`spec.models` are created through v1alpha2 because `spec.modelId` is
+v1alpha2-only. Both API versions address the same stored v1alpha2 object.
 :::
 ### Selecting images
 
@@ -241,4 +293,5 @@ These are the models that produce base profiles for [custom-model derivation](cu
 - [Fine-Tuned Models](fine-tuned-models.md) — Derive a fine-tune AIMModel from a catalog entry
 - [Custom Models](custom-models.md) — Derive a custom AIMModel from a base image
 - [AIM Models](../concepts/models.md) — Full lifecycle and discovery mechanics
+- [Runtime Configuration](../concepts/runtime-config.md) — Configure generated-profile fallbacks
 - [Model Sources](../concepts/model-sources.md) — Deep dive into `AIMClusterModelSource`

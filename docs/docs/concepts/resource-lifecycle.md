@@ -147,8 +147,11 @@ CRD schemas include [CEL validation rules](https://kubernetes.io/docs/tasks/exte
 
 | CRD | Rule |
 |---|---|
-| `AIMModel` / `AIMClusterModel` | Exactly one of `spec.image` or `spec.profiles` |
-| `AIMModel` / `AIMClusterModel` | `spec.aimId`, `spec.modelSources`, `spec.custom`, `spec.customTemplates`, `spec.profileCopy`, `spec.discovery`, `spec.defaultServiceTemplate`, `spec.runtimeConfigName`, `spec.env`, `spec.imageMetadata` are forbidden |
+| `AIMModel` / `AIMClusterModel` | Exactly one of `spec.image`, `spec.modelId`, or `spec.profiles` |
+| `AIMModel` / `AIMClusterModel` | `spec.source` and `spec.accelerator` are valid only with `spec.modelId` |
+| `AIMModel` / `AIMClusterModel` | `spec.profiles` cannot be combined with `spec.aimId`, `spec.source`, `spec.discovery`, `spec.defaultServiceTemplate`, `spec.runtimeConfigName`, `spec.env`, or `spec.imageMetadata` |
+| `AIMModel` / `AIMClusterModel` | `spec.modelSources`, `spec.custom`, `spec.customTemplates`, and `spec.profileCopy` are forbidden on new v1alpha2 resources |
+| `AIMModel` / `AIMClusterModel` | `spec.modelId` cannot be combined with image-discovery/runtime fields such as `spec.discovery`, `spec.defaultServiceTemplate`, `spec.env`, `spec.imageMetadata`, `spec.imagePullSecrets`, `spec.serviceAccountName`, or `spec.resources`; configure those on the RuntimeConfig fallback |
 | `AIMService` | At least one of `spec.model` or `spec.profile` |
 | `AIMService` | `spec.profile.name` and `spec.profile.selector` are mutually exclusive |
 | `AIMService` | `spec.profile.selector.role: base` is forbidden |

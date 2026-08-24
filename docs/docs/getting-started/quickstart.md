@@ -48,6 +48,8 @@ kind: AIMService
 metadata:
   name: qwen-chat
   namespace: default
+  annotations:
+    aim.eai.amd.com/reconciler-pipeline: profile
 spec:
   model:
     name: qwen3-32b
@@ -59,10 +61,14 @@ kubectl apply -f service.yaml
 
 AIM Engine then:
 
-1. Resolves the model to a deployable `AIMProfile` (ranking by `primary > type > version`).
+1. Resolves the model to the highest-ranked deployable `AIMProfile` for the available hardware.
 2. Pre-warms the cache by creating an `AIMProfileCache` and downloading model artifacts to a PVC.
 3. Creates a KServe `InferenceService` mounting the cache and the profile's container image.
 4. Optionally creates an `HTTPRoute` if routing is enabled.
+
+The `reconciler-pipeline: profile` annotation is required for model-shaped
+services during the v1alpha1 → v1alpha2 migration window. See
+[Spec-shape dispatch](../admin/upgrading.md#spec-shape-dispatch).
 
 ## Step 3: Monitor progress
 
@@ -99,13 +105,25 @@ Port-forward the predictor service:
 kubectl port-forward -n default svc/<isvc-name>-predictor 8080:80
 ```
 
+Discover the model ID registered by the serving runtime:
+
+```bash
+MODEL_ID=$(curl --fail --silent --show-error http://localhost:8080/v1/models | jq -er '.data[0].id')
+echo "${MODEL_ID}"
+# Qwen/Qwen3-32B
+```
+
+Use the returned `id` as the `model` value in inference requests. The served
+model ID is typically the model's canonical Hugging Face name, not the
+`AIMService` resource name, and varies with the deployed AIM image.
+
 ```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen-chat",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
+  -d "{
+    \"model\": \"${MODEL_ID}\",
+    \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}]
+  }"
 ```
 
 ## Variations
