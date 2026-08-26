@@ -1,0 +1,159 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: upgrade-compatibility-verify
+  labels:
+    requires: upgrade-workflow
+spec:
+  description: |
+    Verifies that the resource corpus created by the baseline operator converges
+    after the candidate CRDs and operator are installed. UID preservation,
+    duplicate detection, annotation backfill, and the stability window are
+    checked by hack/ci/upgrade/verify-convergence.sh.
+  timeouts:
+    assert: 180s
+  steps:
+    - name: Verify namespace-scoped resources
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: upgrade-namespace-source
+              status:
+                status: Ready
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileSet
+              metadata:
+                labels:
+                  aim.eai.amd.com/source-model: upgrade-namespace-model
+                  aim.eai.amd.com/source-model-scope: namespace
+              status:
+                status: Ready
+                managedProfiles:
+                  total: 1
+                  ready: 1
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/profile-origin: derived
+                  aim.eai.amd.com/source-model: upgrade-namespace-model
+              status:
+                status: Ready
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: upgrade-namespace-model
+              status:
+                status: Ready
+                managedProfiles:
+                  total: 1
+                  ready: 1
+
+    - name: Verify cluster-scoped resources
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: upgrade-cluster-source
+              status:
+                status: Ready
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfileSet
+              metadata:
+                labels:
+                  aim.eai.amd.com/source-model: upgrade-cluster-model
+                  aim.eai.amd.com/source-model-scope: cluster
+              status:
+                status: Ready
+                managedProfiles:
+                  total: 1
+                  ready: 1
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/profile-origin: derived
+                  aim.eai.amd.com/source-model: upgrade-cluster-model
+              status:
+                status: Ready
+                (conditions[?type == 'RuntimeProjected']):
+                  - status: "True"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterModel
+              metadata:
+                name: upgrade-cluster-model
+              status:
+                status: Ready
+                managedProfiles:
+                  total: 1
+                  ready: 1
+
+    - name: Verify consumers remain resolved and cached
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: upgrade-namespace-service
+              status:
+                (conditions[?type == 'ProfileReady']):
+                  - status: "True"
+                    reason: ProfileResolved
+                resolvedProfile:
+                  name: upgrade-namespace-source
+                  scope: Namespace
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: upgrade-cluster-service
+              status:
+                (conditions[?type == 'ProfileReady']):
+                  - status: "True"
+                    reason: ProfileResolved
+                resolvedProfile:
+                  name: upgrade-cluster-source
+                  scope: Cluster
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: upgrade-namespace-service
+              status:
+                status: Ready
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: upgrade-cluster-service
+              status:
+                status: Ready

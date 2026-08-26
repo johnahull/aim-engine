@@ -1,0 +1,321 @@
+name: Upgrade compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'api/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'images/artifact-downloader/**'
+      - 'config/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - 'Makefile'
+      - 'hack/**'
+      - 'tests/e2e/upgrade-compatibility/**'
+      - 'mise.toml'
+      - '.github/workflows/test-upgrade.yml'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  upgrade-e2e:
+    name: upgrade-e2e (${{ matrix.name }})
+    runs-on: self-hosted
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: public-main
+            slug: public
+            repository: amd-enterprise-ai/aim-engine
+          - name: private-main
+            slug: private
+            repository: silogen/aim-engine
+    concurrency:
+      group: test-upgrade-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ matrix.slug }}
+      cancel-in-progress: true
+    env:
+      KIND_CLUSTER: aim-upgrade-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
+      UPGRADE_NAMESPACE: aim-upgrade-compatibility
+      BASELINE_DIR: .tmp/upgrade-baseline
+      BASELINE_IMAGE_REPOSITORY: aim-engine-upgrade-baseline
+      BASELINE_IMAGE_TAG: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
+      BASELINE_OPERATOR_IMAGE: aim-engine-upgrade-baseline:${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
+      CANDIDATE_IMAGE_REPOSITORY: aim-engine-upgrade-candidate
+      CANDIDATE_IMAGE_TAG: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
+      CANDIDATE_OPERATOR_IMAGE: aim-engine-upgrade-candidate:${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
+      ARTIFACT_DOWNLOADER_IMAGE: aim-artifact-downloader-upgrade:${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
+      UPGRADE_REPORT_DIR: .tmp/upgrade-reports/${{ matrix.slug }}
+    steps:
+      - name: Clone the candidate code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone the latest baseline main
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: main
+          fetch-depth: 0
+          path: ${{ env.BASELINE_DIR }}
+
+      - name: Record exact revisions
+        run: |
+          set -euo pipefail
+          mkdir -p "${UPGRADE_REPORT_DIR}"
+          {
+            echo "baseline_repository=${{ matrix.repository }}"
+            echo "baseline_sha=$(git -C "${BASELINE_DIR}" rev-parse HEAD)"
+            echo "candidate_repository=${GITHUB_REPOSITORY}"
+            echo "candidate_sha=$(git rev-parse HEAD)"
+          } | tee "${UPGRADE_REPORT_DIR}/revisions.txt"
+
+      - name: Setup mise
+        uses: jdx/mise-action@v2
+        env:
+          MISE_OVERRIDE_CONFIG_FILENAMES: "mise.toml"
+
+      - name: Install isolated upgrade tools
+        env:
+          MISE_OVERRIDE_CONFIG_FILENAMES: "mise.toml"
+        run: |
+          set -euo pipefail
+          tools_dir="${RUNNER_TEMP}/aim-upgrade-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slug }}"
+          mkdir -p "${tools_dir}"
+          mise exec \
+            kustomize@5.7.1 \
+            yq@4.45.1 \
+            jq@1.7.1 \
+            kubebuilder@4.10.1 \
+            -- sh -eu -c '
+              tools_dir="$1"
+              for tool in kustomize yq jq kubebuilder; do
+                cp "$(command -v "${tool}")" "${tools_dir}/${tool}"
+              done
+            ' sh "${tools_dir}"
+          echo "${tools_dir}" >> "${GITHUB_PATH}"
+
+      - name: Cache Go modules and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-v2-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-v2-${{ runner.os }}-
+
+      - name: Set per-run kubeconfig path
+        run: echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig-upgrade-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slug }}" >> "${GITHUB_ENV}"
+
+      - name: Set per-run isolated Helm and Helmfile config
+        run: |
+          HELM_BASE="${RUNNER_TEMP}/helm-upgrade-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slug }}"
+          HELMFILE_BASE="${RUNNER_TEMP}/helmfile-upgrade-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slug }}"
+          {
+            echo "HELM_CACHE_HOME=${HELM_BASE}/cache"
+            echo "HELM_CONFIG_HOME=${HELM_BASE}/config"
+            echo "HELM_DATA_HOME=${HELM_BASE}/data"
+            echo "HELM_REGISTRY_CONFIG=${HELM_BASE}/registry/config.json"
+            echo "HELMFILE_CACHE_HOME=${HELMFILE_BASE}/cache"
+          } >> "${GITHUB_ENV}"
+          mkdir -p "${HELM_BASE}/cache" "${HELM_BASE}/config" "${HELM_BASE}/data" "${HELM_BASE}/registry"
+          mkdir -p "${HELMFILE_BASE}/cache"
+          echo '{}' > "${HELM_BASE}/registry/config.json"
+
+      - name: Create Kind cluster
+        run: kind create cluster --name "${KIND_CLUSTER}" --config hack/kind/config.yaml
+
+      - name: Install Kind storage
+        run: helmfile sync -f hack/kind/helmfile.yaml.gotmpl
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Install core dependencies
+        run: helmfile sync -f hack/dependencies/helmfile.yaml.gotmpl
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build artifact-downloader image
+        uses: docker/build-push-action@v6
+        with:
+          context: images/artifact-downloader
+          load: true
+          tags: ${{ env.ARTIFACT_DOWNLOADER_IMAGE }}
+          cache-from: type=gha,scope=upgrade-artifact-downloader-${{ matrix.slug }}
+          cache-to: type=gha,scope=upgrade-artifact-downloader-${{ matrix.slug }},mode=max
+
+      - name: Build baseline operator image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.BASELINE_DIR }}
+          load: true
+          tags: ${{ env.BASELINE_OPERATOR_IMAGE }}
+          build-args: |
+            VERSION=${{ env.BASELINE_IMAGE_TAG }}
+            ARTIFACT_DOWNLOADER_IMG=${{ env.ARTIFACT_DOWNLOADER_IMAGE }}
+          cache-from: type=gha,scope=upgrade-baseline-${{ matrix.slug }}
+          cache-to: type=gha,scope=upgrade-baseline-${{ matrix.slug }},mode=max
+
+      - name: Build candidate operator image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ env.CANDIDATE_OPERATOR_IMAGE }}
+          build-args: |
+            VERSION=${{ env.CANDIDATE_IMAGE_TAG }}
+            ARTIFACT_DOWNLOADER_IMG=${{ env.ARTIFACT_DOWNLOADER_IMAGE }}
+          cache-from: type=gha,scope=upgrade-candidate-${{ matrix.slug }}
+          cache-to: type=gha,scope=upgrade-candidate-${{ matrix.slug }},mode=max
+
+      - name: Load images into Kind
+        run: |
+          set -euo pipefail
+          kind load docker-image "${ARTIFACT_DOWNLOADER_IMAGE}" --name "${KIND_CLUSTER}"
+          kind load docker-image "${BASELINE_OPERATOR_IMAGE}" --name "${KIND_CLUSTER}"
+          kind load docker-image "${CANDIDATE_OPERATOR_IMAGE}" --name "${KIND_CLUSTER}"
+
+      - name: Generate baseline CRDs and chart
+        working-directory: ${{ env.BASELINE_DIR }}
+        run: make crds helm IMG="${BASELINE_OPERATOR_IMAGE}"
+
+      - name: Generate candidate CRDs and chart
+        run: make crds helm IMG="${CANDIDATE_OPERATOR_IMAGE}"
+
+      - name: Install baseline CRDs
+        run: |
+          set -euo pipefail
+          kubectl apply --server-side -f "${BASELINE_DIR}/dist/crds.yaml"
+          mapfile -t crds < <(kubectl get crd -o name | grep 'aim.eai.amd.com')
+          kubectl wait --for=condition=Established --timeout=120s "${crds[@]}"
+
+      - name: Install baseline operator
+        run: |
+          set -euo pipefail
+          baseline_values=()
+          if yq -e '.scaleFromZero.gatewayMetricsCollector | has("enable")' \
+            "${BASELINE_DIR}/dist/chart/values.yaml" >/dev/null 2>&1; then
+            # Older charts rendered the collector whenever enable=true. Disable
+            # it for this registry-free corpus; newer charts replaced this key
+            # with gatewayProvider/management and reject the legacy key.
+            baseline_values+=(--set scaleFromZero.gatewayMetricsCollector.enable=false)
+          fi
+          helm install aim-engine "${BASELINE_DIR}/dist/chart" \
+            --namespace aim-system \
+            --create-namespace \
+            --wait \
+            --timeout 5m \
+            --set crd.enable=false \
+            --set manager.image.repository="${BASELINE_IMAGE_REPOSITORY}" \
+            --set manager.image.tag="${BASELINE_IMAGE_TAG}" \
+            --set manager.artifactDownloaderImage="${ARTIFACT_DOWNLOADER_IMAGE}" \
+            --set manager.runtimeProjectionMode=Both \
+            --set acceleratorDetector.enable=false \
+            --set clusterRuntimeConfig.enable=false \
+            --set clusterModelSource.enable=false \
+            --set scaleFromZero.gatewayProvider=none \
+            "${baseline_values[@]}"
+
+      - name: Wait for baseline operator
+        run: kubectl rollout status deployment/aim-engine-controller-manager -n aim-system --timeout=180s
+
+      - name: Create upgrade test namespace
+        run: kubectl create namespace "${UPGRADE_NAMESPACE}"
+
+      - name: Create baseline resource corpus
+        run: |
+          mkdir -p "${UPGRADE_REPORT_DIR}/setup"
+          chainsaw test \
+            --test-dir tests/e2e/upgrade-compatibility/setup \
+            --config tests/chainsaw/config/kind-ci.yaml \
+            --namespace "${UPGRADE_NAMESPACE}" \
+            --skip-delete \
+            --parallel 1 \
+            --report-format JSON \
+            --report-name setup \
+            --report-path "${UPGRADE_REPORT_DIR}/setup"
+
+      - name: Snapshot baseline object identities
+        run: hack/ci/upgrade/snapshot.sh "${UPGRADE_REPORT_DIR}/baseline-objects.tsv"
+
+      - name: Upgrade CRDs
+        run: |
+          set -euo pipefail
+          kubectl apply --server-side -f dist/crds.yaml
+          mapfile -t crds < <(kubectl get crd -o name | grep 'aim.eai.amd.com')
+          kubectl wait --for=condition=Established --timeout=120s "${crds[@]}"
+
+      - name: Upgrade operator
+        run: |
+          helm upgrade aim-engine dist/chart \
+            --namespace aim-system \
+            --wait \
+            --timeout 5m \
+            --set crd.enable=false \
+            --set manager.image.repository="${CANDIDATE_IMAGE_REPOSITORY}" \
+            --set manager.image.tag="${CANDIDATE_IMAGE_TAG}" \
+            --set manager.artifactDownloaderImage="${ARTIFACT_DOWNLOADER_IMAGE}" \
+            --set manager.runtimeProjectionMode=Both \
+            --set acceleratorDetector.enable=false \
+            --set clusterRuntimeConfig.enable=false \
+            --set clusterModelSource.enable=false \
+            --set scaleFromZero.gatewayProvider=none
+
+      - name: Wait for candidate operator
+        run: kubectl rollout status deployment/aim-engine-controller-manager -n aim-system --timeout=180s
+
+      - name: Verify upgraded resources with Chainsaw
+        run: |
+          mkdir -p "${UPGRADE_REPORT_DIR}/verify"
+          chainsaw test \
+            --test-dir tests/e2e/upgrade-compatibility/verify \
+            --config tests/chainsaw/config/kind-ci.yaml \
+            --namespace "${UPGRADE_NAMESPACE}" \
+            --skip-delete \
+            --parallel 1 \
+            --report-format JSON \
+            --report-name verify \
+            --report-path "${UPGRADE_REPORT_DIR}/verify"
+
+      - name: Verify identity, backfill, and stable convergence
+        run: hack/ci/upgrade/verify-convergence.sh "${UPGRADE_REPORT_DIR}/baseline-objects.tsv"
+
+      - name: Capture upgrade diagnostics
+        if: always()
+        run: |
+          mkdir -p "${UPGRADE_REPORT_DIR}/diagnostics"
+          kubectl get deployment,pods -n aim-system -o wide > "${UPGRADE_REPORT_DIR}/diagnostics/operator.txt" 2>&1 || true
+          kubectl logs deployment/aim-engine-controller-manager -n aim-system --tail=-1 > "${UPGRADE_REPORT_DIR}/diagnostics/operator.log" 2>&1 || true
+          kubectl get aimprofiles,aimmodels,aimprofilesets,aimservices,aimprofilecaches -n "${UPGRADE_NAMESPACE}" -o yaml > "${UPGRADE_REPORT_DIR}/diagnostics/namespaced-resources.yaml" 2>&1 || true
+          kubectl get aimclusterprofiles,aimclustermodels,aimclusterprofilesets -o yaml > "${UPGRADE_REPORT_DIR}/diagnostics/cluster-resources.yaml" 2>&1 || true
+          kubectl get servingruntimes,clusterservingruntimes,configmaps -A -o yaml > "${UPGRADE_REPORT_DIR}/diagnostics/runtime-projections.yaml" 2>&1 || true
+          kubectl get events -A --sort-by=.lastTimestamp > "${UPGRADE_REPORT_DIR}/diagnostics/events.txt" 2>&1 || true
+
+      - name: Upload upgrade report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-report-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slug }}
+          path: ${{ env.UPGRADE_REPORT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Delete Kind cluster
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER}" || true
+
+      - name: Delete kubeconfig
+        if: always()
+        run: rm -f "${KUBECONFIG}"

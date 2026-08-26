@@ -1,0 +1,159 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: upgrade-compatibility-setup
+  labels:
+    requires: upgrade-workflow
+spec:
+  description: |
+    Creates a registry-independent corpus under the baseline operator. It covers
+    namespace and cluster profiles, model-owned profile derivation, profile sets,
+    services, and simulated profile caches. The workflow keeps these resources
+    in place while it upgrades the CRDs and operator.
+  timeouts:
+    assert: 180s
+    cleanup: 180s
+  steps:
+    - name: Create the baseline resource corpus
+      try:
+        - apply:
+            file: resources.yaml
+
+    - name: Wait for source profiles
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: upgrade-namespace-source
+              status:
+                status: Ready
+                version: 0.2.0
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: upgrade-cluster-source
+              status:
+                status: Ready
+                version: 0.2.0
+
+    - name: Wait for model-owned profile derivation
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileSet
+              metadata:
+                labels:
+                  aim.eai.amd.com/source-model: upgrade-namespace-model
+                  aim.eai.amd.com/source-model-scope: namespace
+              status:
+                status: Ready
+                managedProfiles:
+                  total: 1
+                  ready: 1
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/profile-origin: derived
+                  aim.eai.amd.com/source-model: upgrade-namespace-model
+              status:
+                status: Ready
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMModel
+              metadata:
+                name: upgrade-namespace-model
+              status:
+                status: Ready
+                managedProfiles:
+                  total: 1
+                  ready: 1
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfileSet
+              metadata:
+                labels:
+                  aim.eai.amd.com/source-model: upgrade-cluster-model
+                  aim.eai.amd.com/source-model-scope: cluster
+              status:
+                status: Ready
+                managedProfiles:
+                  total: 1
+                  ready: 1
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                labels:
+                  aim.eai.amd.com/profile-origin: derived
+                  aim.eai.amd.com/source-model: upgrade-cluster-model
+              status:
+                status: Ready
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterModel
+              metadata:
+                name: upgrade-cluster-model
+              status:
+                status: Ready
+                managedProfiles:
+                  total: 1
+                  ready: 1
+
+    - name: Wait for namespace and cluster profile consumers
+      try:
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: upgrade-namespace-service
+              status:
+                (conditions[?type == 'ProfileReady']):
+                  - status: "True"
+                    reason: ProfileResolved
+                resolvedProfile:
+                  name: upgrade-namespace-source
+                  scope: Namespace
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: upgrade-cluster-service
+              status:
+                (conditions[?type == 'ProfileReady']):
+                  - status: "True"
+                    reason: ProfileResolved
+                resolvedProfile:
+                  name: upgrade-cluster-source
+                  scope: Cluster
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: upgrade-namespace-service
+              status:
+                status: Ready
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: upgrade-cluster-service
+              status:
+                status: Ready

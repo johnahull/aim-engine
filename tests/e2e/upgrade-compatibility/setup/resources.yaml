@@ -1,0 +1,115 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMProfile
+metadata:
+  name: upgrade-namespace-source
+  labels:
+    app.kubernetes.io/part-of: aim-engine-upgrade-compatibility
+  annotations:
+    aim.eai.amd.com/profile-copyable: "true"
+spec:
+  aimId: upgrade-example/namespace-model
+  modelId: upgrade-example/namespace-model
+  profileId: cpu-bf16-latency
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: optimized
+  primary: true
+  image: registry.example.com/aim-runtime:0.2.0
+  modelSources:
+    - modelId: upgrade-example/namespace-model
+      sourceUri: hf://upgrade-example/namespace-model
+      size: 1Gi
+---
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMModel
+metadata:
+  name: upgrade-namespace-model
+  labels:
+    app.kubernetes.io/part-of: aim-engine-upgrade-compatibility
+spec:
+  profiles:
+    derivedFrom:
+      selector:
+        aimId: upgrade-example/namespace-model
+        modelId: upgrade-example/namespace-model
+    versionPolicy: pinned
+    version: 0.2.0
+    overrides:
+      modelSources:
+        - modelId: upgrade-example/namespace-derived
+          sourceUri: hf://upgrade-example/namespace-derived
+---
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: upgrade-cluster-source
+  labels:
+    app.kubernetes.io/part-of: aim-engine-upgrade-compatibility
+  annotations:
+    aim.eai.amd.com/profile-copyable: "true"
+spec:
+  aimId: upgrade-example/cluster-model
+  modelId: upgrade-example/cluster-model
+  profileId: cpu-bf16-latency
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: optimized
+  primary: true
+  image: registry.example.com/aim-runtime:0.2.0
+  modelSources:
+    - modelId: upgrade-example/cluster-model
+      sourceUri: hf://upgrade-example/cluster-model
+      size: 1Gi
+---
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterModel
+metadata:
+  name: upgrade-cluster-model
+  labels:
+    app.kubernetes.io/part-of: aim-engine-upgrade-compatibility
+spec:
+  profiles:
+    derivedFrom:
+      selector:
+        aimId: upgrade-example/cluster-model
+        modelId: upgrade-example/cluster-model
+    versionPolicy: pinned
+    version: 0.2.0
+    overrides:
+      modelSources:
+        - modelId: upgrade-example/cluster-derived
+          sourceUri: hf://upgrade-example/cluster-derived
+---
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: upgrade-namespace-service
+  labels:
+    app.kubernetes.io/part-of: aim-engine-upgrade-compatibility
+spec:
+  profile:
+    name: upgrade-namespace-source
+  caching:
+    env:
+      - name: AIM_DEBUG_SIMULATE_HF_DOWNLOAD
+        value: "true"
+      - name: AIM_DEBUG_SIMULATE_HF_DURATION
+        value: "1"
+---
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: upgrade-cluster-service
+  labels:
+    app.kubernetes.io/part-of: aim-engine-upgrade-compatibility
+spec:
+  profile:
+    name: upgrade-cluster-source
+  caching:
+    env:
+      - name: AIM_DEBUG_SIMULATE_HF_DOWNLOAD
+        value: "true"
+      - name: AIM_DEBUG_SIMULATE_HF_DURATION
+        value: "1"

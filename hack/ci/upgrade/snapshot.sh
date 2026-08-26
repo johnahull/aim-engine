@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+namespace="${UPGRADE_NAMESPACE:-aim-upgrade-compatibility}"
+output="${1:?usage: snapshot.sh OUTPUT_FILE}"
+
+mkdir -p "$(dirname "${output}")"
+printf 'resource\tnamespace\tname\tuid\towners\n' > "${output}"
+
+record_named() {
+    local resource="$1"
+    local scope_namespace="$2"
+    local name="$3"
+    local json
+
+    if [[ "${scope_namespace}" == "-" ]]; then
+        json="$(kubectl get "${resource}" "${name}" -o json)"
+    else
+        json="$(kubectl get "${resource}" "${name}" -n "${scope_namespace}" -o json)"
+    fi
+    jq -r --arg resource "${resource}" --arg namespace "${scope_namespace}" '
+        [
+            $resource,
+            $namespace,
+            .metadata.name,
+            .metadata.uid,
+            (
+                [.metadata.ownerReferences[]? | {apiVersion, kind, name, uid, controller}]
+                | sort_by(.apiVersion, .kind, .name, .uid)
+                | @base64
+            )
+        ] | @tsv
+    ' <<<"${json}" >> "${output}"
+}
+
+record_selected() {
+    local resource="$1"
+    local scope_namespace="$2"
+    local selector="$3"
+    local json
+    local count
+
+    if [[ "${scope_namespace}" == "-" ]]; then
+        json="$(kubectl get "${resource}" -l "${selector}" -o json)"
+    else
+        json="$(kubectl get "${resource}" -n "${scope_namespace}" -l "${selector}" -o json)"
+    fi
+    count="$(jq '.items | length' <<<"${json}")"
+    if [[ "${count}" != "1" ]]; then
+        echo "expected exactly one ${resource} matching ${selector}, found ${count}" >&2
+        jq -r '.items[].metadata.name' <<<"${json}" >&2
+        exit 1
+    fi
+    jq -r --arg resource "${resource}" --arg namespace "${scope_namespace}" '
+        .items[0] |
+        [
+            $resource,
+            $namespace,
+            .metadata.name,
+            .metadata.uid,
+            (
+                [.metadata.ownerReferences[]? | {apiVersion, kind, name, uid, controller}]
+                | sort_by(.apiVersion, .kind, .name, .uid)
+                | @base64
+            )
+        ] | @tsv
+    ' <<<"${json}" >> "${output}"
+}
+
+record_named aimprofiles "${namespace}" upgrade-namespace-source
+record_named aimmodels "${namespace}" upgrade-namespace-model
+record_selected aimprofilesets "${namespace}" \
+    'aim.eai.amd.com/source-model=upgrade-namespace-model,aim.eai.amd.com/source-model-scope=namespace'
+record_selected aimprofiles "${namespace}" \
+    'aim.eai.amd.com/source-model=upgrade-namespace-model,aim.eai.amd.com/profile-origin=derived'
+record_named aimservices "${namespace}" upgrade-namespace-service
+record_named aimservices "${namespace}" upgrade-cluster-service
+record_selected aimprofilecaches "${namespace}" 'aim.eai.amd.com/service=upgrade-namespace-service'
+record_selected aimprofilecaches "${namespace}" 'aim.eai.amd.com/service=upgrade-cluster-service'
+
+record_named aimclusterprofiles - upgrade-cluster-source
+record_named aimclustermodels - upgrade-cluster-model
+record_selected aimclusterprofilesets - \
+    'aim.eai.amd.com/source-model=upgrade-cluster-model,aim.eai.amd.com/source-model-scope=cluster'
+record_selected aimclusterprofiles - \
+    'aim.eai.amd.com/source-model=upgrade-cluster-model,aim.eai.amd.com/profile-origin=derived'
+
+echo "Baseline object identity snapshot:"
+cat "${output}"

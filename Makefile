@@ -349,6 +349,11 @@ CHAINSAW_NEEDS_SECRET_EXCLUDE := needs-secret notin (hf_token,dockerhub_pull_sec
 # default suite and asserts that both projection outputs coexist.
 CHAINSAW_PROJECTION_MODE_EXCLUDE := reduced-mode
 
+# The upgrade compatibility setup and verify phases share resources across an
+# operator replacement. They are run explicitly by test-upgrade.yml and must
+# not be discovered as independent tests by the regular Chainsaw lanes.
+CHAINSAW_UPGRADE_WORKFLOW_EXCLUDE := upgrade-workflow
+
 # The mode-gated projection tests all live under one tree. The
 # `test-chainsaw-projection-mode` target below is the inverse entry point of the
 # exclusion above: it runs ONLY the gated tests for a chosen MODE by flipping the
@@ -368,25 +373,25 @@ CHAINSAW_PROJECTION_MODE_DIR := tests/e2e/v1alpha2/runtime-projection
 # longhorn storage and NFD-gated tests. Expensive / operator-gated
 # tests (e.g. multi-hundred-GiB live model downloads) gate themselves via one of
 # these `requires` values rather than a separate tier axis.
-CHAINSAW_SELECTOR_KIND := requires notin (gpu,gpu-amd,gpu-nvidia,longhorn,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+CHAINSAW_SELECTOR_KIND := requires notin (gpu,gpu-amd,gpu-nvidia,longhorn,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE),$(CHAINSAW_UPGRADE_WORKFLOW_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
 
 # AMD GPU environment: runs AMD GPU tests (gpu, gpu-amd) end-to-end. Excludes
 # Kind-only tests (mocked node labels), NVIDIA-only tests, and NFD-gated
 # tests. Run an excluded test explicitly by invoking chainsaw directly against
 # its dir without a selector.
-CHAINSAW_SELECTOR_GPU := requires notin (kind,gpu-nvidia,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+CHAINSAW_SELECTOR_GPU := requires notin (kind,gpu-nvidia,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE),$(CHAINSAW_UPGRADE_WORKFLOW_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
 
 # NVIDIA GPU environment: runs only NVIDIA GPU tests (gpu-nvidia). Excludes
 # Kind-only tests and the AMD GPU values (bare gpu is AMD-built today), plus
 # NFD-gated tests.
-CHAINSAW_SELECTOR_NVIDIA := requires notin (kind,gpu,gpu-amd,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
+CHAINSAW_SELECTOR_NVIDIA := requires notin (kind,gpu,gpu-amd,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE),$(CHAINSAW_UPGRADE_WORKFLOW_EXCLUDE)),$(CHAINSAW_NEEDS_SECRET_EXCLUDE)
 
 # Dedicated authenticated lane for tests whose model/size makes a token a hard
 # prerequisite. Normal trusted suites also receive HF_TOKEN and exercise all
 # other hf-access=live tests.
-CHAINSAW_HF_SELECTOR_KIND := needs-secret in (hf_token),requires notin (gpu,gpu-amd,gpu-nvidia,longhorn,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE))
-CHAINSAW_HF_SELECTOR_GPU := needs-secret in (hf_token),requires notin (kind,gpu-nvidia,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE))
-CHAINSAW_HF_SELECTOR_NVIDIA := needs-secret in (hf_token),requires notin (kind,gpu,gpu-amd,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE))
+CHAINSAW_HF_SELECTOR_KIND := needs-secret in (hf_token),requires notin (gpu,gpu-amd,gpu-nvidia,longhorn,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE),$(CHAINSAW_UPGRADE_WORKFLOW_EXCLUDE))
+CHAINSAW_HF_SELECTOR_GPU := needs-secret in (hf_token),requires notin (kind,gpu-nvidia,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE),$(CHAINSAW_UPGRADE_WORKFLOW_EXCLUDE))
+CHAINSAW_HF_SELECTOR_NVIDIA := needs-secret in (hf_token),requires notin (kind,gpu,gpu-amd,nfd,$(CHAINSAW_PROJECTION_MODE_EXCLUDE),$(CHAINSAW_UPGRADE_WORKFLOW_EXCLUDE))
 
 # Select appropriate config based on ENV and CI detection
 # CI is detected via CI env var (set by GitHub Actions, GitLab CI, etc.)
