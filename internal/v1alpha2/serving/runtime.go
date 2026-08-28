@@ -23,7 +23,10 @@
 package serving
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -232,8 +235,8 @@ func BuildNamespaceServingRuntime(input NamespaceRuntimeInput) (*kservev1alpha1.
 	labels := runtimeLabels(input.ProfileName, spec)
 	annotations := runtimeAnnotations(input.ProfileName, spec)
 
-	configMap := BuildProfileConfigMap(runtimeName, input.Namespace, labels, filename, yamlBytes)
-	configMap.Annotations = annotations
+	configMap := BuildProfileConfigMap(runtimeName, input.Namespace, maps.Clone(labels), filename, yamlBytes)
+	configMap.Annotations = maps.Clone(annotations)
 
 	modelReference := resolveVLLMModelReference(spec, input.Cache)
 	envVars := buildRuntimeEnv(spec, filename, modelReference)
@@ -271,7 +274,47 @@ func BuildNamespaceServingRuntime(input NamespaceRuntimeInput) (*kservev1alpha1.
 		Spec: runtimeSpec,
 	}
 
+	contentHash, err := RuntimeProjectionContentHash(runtime, configMap)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hash runtime projection content: %w", err)
+	}
+	runtime.Annotations[constants.AnnotationRuntimeProjectionContentHash] = contentHash
+	configMap.Annotations[constants.AnnotationRuntimeProjectionContentHash] = contentHash
+
 	return runtime, configMap, nil
+}
+
+// runtimeProjectionContent contains exactly the fields that can change what a
+// pod receives from a namespaced ServingRuntime projection. Object metadata is
+// intentionally absent: names are checked independently, while labels,
+// annotations, owner references, resource versions, managed fields, and
+// timestamps do not change the projected pod or profile file.
+type runtimeProjectionContent struct {
+	RuntimeSpec         kservev1alpha1.ServingRuntimeSpec `json:"runtimeSpec"`
+	ConfigMapData       map[string]string                 `json:"configMapData,omitempty"`
+	ConfigMapBinaryData map[string][]byte                 `json:"configMapBinaryData,omitempty"`
+	ConfigMapImmutable  *bool                             `json:"configMapImmutable,omitempty"`
+}
+
+// RuntimeProjectionContentHash returns a deterministic SHA-256 hash of the
+// workload-affecting content shared by a namespaced ServingRuntime and its
+// colocated ConfigMap. It excludes ephemeral metadata and the hash annotation
+// itself, so repeated builds from equivalent profile/cache inputs are stable.
+func RuntimeProjectionContentHash(runtime *kservev1alpha1.ServingRuntime, configMap *corev1.ConfigMap) (string, error) {
+	if runtime == nil || configMap == nil {
+		return "", fmt.Errorf("ServingRuntime and ConfigMap must both be non-nil")
+	}
+	content := runtimeProjectionContent{
+		RuntimeSpec:         runtime.Spec,
+		ConfigMapData:       configMap.Data,
+		ConfigMapBinaryData: configMap.BinaryData,
+		ConfigMapImmutable:  configMap.Immutable,
+	}
+	data, err := json.Marshal(content)
+	if err != nil {
+		return "", fmt.Errorf("marshal projection content: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
 }
 
 // ClusterRuntimeInput carries everything the shared builder needs to project a

@@ -136,7 +136,7 @@ func validateNamespaceRuntimeProjection(
 	profile *aimv1alpha2.AIMProfile,
 	obs ProfileObservation,
 ) error {
-	if profile == nil || !obs.projectable {
+	if profile == nil {
 		return nil
 	}
 	spec := profile.Spec.AIMProfileSpecCommon
@@ -149,7 +149,7 @@ func validateNamespaceRuntimeProjection(
 		NodeAffinity: obs.matchResult.NodeAffinity,
 		Cache:        obs.profileCache,
 	}
-	if mode.ProjectsPerProfile() {
+	if shouldMaintainNamespaceRuntime(mode, profile, obs.projectable) {
 		if _, _, err := serving.BuildNamespaceServingRuntime(input); err != nil {
 			return fmt.Errorf("build per-profile ServingRuntime: %w", err)
 		}
@@ -168,7 +168,7 @@ func validateClusterRuntimeProjection(
 	profile *aimv1alpha2.AIMClusterProfile,
 	obs ClusterProfileObservation,
 ) error {
-	if profile == nil || !obs.projectable {
+	if profile == nil {
 		return nil
 	}
 	spec := profile.Spec.AIMProfileSpecCommon
@@ -178,7 +178,7 @@ func validateClusterRuntimeProjection(
 		Resources:    obs.resolvedResources,
 		NodeAffinity: obs.matchResult.NodeAffinity,
 	}
-	if mode.ProjectsPerProfile() {
+	if shouldMaintainClusterRuntime(mode, profile, obs.projectable) {
 		if _, err := serving.BuildClusterServingRuntime(input); err != nil {
 			return fmt.Errorf("build per-profile ClusterServingRuntime: %w", err)
 		}
@@ -227,22 +227,20 @@ func fetchMountableCache(ctx context.Context, c client.Client, profile *aimv1alp
 // — it cannot collide with a hand-authored object even by accident, so a
 // force-apply only ever clobbers a runtime AIM Engine owns.
 //
-// Projection is purely additive, like every other resource in this pipeline: we
-// emit the runtime only when the profile is projectable. A later gate flip (e.g.
-// nodes vanish) simply stops emitting it — the apply pipeline never prunes owned
-// objects that are absent from the plan (see reconciler.go Phase 5: only
-// plan.Delete objects are removed), so the existing runtime survives untouched.
-// This is the asymmetric teardown: creation is gated, removal is not — a
-// projected runtime is torn out only by ownerRef GC on profile delete or an
-// explicit disable. The Degraded signal for a kept-but-ungated runtime is
-// recorded separately in decorateRuntimeProjection.
+// Projection is additive: a runtime is first emitted only while the profile is
+// projectable. Once status records that projection, later gate failures keep
+// reasserting it instead of leaving stale content behind. This matters when an
+// AIMService resource override can still use a profile whose default footprint
+// no longer fits a node. Removal remains asymmetric — the runtime is torn out
+// only by ownerRef GC on profile delete or an explicit disable.
 func planNamespaceRuntime(
 	ctx context.Context,
 	plan *controllerutils.PlanResult,
+	mode aimv1alpha2.RuntimeProjectionMode,
 	profile *aimv1alpha2.AIMProfile,
 	obs ProfileObservation,
 ) {
-	if !obs.projectable {
+	if !shouldMaintainNamespaceRuntime(mode, profile, obs.projectable) {
 		return
 	}
 	spec := profile.Spec.AIMProfileSpecCommon
@@ -267,6 +265,22 @@ func planNamespaceRuntime(
 	markEagerProjection(configMap)
 	plan.ApplyWithForce(runtime)
 	plan.ApplyWithForce(configMap)
+}
+
+func shouldMaintainNamespaceRuntime(
+	mode aimv1alpha2.RuntimeProjectionMode,
+	profile *aimv1alpha2.AIMProfile,
+	projectable bool,
+) bool {
+	if profile == nil {
+		return false
+	}
+	// Projection mode controls first publication, not ownership of an existing
+	// eager projection. Once status records the per-profile runtime, keep
+	// reasserting it across an Exhaustive/Both -> Reduced switch: the lazy
+	// controller intentionally defers to its eager marker.
+	return (mode.ProjectsPerProfile() && projectable) ||
+		profile.Status.ProjectedRuntimeName == serving.RuntimeName(profile.Name)
 }
 
 // markEagerProjection stamps the eager-projection marker on a per-profile /
@@ -311,10 +325,11 @@ func markEagerProjection(obj metav1.Object) {
 func planClusterRuntime(
 	ctx context.Context,
 	plan *controllerutils.PlanResult,
+	mode aimv1alpha2.RuntimeProjectionMode,
 	profile *aimv1alpha2.AIMClusterProfile,
 	obs ClusterProfileObservation,
 ) {
-	if !obs.projectable {
+	if !shouldMaintainClusterRuntime(mode, profile, obs.projectable) {
 		return
 	}
 	spec := profile.Spec.AIMProfileSpecCommon
@@ -334,6 +349,20 @@ func planClusterRuntime(
 	}
 
 	plan.ApplyWithForce(runtime)
+}
+
+func shouldMaintainClusterRuntime(
+	mode aimv1alpha2.RuntimeProjectionMode,
+	profile *aimv1alpha2.AIMClusterProfile,
+	projectable bool,
+) bool {
+	if profile == nil {
+		return false
+	}
+	// Match the namespace lifecycle: changing mode stops new per-profile
+	// publication but does not abandon a runtime already recorded in status.
+	return (mode.ProjectsPerProfile() && projectable) ||
+		profile.Status.ProjectedRuntimeName == serving.RuntimeName(profile.Name)
 }
 
 // planNamespaceModelSlugRuntime appends the Reduced/Both model-slug primary

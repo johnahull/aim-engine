@@ -92,9 +92,10 @@ func fetchLegacyProfileConfigMap(
 // (aim-<profile.Name>) and overlays only service-specific fields. The inline
 // predictor — image, base resources, affinity, profile ConfigMap, the full
 // profile-derived framework env, and the profile-owned cache mount — lives on
-// the referenced ServingRuntime (projected lazily by the InferenceService-watch
-// reconciler or eagerly by the profile reconcilers), so the service and any
-// native KServe consumer share one serving definition.
+// the referenced ServingRuntime (pre-materialized by the AIMService, projected
+// lazily by the InferenceService-watch reconciler, or eagerly by the profile
+// reconcilers), so the service and any native KServe consumer share one serving
+// definition.
 //
 // The overlay carries only service-owned bits: replicas/autoscaling, auth
 // annotations, service-level resource / pull-secret / service-account
@@ -121,7 +122,7 @@ func buildInferenceServiceFromProfile(
 	// could otherwise leave a service request above the retained runtime limit.
 	model := &servingv1beta1.ModelSpec{
 		ModelFormat: servingv1beta1.ModelFormat{Name: serving.RuntimeModelFormat},
-		Runtime:     ptr.To(stickyRuntimeName(obs)),
+		Runtime:     ptr.To(serving.RuntimeName(obs.profileName)),
 	}
 	if service.Spec.Resources != nil {
 		if obs.effectiveResources != nil {
@@ -169,20 +170,6 @@ func buildInferenceServiceFromProfile(
 	addServiceOwnedCacheOverlay(isvc, service, obs)
 
 	return isvc
-}
-
-// stickyRuntimeName returns the runtime name the ISVC should reference. An
-// existing ISVC keeps whatever runtime it already references (sticky), so a
-// projection-mode change never re-rolls a live ISVC; a fresh ISVC references
-// aim-<profile.Name> from the resolved profile.
-func stickyRuntimeName(obs ServiceObservation) string {
-	if existing := obs.inferenceService.Value; existing != nil &&
-		existing.Spec.Predictor.Model != nil &&
-		existing.Spec.Predictor.Model.Runtime != nil &&
-		*existing.Spec.Predictor.Model.Runtime != "" {
-		return *existing.Spec.Predictor.Model.Runtime
-	}
-	return serving.RuntimeName(obs.profileName)
 }
 
 // buildInferenceServiceLabels builds the correlator labels stamped on the

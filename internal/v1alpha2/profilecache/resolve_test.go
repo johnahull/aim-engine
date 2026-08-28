@@ -164,6 +164,24 @@ func TestFindReadyShared(t *testing.T) {
 	}
 }
 
+func TestSelectBestShared_DeterministicAcrossReadyCandidates(t *testing.T) {
+	t.Parallel()
+
+	const profile = "qwen3-32b-mi300x"
+	scope := aimv1alpha1.AIMResolutionScopeNamespace
+	shared := aimv1alpha2.ProfileCacheModeShared
+	caches := []aimv1alpha2.AIMProfileCache{
+		*cache("z-ready", profile, scope, shared, constants.AIMStatusReady),
+		*cache("progressing", profile, scope, shared, constants.AIMStatusProgressing),
+		*cache("a-ready", profile, scope, shared, constants.AIMStatusReady),
+	}
+
+	got := SelectBestShared(caches, profile, scope)
+	if got == nil || got.Name != "a-ready" {
+		t.Fatalf("SelectBestShared() = %v, want lexicographically first Ready cache a-ready", got)
+	}
+}
+
 // TestFindReadyShared_EmptyProfileName pins the guard: an empty profileName never
 // lists or matches anything (it would otherwise shadow-match a nameless cache).
 func TestFindReadyShared_EmptyProfileName(t *testing.T) {

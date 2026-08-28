@@ -68,6 +68,9 @@ spec:
                 (conditions[?type == 'ProfileReady']):
                   - status: "True"
                     reason: ProfileResolved
+                (conditions[?type == 'ProfileRuntimeReady']):
+                  - status: "True"
+                    reason: ProfileRuntimeReady
                 resolvedProfile:
                   name: test-cpu-basic-profile
                   scope: Cluster
@@ -130,6 +133,26 @@ spec:
                 (containers[?name == 'kserve-container'].image | [0]): registry.example.com/aim-cpu-base:0.12.0
                 (volumes[?configMap.name == 'aim-test-cpu-basic-profile-115fe67a']):
                   - name: aim-profile
+
+    - name: Assert the rendered predictor mounts the profile ConfigMap
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: test-cpu-basic-service
+                  component: predictor
+              spec:
+                template:
+                  spec:
+                    (volumes[?configMap.name == 'aim-test-cpu-basic-profile-115fe67a']):
+                      - name: aim-profile
+                    (containers[?name == 'kserve-container']):
+                      - (volumeMounts[?name == 'aim-profile']):
+                          - mountPath: /workspace/aim-runtime/profiles/custom/Qwen/Qwen3-0.6B
+                            readOnly: true
 
     - name: Assert service reaches Starting status
       try:

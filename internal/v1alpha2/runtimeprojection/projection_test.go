@@ -58,8 +58,8 @@ func makeClusterProfile(name string) *aimv1alpha2.AIMClusterProfile {
 }
 
 // makeNamespaceProfile returns a deployable, cache-free namespace AIMProfile
-// (the Reduced-mode backing that has no eager per-profile runtime) that the
-// shared builder can turn into a complete namespace ServingRuntime.
+// (the Reduced-mode backing that has no eager per-profile ServingRuntime) that
+// the shared builder can turn into a complete namespaced ServingRuntime.
 func makeNamespaceProfile(name, namespace string) *aimv1alpha2.AIMProfile {
 	return &aimv1alpha2.AIMProfile{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -102,7 +102,7 @@ func TestDesiredFor_NoRuntimeReference(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Runtime != nil {
-		t.Errorf("expected nothing materialized when no runtime is referenced, got %v", got.Runtime)
+		t.Errorf("expected nothing materialized when no ServingRuntime or ClusterServingRuntime is referenced, got %v", got.Runtime)
 	}
 }
 
@@ -115,13 +115,14 @@ func TestDesiredFor_ForeignRuntimeNameLeftAlone(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Runtime != nil {
-		t.Errorf("expected foreign runtime name to be left alone, got %v", got.Runtime)
+		t.Errorf("expected foreign ServingRuntime name to be left alone, got %v", got.Runtime)
 	}
 }
 
 func TestDesiredFor_NamespaceRuntimeComplete(t *testing.T) {
-	// Same-namespace namespace profile (or a prior shadow): the runtime already
-	// resolves to a complete namespace runtime, so no shadow is needed.
+	// Same-namespace profile (or a prior shadow): the KServe ServingRuntime or
+	// ClusterServingRuntime reference already resolves to a complete namespaced
+	// ServingRuntime, so no shadow is needed.
 	state := ProjectionState{
 		NamespaceRuntimeComplete: true,
 		ManagedRuntimeProfile:    makeClusterProfile("qwen3-32b"),
@@ -131,7 +132,7 @@ func TestDesiredFor_NamespaceRuntimeComplete(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Runtime != nil {
-		t.Errorf("expected nothing when a complete namespace runtime exists, got %v", got.Runtime)
+		t.Errorf("expected nothing when a complete namespaced ServingRuntime exists, got %v", got.Runtime)
 	}
 }
 
@@ -145,7 +146,7 @@ func TestDesiredFor_ManagedClusterRuntimeMaterializesNamespaceRuntime(t *testing
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Runtime == nil || got.ConfigMap == nil {
-		t.Fatalf("expected a runtime and ConfigMap, got runtime=%v configMap=%v", got.Runtime, got.ConfigMap)
+		t.Fatalf("expected a ServingRuntime and ConfigMap, got servingRuntime=%v configMap=%v", got.Runtime, got.ConfigMap)
 	}
 	if got.Owner == nil || got.Owner.GetName() != profile.Name {
 		t.Fatalf("expected owner to be the backing cluster profile %q, got %v", profile.Name, got.Owner)
@@ -153,33 +154,34 @@ func TestDesiredFor_ManagedClusterRuntimeMaterializesNamespaceRuntime(t *testing
 
 	// Materialized under the reserved aim- prefix, in the ISVC's namespace.
 	if got.Runtime.Name != runtimeName {
-		t.Errorf("runtime name = %q, want %q", got.Runtime.Name, runtimeName)
+		t.Errorf("ServingRuntime name = %q, want %q", got.Runtime.Name, runtimeName)
 	}
 	if got.Runtime.Namespace != "team-a" {
-		t.Errorf("runtime namespace = %q, want team-a", got.Runtime.Namespace)
+		t.Errorf("ServingRuntime namespace = %q, want team-a", got.Runtime.Namespace)
 	}
 	if got.ConfigMap.Name != runtimeName || got.ConfigMap.Namespace != "team-a" {
 		t.Errorf("configMap = %s/%s, want team-a/%s", got.ConfigMap.Namespace, got.ConfigMap.Name, runtimeName)
 	}
 
-	// Complete: the runtime mounts the colocated profile ConfigMap of the same name.
+	// Complete: the ServingRuntime mounts the colocated profile ConfigMap.
 	if !runtimeMountsConfigMap(got.Runtime, runtimeName) {
-		t.Errorf("runtime does not mount colocated ConfigMap %q: volumes=%v", runtimeName, got.Runtime.Spec.Volumes)
+		t.Errorf("ServingRuntime does not mount colocated ConfigMap %q: volumes=%v", runtimeName, got.Runtime.Spec.Volumes)
 	}
 
-	// Regression guard: a per-profile runtime keeps autoSelect off so native
-	// KServe auto-selection is never made ambiguous by N runtimes sharing the
-	// same model format.
+	// Regression guard: a per-profile ServingRuntime keeps autoSelect off so
+	// native KServe auto-selection is never made ambiguous by multiple
+	// ServingRuntime objects sharing the same model format.
 	if runtimeAutoSelect(got.Runtime) {
-		t.Errorf("expected per-profile runtime to keep autoSelect=false, got %v", got.Runtime.Spec.SupportedModelFormats)
+		t.Errorf("expected per-profile ServingRuntime to keep autoSelect=false, got %v", got.Runtime.Spec.SupportedModelFormats)
 	}
 }
 
-// TestDesiredFor_ModelSlugCompletion: a native ISVC referencing the model-slug
-// primary runtime (aim-<model-slug>, from the backing primary profile's aimId)
-// materializes a complete namespace ServingRuntime + ConfigMap under the
-// referenced slug name (autoSelect off), owned by the backing primary profile —
-// even though that profile's per-profile name is the distinct aim-<profile>-<hash>.
+// TestDesiredFor_ModelSlugCompletion: a native InferenceService referencing the
+// model-slug primary ServingRuntime (aim-<model-slug>, from the backing primary
+// profile's aimId) materializes a complete namespaced ServingRuntime + ConfigMap
+// under the referenced slug name (autoSelect off), owned by the backing primary
+// profile — even though that profile's per-profile name is the distinct
+// aim-<profile>-<hash>.
 func TestDesiredFor_ModelSlugCompletion(t *testing.T) {
 	profile := makeClusterProfile("qwen3-32b")
 	slugRuntimeName := serving.ModelSlugRuntimeName(profile.Spec.AimId)
@@ -195,7 +197,7 @@ func TestDesiredFor_ModelSlugCompletion(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Runtime == nil || got.ConfigMap == nil {
-		t.Fatalf("expected a runtime and ConfigMap, got runtime=%v configMap=%v", got.Runtime, got.ConfigMap)
+		t.Fatalf("expected a ServingRuntime and ConfigMap, got servingRuntime=%v configMap=%v", got.Runtime, got.ConfigMap)
 	}
 	// Owned/correlated to the backing primary profile (GC'd with it).
 	if got.Owner == nil || got.Owner.GetName() != profile.Name {
@@ -204,19 +206,19 @@ func TestDesiredFor_ModelSlugCompletion(t *testing.T) {
 	// Materialized under the REFERENCED slug name (not aim-<profile.Name>), in
 	// the ISVC's namespace, with a same-named colocated ConfigMap it mounts.
 	if got.Runtime.Name != slugRuntimeName || got.Runtime.Namespace != testNamespace {
-		t.Errorf("runtime = %s/%s, want %s/%s", got.Runtime.Namespace, got.Runtime.Name, testNamespace, slugRuntimeName)
+		t.Errorf("ServingRuntime = %s/%s, want %s/%s", got.Runtime.Namespace, got.Runtime.Name, testNamespace, slugRuntimeName)
 	}
 	if got.ConfigMap.Name != slugRuntimeName || got.ConfigMap.Namespace != testNamespace {
 		t.Errorf("configMap = %s/%s, want %s/%s", got.ConfigMap.Namespace, got.ConfigMap.Name, testNamespace, slugRuntimeName)
 	}
 	if !runtimeMountsConfigMap(got.Runtime, slugRuntimeName) {
-		t.Errorf("runtime does not mount colocated ConfigMap %q: volumes=%v", slugRuntimeName, got.Runtime.Spec.Volumes)
+		t.Errorf("ServingRuntime does not mount colocated ConfigMap %q: volumes=%v", slugRuntimeName, got.Runtime.Spec.Volumes)
 	}
 	// The model-slug primary keeps autoSelect off (mirrors the eager slug
-	// runtime, planNamespaceModelSlugRuntime): the shared model format would
-	// otherwise collide across models in KServe auto-selection.
+	// ServingRuntime, planNamespaceModelSlugRuntime): the shared model format
+	// would otherwise collide across models in KServe auto-selection.
 	if runtimeAutoSelect(got.Runtime) {
-		t.Errorf("expected model-slug runtime to keep autoSelect=false, got %v", got.Runtime.Spec.SupportedModelFormats)
+		t.Errorf("expected model-slug ServingRuntime to keep autoSelect=false, got %v", got.Runtime.Spec.SupportedModelFormats)
 	}
 	// The correlator label still points to the backing primary profile even
 	// though the object is named after the slug.
@@ -226,10 +228,11 @@ func TestDesiredFor_ModelSlugCompletion(t *testing.T) {
 }
 
 // TestDesiredFor_NamespaceProfileBacking: a namespace AIMProfile (which gets NO
-// eager per-profile runtime under Reduced) resolved via the annotation fast-path
-// materializes a complete namespace ServingRuntime (+ colocated ConfigMap) named
-// via RuntimeName, owned by the namespace profile. With no reversible name-lookup
-// fallback, the annotation is the only cross-scope path for a not-yet-created runtime.
+// eager per-profile ServingRuntime under Reduced) resolved via the annotation
+// fast-path materializes a complete namespaced ServingRuntime plus colocated
+// ConfigMap named via RuntimeName, owned by the namespace profile. With no
+// reversible name-lookup fallback, the annotation is the only cross-scope path
+// for a not-yet-created ServingRuntime.
 func TestDesiredFor_NamespaceProfileBacking(t *testing.T) {
 	profile := makeNamespaceProfile("qwen3-0-6b", testNamespace)
 	runtimeName := serving.RuntimeName(profile.Name)
@@ -240,7 +243,7 @@ func TestDesiredFor_NamespaceProfileBacking(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Runtime == nil || got.ConfigMap == nil {
-		t.Fatalf("expected a runtime and ConfigMap, got runtime=%v configMap=%v", got.Runtime, got.ConfigMap)
+		t.Fatalf("expected a ServingRuntime and ConfigMap, got servingRuntime=%v configMap=%v", got.Runtime, got.ConfigMap)
 	}
 	// Owned by the namespace profile (so it GCs with it).
 	if _, ok := got.Owner.(*aimv1alpha2.AIMProfile); !ok {
@@ -252,10 +255,10 @@ func TestDesiredFor_NamespaceProfileBacking(t *testing.T) {
 	// Materialized under the reserved prefix in the ISVC's namespace,
 	// mounting the colocated ConfigMap of the same name.
 	if got.Runtime.Name != runtimeName || got.Runtime.Namespace != testNamespace {
-		t.Errorf("runtime = %s/%s, want %s/%s", got.Runtime.Namespace, got.Runtime.Name, testNamespace, runtimeName)
+		t.Errorf("ServingRuntime = %s/%s, want %s/%s", got.Runtime.Namespace, got.Runtime.Name, testNamespace, runtimeName)
 	}
 	if !runtimeMountsConfigMap(got.Runtime, runtimeName) {
-		t.Errorf("runtime does not mount colocated ConfigMap %q: volumes=%v", runtimeName, got.Runtime.Spec.Volumes)
+		t.Errorf("ServingRuntime does not mount colocated ConfigMap %q: volumes=%v", runtimeName, got.Runtime.Spec.Volumes)
 	}
 }
 
@@ -273,7 +276,7 @@ func TestDesiredFor_ResolutionOrder(t *testing.T) {
 		wantOwner string // "" means nothing materialized
 	}{
 		{
-			name: "managed cluster runtime wins over annotation",
+			name: "managed ClusterServingRuntime wins over annotation",
 			state: ProjectionState{
 				ManagedRuntimeProfile: managed,
 				AnnotatedProfile:      annotated,
@@ -281,7 +284,7 @@ func TestDesiredFor_ResolutionOrder(t *testing.T) {
 			wantOwner: managed.Name,
 		},
 		{
-			name:      "annotation resolves when no managed runtime",
+			name:      "annotation resolves when no managed ClusterServingRuntime",
 			state:     ProjectionState{AnnotatedProfile: annotated},
 			wantOwner: annotated.Name,
 		},
@@ -294,8 +297,9 @@ func TestDesiredFor_ResolutionOrder(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// The referenced runtime name must match the profile the order
-			// selects; otherwise the mismatch guard short-circuits.
+			// The referenced ServingRuntime or ClusterServingRuntime name must
+			// match the profile the order selects; otherwise the mismatch guard
+			// short-circuits.
 			expected := tc.state.BackingProfile()
 			runtimeName := serving.RuntimeNamePrefix + "unresolved"
 			if expected != nil {
@@ -317,16 +321,16 @@ func TestDesiredFor_ResolutionOrder(t *testing.T) {
 				t.Fatalf("resolved owner = %v, want %q", got.Owner, tc.wantOwner)
 			}
 			if got.Runtime.Name != runtimeName {
-				t.Errorf("runtime name = %q, want %q", got.Runtime.Name, runtimeName)
+				t.Errorf("ServingRuntime name = %q, want %q", got.Runtime.Name, runtimeName)
 			}
 		})
 	}
 }
 
-// TestDesiredFor_NameMismatchLeftAlone guards against shadowing a runtime name
-// the resolved profile does not actually project — neither its per-profile name
-// (aim-<profile.Name>) nor its Reduced/Both-mode model-slug name
-// (aim-<model-slug>).
+// TestDesiredFor_NameMismatchLeftAlone guards against shadowing a
+// ServingRuntime or ClusterServingRuntime name the resolved profile does not
+// actually project — neither its per-profile name (aim-<profile.Name>) nor its
+// Reduced/Both-mode model-slug name (aim-<model-slug>).
 func TestDesiredFor_NameMismatchLeftAlone(t *testing.T) {
 	profile := makeClusterProfile("qwen3-32b")
 	state := ProjectionState{ManagedRuntimeProfile: profile}
@@ -346,7 +350,7 @@ func TestDesiredFor_NameMismatchLeftAlone(t *testing.T) {
 }
 
 // TestDesiredFor_ProfileOwnedCacheMounted asserts a ready profile-owned cache
-// contributes its PVC mount onto the materialized runtime.
+// contributes its PVC mount to the materialized ServingRuntime.
 func TestDesiredFor_ProfileOwnedCacheMounted(t *testing.T) {
 	profile := makeClusterProfile("qwen3-32b")
 	runtimeName := serving.RuntimeName(profile.Name)
@@ -372,10 +376,35 @@ func TestDesiredFor_ProfileOwnedCacheMounted(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.Runtime == nil {
-		t.Fatalf("expected a runtime to be materialized")
+		t.Fatalf("expected a ServingRuntime to be materialized")
 	}
 	if !runtimeMountsPVC(got.Runtime, "weights-pvc") {
-		t.Errorf("runtime does not mount the profile-owned cache PVC: volumes=%v", got.Runtime.Spec.Volumes)
+		t.Errorf("ServingRuntime does not mount the profile-owned cache PVC: volumes=%v", got.Runtime.Spec.Volumes)
+	}
+}
+
+func TestDesiredForRuntime_UsesRuntimeKeyAndExistingOwnerFirst(t *testing.T) {
+	existing := makeClusterProfile("existing-owner")
+	managed := makeClusterProfile("managed-owner")
+	annotated := makeNamespaceProfile("annotated-owner", "other-namespace")
+	runtimeName := serving.ModelSlugRuntimeName(existing.Spec.AimId)
+
+	got, err := DesiredForRuntime("runtime-namespace", runtimeName, ProjectionState{
+		ExistingShadowProfile: existing,
+		ManagedRuntimeProfile: managed,
+		AnnotatedProfile:      annotated,
+	})
+	if err != nil {
+		t.Fatalf("DesiredForRuntime() error = %v", err)
+	}
+	if got.Runtime == nil || got.ConfigMap == nil {
+		t.Fatalf("expected ServingRuntime-keyed siblings, got servingRuntime=%v configMap=%v", got.Runtime, got.ConfigMap)
+	}
+	if got.Runtime.Namespace != "runtime-namespace" || got.Runtime.Name != runtimeName {
+		t.Fatalf("ServingRuntime key = %s/%s, want runtime-namespace/%s", got.Runtime.Namespace, got.Runtime.Name, runtimeName)
+	}
+	if got.Owner != existing {
+		t.Fatalf("owner = %v, want existing sibling owner %q", got.Owner, existing.Name)
 	}
 }
 
@@ -397,9 +426,10 @@ func runtimeMountsPVC(runtime *kservev1alpha1.ServingRuntime, claimName string) 
 	return false
 }
 
-// runtimeAutoSelect reports whether any of the runtime's supportedModelFormats
-// advertises autoSelect=true. Every projected runtime keeps it off, so this is
-// used as a regression guard that projection never turns it on.
+// runtimeAutoSelect reports whether any of the ServingRuntime's
+// supportedModelFormats advertises autoSelect=true. Every projected
+// ServingRuntime keeps it off, so this is a regression guard that projection
+// never turns it on.
 func runtimeAutoSelect(runtime *kservev1alpha1.ServingRuntime) bool {
 	for _, f := range runtime.Spec.SupportedModelFormats {
 		if f.AutoSelect != nil && *f.AutoSelect {

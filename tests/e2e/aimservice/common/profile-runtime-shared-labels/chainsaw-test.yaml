@@ -1,0 +1,219 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+#
+# Shared profile projections must not inherit labels from whichever AIMService
+# happens to bootstrap them. Two services with conflicting propagated labels
+# target the same cluster profile; the resulting ServingRuntime and ConfigMap
+# must retain only profile/controller metadata and the profile owner reference.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: profile-runtime-shared-labels
+spec:
+  timeouts:
+    assert: 120s
+    cleanup: 240s
+  steps:
+    - name: Create label propagation config and backing cluster profile
+      try:
+        - apply:
+            file: runtimeconfig.yaml
+        - apply:
+            file: cluster-profile.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMClusterProfile
+              metadata:
+                name: test-shared-projection-labels
+              status:
+                status: Ready
+
+    - name: Create two services with conflicting propagated labels
+      try:
+        - apply:
+            file: service-a.yaml
+        - apply:
+            file: service-b.yaml
+
+    - name: Freeze the shared cache and verify projection label isolation
+      description: |
+        The cache is not under test, so freeze it Ready while validating the
+        projection. Positive controls first prove configured and AIM-domain
+        labels reach each service-owned InferenceService. The shared pair must
+        then contain none of those labels.
+      try:
+        - script:
+            timeout: 45s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              CACHE_NAME=""
+              for ATTEMPT in $(seq 1 30); do
+                CACHE_NAME=$(kubectl get aimprofilecache -n "$NAMESPACE" -o json \
+                  | jq -r '[.items[]
+                      | select(.spec.profileName == "test-shared-projection-labels")
+                      | select(.spec.mode == "Shared")]
+                    | if length == 1 then .[0].metadata.name else "" end')
+                [ -n "$CACHE_NAME" ] && break
+                sleep 1
+              done
+              if [ -z "$CACHE_NAME" ]; then
+                echo "ERROR: expected exactly one shared profile cache"
+                kubectl get aimprofilecache -n "$NAMESPACE" -o yaml
+                exit 1
+              fi
+
+              kubectl annotate aimprofilecache "$CACHE_NAME" -n "$NAMESPACE" \
+                aim.eai.amd.com/reconciliation-paused=true --overwrite
+              kubectl patch aimprofilecache "$CACHE_NAME" -n "$NAMESPACE" \
+                --type=merge --subresource=status \
+                -p '{
+                  "status": {
+                    "status": "Ready",
+                    "conditions": [
+                      {
+                        "type": "ProfileFound",
+                        "status": "True",
+                        "reason": "ProfileResolved",
+                        "message": "Profile resolved",
+                        "lastTransitionTime": "2025-01-01T00:00:00Z"
+                      },
+                      {
+                        "type": "ArtifactsReady",
+                        "status": "True",
+                        "reason": "AllCachesReady",
+                        "message": "Cache frozen Ready for projection test",
+                        "lastTransitionTime": "2025-01-01T00:00:00Z"
+                      }
+                    ]
+                  }
+                }'
+              echo "Frozen shared cache $CACHE_NAME as Ready"
+
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: shared-label-consumer-a
+              status:
+                (conditions[?type == 'ProfileRuntimeReady']):
+                  - status: "True"
+                    reason: ProfileRuntimeReady
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: shared-label-consumer-b
+              status:
+                (conditions[?type == 'ProfileRuntimeReady']):
+                  - status: "True"
+                    reason: ProfileRuntimeReady
+
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: shared-label-consumer-a
+                  team-bootstrap: service-a
+                  cost-center: service-a
+                  aim.eai.amd.com/requester: service-a
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                labels:
+                  aim.eai.amd.com/service: shared-label-consumer-b
+                  team-bootstrap: service-b
+                  cost-center: service-b
+                  aim.eai.amd.com/requester: service-b
+
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+
+              SELECTOR='aim.eai.amd.com/profile=test-shared-projection-labels'
+              RUNTIMES=$(kubectl get servingruntime -n "$NAMESPACE" -l "$SELECTOR" -o json)
+              CONFIG_MAPS=$(kubectl get configmap -n "$NAMESPACE" -l "$SELECTOR" -o json)
+              RUNTIME_COUNT=$(printf '%s' "$RUNTIMES" | jq '.items | length')
+              CONFIG_MAP_COUNT=$(printf '%s' "$CONFIG_MAPS" | jq '.items | length')
+              if [ "$RUNTIME_COUNT" -ne 1 ] || [ "$CONFIG_MAP_COUNT" -ne 1 ]; then
+                echo "ERROR: expected exactly one ServingRuntime and ConfigMap, got servingRuntimes=$RUNTIME_COUNT configMaps=$CONFIG_MAP_COUNT"
+                exit 1
+              fi
+
+              RUNTIME=$(printf '%s' "$RUNTIMES" | jq -r '.items[0].metadata.name')
+              CONFIG_MAP=$(printf '%s' "$CONFIG_MAPS" | jq -r '.items[0].metadata.name')
+              if [ "$RUNTIME" != "$CONFIG_MAP" ]; then
+                echo "ERROR: projected pair names differ: servingRuntime='$RUNTIME' configMap='$CONFIG_MAP'"
+                exit 1
+              fi
+
+              for SERVICE in shared-label-consumer-a shared-label-consumer-b; do
+                SERVICE_RUNTIMES=$(kubectl get inferenceservice -n "$NAMESPACE" \
+                  -l "aim.eai.amd.com/service=$SERVICE" -o json \
+                  | jq -r '[.items[].spec.predictor.model.runtime] | unique | join(",")')
+                if [ "$SERVICE_RUNTIMES" != "$RUNTIME" ]; then
+                  echo "ERROR: $SERVICE references '$SERVICE_RUNTIMES', want shared ServingRuntime '$RUNTIME'"
+                  exit 1
+                fi
+              done
+
+              for RESOURCE in "servingruntime/$RUNTIME" "configmap/$CONFIG_MAP"; do
+                JSON=$(kubectl get -n "$NAMESPACE" "$RESOURCE" -o json)
+                for LABEL in \
+                  team-bootstrap \
+                  cost-center \
+                  aim.eai.amd.com/requester \
+                  aim.eai.amd.com/service.name
+                do
+                  if printf '%s' "$JSON" | jq -e --arg label "$LABEL" \
+                    '(.metadata.labels // {}) | has($label)' >/dev/null
+                  then
+                    echo "ERROR: $RESOURCE inherited service label $LABEL"
+                    exit 1
+                  fi
+                done
+
+                MANAGED_BY=$(printf '%s' "$JSON" | jq -r '.metadata.labels["app.kubernetes.io/managed-by"] // ""')
+                PROFILE=$(printf '%s' "$JSON" | jq -r '.metadata.labels["aim.eai.amd.com/profile"] // ""')
+                OWNER=$(printf '%s' "$JSON" | jq -r \
+                  '[.metadata.ownerReferences[]? | select(.kind == "AIMClusterProfile") | .name] | first // ""')
+                if [ "$MANAGED_BY" != "aim-engine" ] ||
+                   [ "$PROFILE" != "test-shared-projection-labels" ] ||
+                   [ "$OWNER" != "test-shared-projection-labels" ]
+                then
+                  echo "ERROR: $RESOURCE lost profile/controller metadata"
+                  exit 1
+                fi
+              done
+
+              echo "OK: both services share one projection without leaking labels"
+      finally:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              for CACHE_NAME in $(kubectl get aimprofilecache -n "$NAMESPACE" -o json \
+                | jq -r '.items[]
+                    | select(.spec.profileName == "test-shared-projection-labels")
+                    | select(.spec.mode == "Shared")
+                    | .metadata.name')
+              do
+                kubectl annotate aimprofilecache "$CACHE_NAME" -n "$NAMESPACE" \
+                  aim.eai.amd.com/reconciliation-paused- --overwrite || true
+              done

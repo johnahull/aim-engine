@@ -253,6 +253,59 @@ func TestBuildNamespaceServingRuntime_FullFidelityAnnotations(t *testing.T) {
 	}
 }
 
+func TestRuntimeProjectionContentHash_TracksWorkloadContentOnly(t *testing.T) {
+	const changed = "changed"
+
+	runtime, cm := completeNoCacheRuntime(t)
+	want := runtime.Annotations[constants.AnnotationRuntimeProjectionContentHash]
+	if len(want) != 64 {
+		t.Fatalf("runtime projection content hash = %q, want a full SHA-256 hex digest", want)
+	}
+	if got := cm.Annotations[constants.AnnotationRuntimeProjectionContentHash]; got != want {
+		t.Fatalf("ConfigMap content hash = %q, want runtime hash %q", got, want)
+	}
+	if got, err := RuntimeProjectionContentHash(runtime, cm); err != nil || got != want {
+		t.Fatalf("recomputed content hash = %q, %v; want %q", got, err, want)
+	}
+
+	metadataOnlyRuntime := runtime.DeepCopy()
+	metadataOnlyConfigMap := cm.DeepCopy()
+	metadataOnlyRuntime.Labels["example.com/ephemeral"] = changed
+	metadataOnlyRuntime.Annotations["example.com/ephemeral"] = changed
+	metadataOnlyRuntime.ResourceVersion = "42"
+	metadataOnlyConfigMap.Labels["example.com/ephemeral"] = changed
+	metadataOnlyConfigMap.Annotations["example.com/ephemeral"] = changed
+	metadataOnlyConfigMap.ResourceVersion = "43"
+	if got, err := RuntimeProjectionContentHash(metadataOnlyRuntime, metadataOnlyConfigMap); err != nil || got != want {
+		t.Fatalf("ephemeral metadata changed content hash to %q, %v; want %q", got, err, want)
+	}
+
+	runtimeContentChanged := runtime.DeepCopy()
+	runtimeContentChanged.Spec.Containers[0].Image += "-updated"
+	if got, err := RuntimeProjectionContentHash(runtimeContentChanged, cm); err != nil || got == want {
+		t.Fatalf("ServingRuntime spec change produced hash %q, %v; want a new hash", got, err)
+	}
+
+	configMapContentChanged := cm.DeepCopy()
+	configMapContentChanged.Data["new-profile.yaml"] = changed
+	if got, err := RuntimeProjectionContentHash(runtime, configMapContentChanged); err != nil || got == want {
+		t.Fatalf("ConfigMap data change produced hash %q, %v; want a new hash", got, err)
+	}
+
+	configMapContentChanged = cm.DeepCopy()
+	configMapContentChanged.BinaryData = map[string][]byte{"profile.bin": {0x01}}
+	if got, err := RuntimeProjectionContentHash(runtime, configMapContentChanged); err != nil || got == want {
+		t.Fatalf("ConfigMap binary data change produced hash %q, %v; want a new hash", got, err)
+	}
+
+	immutable := true
+	configMapContentChanged = cm.DeepCopy()
+	configMapContentChanged.Immutable = &immutable
+	if got, err := RuntimeProjectionContentHash(runtime, configMapContentChanged); err != nil || got == want {
+		t.Fatalf("ConfigMap immutability change produced hash %q, %v; want a new hash", got, err)
+	}
+}
+
 // TestBuildNamespaceServingRuntime_ContainerAndFormat asserts the predictor
 // container (image, resources), the supportedModelFormat/protocol, and the
 // resolved node affinity.

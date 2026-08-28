@@ -2,11 +2,12 @@
 #
 # Backing-profile drift propagates to the materialized shadow.
 #
-# After the lazy watcher materializes a complete namespace ServingRuntime from a
-# cluster profile, the backing AIMClusterProfile's spec.image is patched. The
-# controller `.Watches` the AIMClusterProfile and maps the change back to every
-# ISVC whose referenced runtime resolves to that profile, so the materialized
-# namespace runtime is re-projected with the new image.
+# After demand materializes a complete namespaced KServe ServingRuntime from a cluster
+# profile, the InferenceService is deleted and the backing AIMClusterProfile's
+# spec.image is patched. The ServingRuntime-keyed controller maps the profile
+# change to the inactive lazy shadow by its exact owner reference, so the
+# namespaced ServingRuntime is re-projected with the new image even without an
+# active consumer.
 #
 # No accelerator is involved, so this runs in any cluster (kind or GPU vcluster).
 apiVersion: chainsaw.kyverno.io/v1alpha1
@@ -17,7 +18,7 @@ spec:
   timeouts:
     assert: 120s
   steps:
-    - name: Create the backing cluster profile and bare managed CSR
+    - name: Create the backing cluster profile and bare managed ClusterServingRuntime
       try:
         - apply:
             file: cluster-profile.yaml
@@ -32,7 +33,7 @@ spec:
               status:
                 status: Ready
 
-    - name: Apply the native InferenceService referencing the managed runtime
+    - name: Apply the native InferenceService referencing the managed ClusterServingRuntime
       try:
         - apply:
             file: inference-service.yaml
@@ -53,6 +54,58 @@ spec:
               spec:
                 (containers[?name == 'kserve-container'].image | [0]): registry.example.com/aim-cpu-base:0.12.0
 
+    - name: Delete the native InferenceService and leave the lazy shadow inactive
+      try:
+        - delete:
+            ref:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              name: native-profile-drift
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                name: native-profile-drift
+
+    - name: Delete the inactive ConfigMap sibling and assert it is recreated
+      description: |
+        With no InferenceService consumer left, the ConfigMap delete event
+        enqueues its own ServingRuntime key. The remaining lazy ServingRuntime
+        supplies the exact profile owner, allowing the controller to rebuild the
+        pair.
+
+        A chainsaw `delete` operation blocks until the object is gone *by name*,
+        which never happens here: the controller recreates the ConfigMap almost
+        immediately, so the operation times out. Delete via a script instead
+        (kubectl waits only for the original instance's UID to disappear), then
+        assert the pair is rebuilt.
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              kubectl delete configmap aim-test-profile-drift-30d527e6 -n "$NAMESPACE"
+              echo "deleted inactive ConfigMap sibling"
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-test-profile-drift-30d527e6
+                labels:
+                  app.kubernetes.io/managed-by: aim-engine
+                  aim.eai.amd.com/profile: test-profile-drift
+                (ownerReferences[?kind == 'AIMClusterProfile']):
+                  - name: test-profile-drift
+              data:
+                (keys(@)):
+                  - vllm-none-bf16-tp0-latency.yaml
+
     - name: Patch the backing AIMClusterProfile spec.image
       try:
         - script:
@@ -64,11 +117,12 @@ spec:
                 -p '{"spec":{"image":"registry.example.com/aim-cpu-drift:9.9.9"}}'
               echo "patched cluster profile spec.image"
 
-    - name: Assert the materialized namespace ServingRuntime image updates
+    - name: Assert the materialized namespaced ServingRuntime image updates
       description: |
-        The AIMClusterProfile watch enqueues the consuming ISVC and the shadow is
-        re-materialized from the profile's new spec.image. Chainsaw polls until
-        the namespace runtime's container image reflects the patched value.
+        The AIMClusterProfile watch enumerates the inactive lazy shadow from its
+        exact profile owner reference and enqueues its namespace/ServingRuntime
+        key. Chainsaw polls until the ServingRuntime reflects the patched profile
+        image.
       try:
         - assert:
             resource:

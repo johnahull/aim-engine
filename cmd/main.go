@@ -112,10 +112,10 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&runtimeProjectionModeFlag, "runtime-projection-mode", string(aimv1alpha2.RuntimeProjectionModeDefault),
-		"Eager runtime projection mode driven by the profile reconcilers: "+
-			"Exhaustive (one runtime per projectable profile, autoSelect off), Reduced (one model-slug "+
-			"primary per model, autoSelect on), or Both. The lazy InferenceService-watch projection is "+
-			"always on and not governed by this knob.")
+		"Eager KServe ServingRuntime/ClusterServingRuntime projection mode driven by the profile reconcilers: "+
+			"Exhaustive (one scope-appropriate ServingRuntime or ClusterServingRuntime per projectable profile, autoSelect off), "+
+			"Reduced (one model-slug primary ServingRuntime or ClusterServingRuntime per model, autoSelect off), or Both. "+
+			"The lazy namespaced ServingRuntime-keyed projection is always on and not governed by this knob.")
 	opts := zap.Options{
 		Development: false,
 		// Disable stack traces for errors - they're noisy for expected infrastructure errors.
@@ -127,14 +127,15 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// Resolve the eager runtime projection mode once at startup so a typo fails
-	// loudly here rather than silently disabling projection later.
+	// Resolve the eager KServe ServingRuntime/ClusterServingRuntime projection
+	// mode once at startup so a typo fails loudly here rather than silently
+	// disabling projection later.
 	runtimeProjectionMode, err := aimv1alpha2.ParseRuntimeProjectionMode(runtimeProjectionModeFlag)
 	if err != nil {
 		setupLog.Error(err, "invalid --runtime-projection-mode")
 		os.Exit(1)
 	}
-	setupLog.Info("runtime projection configured", "mode", runtimeProjectionMode)
+	setupLog.Info("KServe ServingRuntime/ClusterServingRuntime projection configured", "mode", runtimeProjectionMode)
 
 	// Install-time override for the artifact-downloader image. The binary bakes
 	// in the public docker.io/amdenterpriseai mirror at build time (via LDFLAGS),
@@ -252,11 +253,12 @@ func main() {
 		// Scope the shared ConfigMap informer to AIM-managed objects. Without
 		// this the cache lists/watches every ConfigMap in the cluster — a real
 		// memory / watch-traffic cost — even though the operator only ever needs
-		// its own (discovery caches, projected runtime shadows, custom-profile
-		// and profile ConfigMaps all carry managed-by=aim-engine). The two reads
+		// its own (discovery caches, projected ServingRuntime shadow ConfigMaps,
+		// custom-profile and profile ConfigMaps all carry managed-by=aim-engine).
+		// The two reads
 		// that can legitimately target an unlabeled ConfigMap — a user
 		// pre-populated AIMProfileSet sourceRef catalog and a hand-authored
-		// runtime's colocated ConfigMap — go through the uncached APIReader
+		// KServe ServingRuntime's colocated ConfigMap — go through the uncached APIReader
 		// instead (see LoadDiscoveryCatalog and namespaceRuntimeComplete). A
 		// user pre-populated sourceRef catalog is therefore still read on demand,
 		// but its edits are only picked up on the next reconcile rather than via
@@ -426,12 +428,12 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "AIMClusterProfileSet")
 		os.Exit(1)
 	}
-	if err := (&v1alpha2controller.InferenceServiceRuntimeReconciler{
+	if err := (&v1alpha2controller.RuntimeProjectionReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Clientset: clientset,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "InferenceServiceRuntimeProjection")
+		setupLog.Error(err, "unable to create controller", "controller", "RuntimeProjection")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

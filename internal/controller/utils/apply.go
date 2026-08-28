@@ -234,12 +234,21 @@ func sortObjects(objects []client.Object) []client.Object {
 
 func PropagateLabelsForResult(parent client.Object, planResult *PlanResult, config *LabelPropagationSettings) {
 	for _, obj := range planResult.toApply {
+		if _, skip := planResult.labelPropagationSkips[obj]; skip {
+			continue
+		}
 		PropagateLabels(parent, obj, config)
 	}
 	for _, obj := range planResult.toApplyWithoutOwnerRef {
+		if _, skip := planResult.labelPropagationSkips[obj]; skip {
+			continue
+		}
 		PropagateLabels(parent, obj, config)
 	}
 	for _, obj := range planResult.toApplyWithForce {
+		if _, skip := planResult.labelPropagationSkips[obj]; skip {
+			continue
+		}
 		PropagateLabels(parent, obj, config)
 	}
 }
@@ -256,6 +265,24 @@ func ApplyControllerLabelsToResult(planResult *PlanResult, labels map[string]str
 	}
 	for _, obj := range planResult.toApplyWithForce {
 		applyControllerLabels(obj, labels)
+	}
+}
+
+// RemoveExcludedLabelsFromResult removes labels excluded for individual planned
+// objects after generic propagation and controller-label stamping have run.
+func RemoveExcludedLabelsFromResult(planResult *PlanResult) {
+	for obj, labels := range planResult.labelExclusions {
+		objLabels := obj.GetLabels()
+		for label := range labels {
+			delete(objLabels, label)
+		}
+		obj.SetLabels(objLabels)
+
+		if job, ok := obj.(*batchv1.Job); ok {
+			for label := range labels {
+				delete(job.Spec.Template.Labels, label)
+			}
+		}
 	}
 }
 

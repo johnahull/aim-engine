@@ -48,8 +48,11 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
 
-// testNamespace is the shared namespace used across the mapping-handler tests.
-const testNamespace = "team-a"
+const (
+	// testNamespace is the shared namespace used across the mapping-handler tests.
+	testNamespace     = "team-a"
+	currentProfileUID = "profile-current"
+)
 
 // runtimeProjectionScheme registers every type the lazy controller's mapping
 // handlers read (ISVCs, shadow SR/ConfigMap, backing profile, cache).
@@ -70,7 +73,8 @@ func runtimeProjectionScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// makeConsumerISVC builds an InferenceService referencing runtimeName. Empty
+// makeConsumerISVC builds an InferenceService referencing a KServe
+// ServingRuntime or ClusterServingRuntime named runtimeName. An empty
 // runtimeName leaves predictor.model.runtime unset (a non-consumer).
 func makeConsumerISVC(name, namespace, runtimeName string) *servingv1beta1.InferenceService {
 	isvc := &servingv1beta1.InferenceService{
@@ -123,7 +127,8 @@ func makeProfileCache(name, namespace, profileName string, scope aimv1alpha1.AIM
 }
 
 // newRuntimeProjectionClient builds a fake client that mirrors the production
-// InferenceService runtime index the mapping handlers rely on.
+// InferenceService ServingRuntime/ClusterServingRuntime-name index the mapping
+// handlers rely on.
 func newRuntimeProjectionClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	return fake.NewClientBuilder().
@@ -169,33 +174,37 @@ func TestFindInferenceServicesForClusterProfile(t *testing.T) {
 	foreign := makeConsumerISVC("svc-foreign", testNamespace, "my-own-runtime")
 
 	c := newRuntimeProjectionClient(t, consumerA, consumerB, other, foreign)
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 
 	got := r.findInferenceServicesForClusterProfile(context.Background(), makeClusterProfileWithAimID("p1", ""))
-	assertRequestKeys(t, got, []string{"team-a/svc-a", "team-b/svc-b"})
+	assertRequestKeys(t, got, []string{"team-a/" + serving.RuntimeName("p1"), "team-b/" + serving.RuntimeName("p1")})
 }
 
 func TestFindInferenceServicesForClusterProfile_ModelSlugReference(t *testing.T) {
 	t.Parallel()
 
-	// A profile with an aimId also backs the Reduced-mode model-slug runtime
-	// name; an ISVC referencing that slug must be re-enqueued too.
+	// A profile with an aimId also backs the Reduced-mode model-slug
+	// ServingRuntime or ClusterServingRuntime name; an InferenceService
+	// referencing that slug must be re-enqueued too.
 	aimID := "Qwen/Qwen3-0.6B"
 	slugConsumer := makeConsumerISVC("svc-slug", testNamespace, serving.ModelSlugRuntimeName(aimID))
 	perProfileConsumer := makeConsumerISVC("svc-per-profile", testNamespace, serving.RuntimeName("primary"))
 
 	c := newRuntimeProjectionClient(t, slugConsumer, perProfileConsumer)
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 
 	got := r.findInferenceServicesForClusterProfile(context.Background(), makeClusterProfileWithAimID("primary", aimID))
-	assertRequestKeys(t, got, []string{"team-a/svc-per-profile", "team-a/svc-slug"})
+	assertRequestKeys(t, got, []string{
+		"team-a/" + serving.RuntimeName("primary"),
+		"team-a/" + serving.ModelSlugRuntimeName(aimID),
+	})
 }
 
 func TestFindInferenceServicesForClusterProfile_WrongType(t *testing.T) {
 	t.Parallel()
 
 	c := newRuntimeProjectionClient(t)
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 	if got := r.findInferenceServicesForClusterProfile(context.Background(), &corev1.ConfigMap{}); got != nil {
 		t.Fatalf("expected nil for a non-profile object, got %v", got)
 	}
@@ -216,23 +225,23 @@ func TestFindInferenceServicesForProfile(t *testing.T) {
 
 	// A namespace profile backs same-namespace consumers only: an ISVC in
 	// another namespace referencing the same name is a DIFFERENT profile's
-	// runtime and must not be enqueued for this one.
+	// ServingRuntime and must not be enqueued for this one.
 	sameNamespace := makeConsumerISVC("svc-a", testNamespace, serving.RuntimeName("p1"))
 	otherNamespace := makeConsumerISVC("svc-b", "team-b", serving.RuntimeName("p1"))
 	otherProfile := makeConsumerISVC("svc-other", testNamespace, serving.RuntimeName("p2"))
 
 	c := newRuntimeProjectionClient(t, sameNamespace, otherNamespace, otherProfile)
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 
 	got := r.findInferenceServicesForProfile(context.Background(), makeNamespaceProfile("p1", testNamespace, ""))
-	assertRequestKeys(t, got, []string{"team-a/svc-a"})
+	assertRequestKeys(t, got, []string{"team-a/" + serving.RuntimeName("p1")})
 }
 
 func TestFindInferenceServicesForProfile_WrongType(t *testing.T) {
 	t.Parallel()
 
 	c := newRuntimeProjectionClient(t)
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 	if got := r.findInferenceServicesForProfile(context.Background(), &aimv1alpha2.AIMClusterProfile{}); got != nil {
 		t.Fatalf("expected nil for a non-namespace-profile object, got %v", got)
 	}
@@ -285,9 +294,8 @@ func TestProfileProjectionPredicate(t *testing.T) {
 		})
 	}
 
-	// A namespace-profile delete never re-materializes the shadow (ownerRef GC).
-	if p.Delete(event.DeleteEvent{Object: base}) {
-		t.Error("Delete should be filtered for namespace profiles")
+	if !p.Delete(event.DeleteEvent{Object: base}) {
+		t.Error("Delete should enqueue namespaced profile ServingRuntime keys")
 	}
 }
 
@@ -304,7 +312,7 @@ func TestFindInferenceServicesForProfileCache(t *testing.T) {
 	otherProfile := makeConsumerISVC("svc-other", testNamespace, serving.RuntimeName("p2"))
 
 	c := newRuntimeProjectionClient(t, inNamespace, otherNamespace, otherProfile)
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 
 	tests := []struct {
 		name  string
@@ -314,12 +322,12 @@ func TestFindInferenceServicesForProfileCache(t *testing.T) {
 		{
 			name:  "cluster-scope cache fans out to same-namespace consumers only",
 			cache: makeProfileCache("pc", testNamespace, "p1", aimv1alpha1.AIMResolutionScopeCluster),
-			want:  []string{"team-a/svc-a"},
+			want:  []string{"team-a/" + serving.RuntimeName("p1")},
 		},
 		{
 			name:  "namespace-scope cache fans out to same-namespace consumers (namespace-profile shadow)",
 			cache: makeProfileCache("pc", testNamespace, "p1", aimv1alpha1.AIMResolutionScopeNamespace),
-			want:  []string{"team-a/svc-a"},
+			want:  []string{"team-a/" + serving.RuntimeName("p1")},
 		},
 	}
 
@@ -371,7 +379,7 @@ func TestFindInferenceServicesForProfileCache_ModelSlug(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// A per-profile consumer and a model-slug consumer for the same
 			// profile in the cache's namespace, plus noise that must be excluded:
-			// a different profile's runtime, and a slug consumer in another
+			// a different profile's ServingRuntime, and a slug consumer in another
 			// namespace (fan-out is confined to the cache's namespace).
 			perProfile := makeConsumerISVC("svc-per-profile", testNamespace, perProfileName)
 			slug := makeConsumerISVC("svc-slug", testNamespace, slugName)
@@ -379,10 +387,10 @@ func TestFindInferenceServicesForProfileCache_ModelSlug(t *testing.T) {
 			slugElsewhere := makeConsumerISVC("svc-slug-elsewhere", "team-b", slugName)
 
 			c := newRuntimeProjectionClient(t, tc.backing, perProfile, slug, otherProfile, slugElsewhere)
-			r := &InferenceServiceRuntimeReconciler{Client: c}
+			r := &RuntimeProjectionReconciler{Client: c}
 
 			got := r.findInferenceServicesForProfileCache(context.Background(), tc.cache)
-			assertRequestKeys(t, got, []string{"team-a/svc-per-profile", "team-a/svc-slug"})
+			assertRequestKeys(t, got, []string{"team-a/" + perProfileName, "team-a/" + slugName})
 		})
 	}
 }
@@ -399,11 +407,11 @@ func TestFindInferenceServicesForProfileCache_MissingBackingProfile(t *testing.T
 	slug := makeConsumerISVC("svc-slug", testNamespace, serving.ModelSlugRuntimeName(aimID))
 
 	c := newRuntimeProjectionClient(t, perProfile, slug)
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 
 	cache := makeProfileCache("pc", testNamespace, "p1", aimv1alpha1.AIMResolutionScopeCluster)
 	got := r.findInferenceServicesForProfileCache(context.Background(), cache)
-	assertRequestKeys(t, got, []string{"team-a/svc-per-profile"})
+	assertRequestKeys(t, got, []string{"team-a/" + serving.RuntimeName("p1")})
 }
 
 // TestFindInferenceServicesForProfileCache_LookupError pins the non-NotFound
@@ -433,11 +441,11 @@ func TestFindInferenceServicesForProfileCache_LookupError(t *testing.T) {
 			},
 		}).
 		Build()
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 
 	cache := makeProfileCache("pc", testNamespace, "p1", aimv1alpha1.AIMResolutionScopeCluster)
 	got := r.findInferenceServicesForProfileCache(context.Background(), cache)
-	assertRequestKeys(t, got, []string{"team-a/svc-per-profile"})
+	assertRequestKeys(t, got, []string{"team-a/" + serving.RuntimeName("p1")})
 }
 
 func TestFindInferenceServicesForManagedRuntimeObject(t *testing.T) {
@@ -447,7 +455,7 @@ func TestFindInferenceServicesForManagedRuntimeObject(t *testing.T) {
 	otherNamespaceConsumer := makeConsumerISVC("svc-b", "team-b", serving.RuntimeName("p1"))
 
 	c := newRuntimeProjectionClient(t, consumer, otherNamespaceConsumer)
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 
 	tests := []struct {
 		name string
@@ -457,12 +465,12 @@ func TestFindInferenceServicesForManagedRuntimeObject(t *testing.T) {
 		{
 			name: "managed shadow ServingRuntime maps to its same-namespace consumer",
 			obj:  makeManagedServingRuntime(serving.RuntimeName("p1"), testNamespace),
-			want: []string{"team-a/svc-a"},
+			want: []string{"team-a/" + serving.RuntimeName("p1")},
 		},
 		{
 			name: "managed shadow ConfigMap maps to its same-namespace consumer",
 			obj:  makeManagedConfigMap(serving.RuntimeName("p1"), testNamespace),
-			want: []string{"team-a/svc-a"},
+			want: []string{"team-a/" + serving.RuntimeName("p1")},
 		},
 		{
 			name: "unmanaged object (no managed-by label) is ignored",
@@ -542,7 +550,7 @@ func TestIsManagedRuntimeObject(t *testing.T) {
 func TestManagedRuntimeObjectPredicate(t *testing.T) {
 	t.Parallel()
 
-	managed := makeManagedServingRuntime(serving.RuntimeName("p1"), testNamespace)
+	managed := makeShadowServingRuntime(serving.RuntimeName("p1"), testNamespace, true)
 	unmanaged := &kservev1alpha1.ServingRuntime{
 		ObjectMeta: metav1.ObjectMeta{Name: serving.RuntimeName("p1"), Namespace: testNamespace},
 	}
@@ -558,6 +566,11 @@ func TestManagedRuntimeObjectPredicate(t *testing.T) {
 	}
 	if !p.Delete(event.DeleteEvent{Object: managed}) {
 		t.Error("Delete should fire for a managed object")
+	}
+	markerRemoved := managed.DeepCopy()
+	delete(markerRemoved.Labels, constants.LabelRuntimeProjection)
+	if !p.Update(event.UpdateEvent{ObjectOld: managed, ObjectNew: markerRemoved}) {
+		t.Error("Update should fire when drift removes the lazy marker")
 	}
 	// Unmanaged objects are ignored entirely.
 	if p.Update(event.UpdateEvent{ObjectOld: unmanaged, ObjectNew: unmanaged}) {
@@ -615,9 +628,8 @@ func TestClusterProfileProjectionPredicate(t *testing.T) {
 		})
 	}
 
-	// A profile delete never re-materializes the shadow (ownerRef GC handles it).
-	if p.Delete(event.DeleteEvent{Object: base}) {
-		t.Error("Delete should be filtered for cluster profiles")
+	if !p.Delete(event.DeleteEvent{Object: base}) {
+		t.Error("Delete should enqueue cluster-profile ServingRuntime keys")
 	}
 }
 
@@ -669,8 +681,8 @@ func TestInferenceServiceProjectionPredicate(t *testing.T) {
 
 // makeShadowServingRuntime builds a complete-looking managed ServingRuntime.
 // When lazy is true it carries the lazy-projection marker label (this
-// controller's own shadow); when false it stands in for a hand-authored runtime
-// (no marker) that must be deferred to.
+// controller's own shadow); when false it stands in for a hand-authored
+// ServingRuntime (no marker) that must be deferred to.
 func makeShadowServingRuntime(name, namespace string, lazy bool) *kservev1alpha1.ServingRuntime {
 	sr := makeManagedServingRuntime(name, namespace)
 	if lazy {
@@ -699,7 +711,7 @@ func TestOwnedByLazyProjection(t *testing.T) {
 	}{
 		{name: "lazy-projection marker is our shadow", label: constants.LabelValueRuntimeProjectionLazy, want: true},
 		{name: "eager-projection marker is not ours (defer)", label: constants.LabelValueRuntimeProjectionEager, want: false},
-		{name: "no marker is a hand-authored runtime (defer)", label: "", want: false},
+		{name: "no marker is a hand-authored ServingRuntime (defer)", label: "", want: false},
 	}
 
 	for _, tc := range tests {
@@ -716,13 +728,13 @@ func TestOwnedByLazyProjection(t *testing.T) {
 }
 
 // TestNamespaceRuntimeComplete guards the self-heal fix: an existing complete
-// runtime that is our own lazy shadow (carries the marker) must NOT be treated
-// as "complete" (so the reconcile re-applies it and reasserts drift / a late
-// cache / profile changes), while a complete runtime materialized by the profile
-// controller's eager projection or a hand-authored runtime (no marker) is
-// deferred to. The marker check — not ownerRef kind — is load-bearing because a
-// namespace-AIMProfile lazy shadow and a namespace AIMProfile eager projection
-// carry the same AIMProfile ownerReference.
+// ServingRuntime that is our own lazy shadow (carries the marker) must NOT be
+// treated as "complete" (so the reconcile re-applies it and reasserts drift, a
+// late cache, or profile changes), while a complete ServingRuntime materialized
+// by the profile controller's eager projection or a hand-authored ServingRuntime
+// (no marker) is deferred to. The marker check — not ownerRef kind — is
+// load-bearing because a namespace-AIMProfile lazy shadow and a namespace
+// AIMProfile eager projection carry the same AIMProfile ownerReference.
 func TestNamespaceRuntimeComplete(t *testing.T) {
 	t.Parallel()
 
@@ -764,7 +776,7 @@ func TestNamespaceRuntimeComplete(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newRuntimeProjectionClient(t, tc.objs...)
-			r := &InferenceServiceRuntimeReconciler{Client: c}
+			r := &RuntimeProjectionReconciler{Client: c}
 			got, err := r.namespaceRuntimeComplete(context.Background(), ns, name)
 			if err != nil {
 				t.Fatalf("namespaceRuntimeComplete() error = %v", err)
@@ -778,11 +790,12 @@ func TestNamespaceRuntimeComplete(t *testing.T) {
 
 // TestNamespaceRuntimeComplete_ConfigMapReadUsesAPIReader proves the colocated
 // ConfigMap read goes through APIReader, not the (label-scoped) cached client.
-// A hand-authored complete runtime's ConfigMap carries no managed-by label and
-// so is absent from the scoped cache; reading it via the cached client would
-// make the runtime look incomplete and the lazy path would wrongly shadow over
-// it. The reader split is simulated with two independent fake clients: the SR
-// in the cached client, the ConfigMap only in the APIReader.
+// A hand-authored complete ServingRuntime's ConfigMap carries no managed-by
+// label and so is absent from the scoped cache; reading it via the cached client
+// would make the ServingRuntime look incomplete and the lazy path would wrongly
+// shadow over it. The reader split is simulated with two independent fake
+// clients: the ServingRuntime in the cached client, the ConfigMap only in the
+// APIReader.
 func TestNamespaceRuntimeComplete_ConfigMapReadUsesAPIReader(t *testing.T) {
 	t.Parallel()
 
@@ -794,7 +807,7 @@ func TestNamespaceRuntimeComplete_ConfigMapReadUsesAPIReader(t *testing.T) {
 	// APIReader holds the colocated ConfigMap the scoped cache would not.
 	apiReader := newRuntimeProjectionClient(t, makeManagedConfigMap(name, ns))
 
-	r := &InferenceServiceRuntimeReconciler{Client: cached, APIReader: apiReader}
+	r := &RuntimeProjectionReconciler{Client: cached, APIReader: apiReader}
 	got, err := r.namespaceRuntimeComplete(context.Background(), ns, name)
 	if err != nil {
 		t.Fatalf("namespaceRuntimeComplete() error = %v", err)
@@ -803,10 +816,11 @@ func TestNamespaceRuntimeComplete_ConfigMapReadUsesAPIReader(t *testing.T) {
 		t.Fatal("expected complete=true: the ConfigMap must be read via APIReader, not the cached client")
 	}
 
-	// Control: with the ConfigMap absent from the APIReader too, the runtime is
-	// correctly seen as incomplete — confirming the ConfigMap read is not served
-	// from the cached client (which has no ConfigMap here either).
-	rNoCM := &InferenceServiceRuntimeReconciler{Client: cached, APIReader: newRuntimeProjectionClient(t)}
+	// Control: with the ConfigMap absent from the APIReader too, the
+	// ServingRuntime is correctly seen as incomplete — confirming the ConfigMap
+	// read is not served from the cached client (which has no ConfigMap here
+	// either).
+	rNoCM := &RuntimeProjectionReconciler{Client: cached, APIReader: newRuntimeProjectionClient(t)}
 	got, err = rNoCM.namespaceRuntimeComplete(context.Background(), ns, name)
 	if err != nil {
 		t.Fatalf("namespaceRuntimeComplete() error = %v", err)
@@ -818,9 +832,9 @@ func TestNamespaceRuntimeComplete_ConfigMapReadUsesAPIReader(t *testing.T) {
 
 // TestEagerMarkerSettlesOwnershipOnModeFlip is the deterministic proof that a
 // mode flip settles ownership. It drives the lazy reconcile's resolve ->
-// DesiredFor seam across a flip for a namespace-profile-backed runtime, using the
-// SAME hashed name for both projectors (hashing deliberately does NOT separate
-// them):
+// DesiredFor seam across a flip for a namespace-profile-backed ServingRuntime,
+// using the SAME hashed name for both projectors (hashing deliberately does NOT
+// separate them):
 //
 //   - Pre-flip (Reduced): only the lazy shadow exists (runtime-projection=lazy).
 //     namespaceRuntimeComplete is false, so the lazy path re-applies its shadow
@@ -868,8 +882,11 @@ func TestEagerMarkerSettlesOwnershipOnModeFlip(t *testing.T) {
 	resolveDesired := func(t *testing.T, objs ...client.Object) runtimeprojection.DesiredProjection {
 		t.Helper()
 		c := newRuntimeProjectionClient(t, objs...)
-		r := &InferenceServiceRuntimeReconciler{Client: c}
-		state, err := r.resolveState(context.Background(), isvc)
+		r := &RuntimeProjectionReconciler{Client: c}
+		state, err := r.resolveState(context.Background(), client.ObjectKey{
+			Namespace: isvc.Namespace,
+			Name:      runtimeprojection.ReferencedRuntimeName(isvc),
+		})
 		if err != nil {
 			t.Fatalf("resolveState() error = %v", err)
 		}
@@ -894,38 +911,40 @@ func TestEagerMarkerSettlesOwnershipOnModeFlip(t *testing.T) {
 			profile.DeepCopy(), isvc.DeepCopy(),
 			makeEagerServingRuntime(runtimeName, ns), configMap.DeepCopy())
 		if desired.Runtime != nil {
-			t.Fatalf("post-flip: the lazy path must defer once the eager projection owns the runtime, got %v", desired.Runtime.Name)
+			t.Fatalf("post-flip: the lazy path must defer once the eager projection owns the ServingRuntime, got %v", desired.Runtime.Name)
 		}
 	})
 
-	t.Run("reverse flip: surviving eager runtime is deferred to, not re-shadowed", func(t *testing.T) {
+	t.Run("reverse flip: surviving eager ServingRuntime is deferred to, not re-shadowed", func(t *testing.T) {
 		desired := resolveDesired(t,
 			profile.DeepCopy(), isvc.DeepCopy(),
 			makeEagerServingRuntime(runtimeName, ns), configMap.DeepCopy())
 		if desired.Runtime != nil {
-			t.Fatalf("reverse flip: a surviving eager runtime must not be re-shadowed, got %v", desired.Runtime.Name)
+			t.Fatalf("reverse flip: a surviving eager ServingRuntime must not be re-shadowed, got %v", desired.Runtime.Name)
 		}
 	})
 
-	t.Run("reverse flip: lazy is free to re-shadow once the eager runtime is gone", func(t *testing.T) {
-		// The eager per-profile SR was garbage-collected (e.g. profile deleted +
-		// recreated, or the runtime removed out of band). With no complete owner
-		// present, the lazy path re-materialises its own shadow, marked lazy.
+	t.Run("reverse flip: lazy is free to re-shadow once the eager ServingRuntime is gone", func(t *testing.T) {
+		// The eager per-profile ServingRuntime was garbage-collected (e.g.
+		// profile deleted and recreated, or the ServingRuntime removed out of
+		// band). With no complete owner present, the lazy path re-materialises
+		// its own shadow, marked lazy.
 		desired := resolveDesired(t, profile.DeepCopy(), isvc.DeepCopy())
 		if desired.Runtime == nil {
-			t.Fatalf("reverse flip: the lazy path must be free to re-shadow when no runtime exists")
+			t.Fatalf("reverse flip: the lazy path must be free to re-shadow when no ServingRuntime exists")
 		}
 		if got := desired.Runtime.Labels[constants.LabelRuntimeProjection]; got != constants.LabelValueRuntimeProjectionLazy {
-			t.Errorf("re-shadowed runtime marker = %q, want %q", got, constants.LabelValueRuntimeProjectionLazy)
+			t.Errorf("re-shadowed ServingRuntime marker = %q, want %q", got, constants.LabelValueRuntimeProjectionLazy)
 		}
 	})
 }
 
 // TestResolveState_NamespaceProfileBacking: a namespaced ISVC referencing the
-// hashed per-profile runtime resolves its namespace AIMProfile via the
+// hashed per-profile ServingRuntime resolves its namespace AIMProfile via the
 // AIMService-stamped annotation, and DesiredFor turns that into a complete
-// namespace ServingRuntime + ConfigMap owned by the profile — keeping a
-// Reduced-mode namespace-profile-backed service correct with no eager runtime.
+// namespaced ServingRuntime + ConfigMap owned by the profile — keeping a
+// Reduced-mode namespace-profile-backed service correct with no eager
+// ServingRuntime.
 //
 // The "no annotation" case pins the consequence of dropping the reverse
 // name-lookup resolver: hashed names aren't reversible, so an unannotated ISVC
@@ -971,9 +990,12 @@ func TestResolveState_NamespaceProfileBacking(t *testing.T) {
 			}
 
 			c := newRuntimeProjectionClient(t, profile.DeepCopy(), isvc)
-			r := &InferenceServiceRuntimeReconciler{Client: c}
+			r := &RuntimeProjectionReconciler{Client: c}
 
-			state, err := r.resolveState(context.Background(), isvc)
+			state, err := r.resolveState(context.Background(), client.ObjectKey{
+				Namespace: isvc.Namespace,
+				Name:      runtimeprojection.ReferencedRuntimeName(isvc),
+			})
 			if err != nil {
 				t.Fatalf("resolveState() error = %v", err)
 			}
@@ -1008,10 +1030,10 @@ func TestResolveState_NamespaceProfileBacking(t *testing.T) {
 				t.Fatalf("DesiredFor() error = %v", err)
 			}
 			if desired.Runtime == nil || desired.ConfigMap == nil {
-				t.Fatalf("expected a runtime and ConfigMap, got runtime=%v configMap=%v", desired.Runtime, desired.ConfigMap)
+				t.Fatalf("expected a ServingRuntime and ConfigMap, got servingRuntime=%v configMap=%v", desired.Runtime, desired.ConfigMap)
 			}
 			if desired.Runtime.Name != runtimeName || desired.Runtime.Namespace != testNamespace {
-				t.Errorf("runtime = %s/%s, want %s/%s", desired.Runtime.Namespace, desired.Runtime.Name, testNamespace, runtimeName)
+				t.Errorf("ServingRuntime = %s/%s, want %s/%s", desired.Runtime.Namespace, desired.Runtime.Name, testNamespace, runtimeName)
 			}
 			if _, ok := desired.Owner.(*aimv1alpha2.AIMProfile); !ok {
 				t.Fatalf("expected owner to be the namespace AIMProfile, got %T", desired.Owner)
@@ -1024,9 +1046,10 @@ func TestResolveState_NamespaceProfileBacking(t *testing.T) {
 }
 
 // TestResolveState_ManagedClusterRuntimeBacking pins the native, annotation-free
-// resolution path: an ISVC referencing a managed ClusterServingRuntime resolves
-// the backing AIMClusterProfile via the CSR's profile correlator (ownerRef /
-// label), and DesiredFor shadows it into a complete namespace runtime.
+// resolution path: a KServe InferenceService referencing a managed
+// ClusterServingRuntime resolves the backing AIMClusterProfile via that
+// ClusterServingRuntime's profile correlator (ownerRef/label), and DesiredFor
+// shadows it into a complete namespaced ServingRuntime.
 func TestResolveState_ManagedClusterRuntimeBacking(t *testing.T) {
 	t.Parallel()
 
@@ -1051,8 +1074,9 @@ func TestResolveState_ManagedClusterRuntimeBacking(t *testing.T) {
 	}
 
 	// The managed ClusterServingRuntime carries the profile correlator label,
-	// which is how the native resolver maps the referenced runtime back to its
-	// backing cluster profile (no annotation, no name parsing).
+	// which is how the native resolver maps the referenced
+	// ClusterServingRuntime back to its backing cluster profile (no annotation,
+	// no name parsing).
 	managedCSR := &kservev1alpha1.ClusterServingRuntime{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: runtimeName,
@@ -1065,9 +1089,12 @@ func TestResolveState_ManagedClusterRuntimeBacking(t *testing.T) {
 
 	isvc := makeConsumerISVC("consumer", testNamespace, runtimeName)
 	c := newRuntimeProjectionClient(t, profile, managedCSR, isvc)
-	r := &InferenceServiceRuntimeReconciler{Client: c}
+	r := &RuntimeProjectionReconciler{Client: c}
 
-	state, err := r.resolveState(context.Background(), isvc)
+	state, err := r.resolveState(context.Background(), client.ObjectKey{
+		Namespace: isvc.Namespace,
+		Name:      runtimeprojection.ReferencedRuntimeName(isvc),
+	})
 	if err != nil {
 		t.Fatalf("resolveState() error = %v", err)
 	}
@@ -1088,10 +1115,10 @@ func TestResolveState_ManagedClusterRuntimeBacking(t *testing.T) {
 		t.Fatalf("DesiredFor() error = %v", err)
 	}
 	if desired.Runtime == nil || desired.ConfigMap == nil {
-		t.Fatalf("expected a runtime and ConfigMap, got runtime=%v configMap=%v", desired.Runtime, desired.ConfigMap)
+		t.Fatalf("expected a ServingRuntime and ConfigMap, got servingRuntime=%v configMap=%v", desired.Runtime, desired.ConfigMap)
 	}
 	if desired.Runtime.Name != runtimeName || desired.Runtime.Namespace != testNamespace {
-		t.Errorf("runtime = %s/%s, want %s/%s", desired.Runtime.Namespace, desired.Runtime.Name, testNamespace, runtimeName)
+		t.Errorf("ServingRuntime = %s/%s, want %s/%s", desired.Runtime.Namespace, desired.Runtime.Name, testNamespace, runtimeName)
 	}
 	if desired.Owner == nil || desired.Owner.GetName() != profileName {
 		t.Errorf("owner = %v, want %q", desired.Owner, profileName)
@@ -1109,15 +1136,210 @@ func TestProfileCacheProjectionPredicate(t *testing.T) {
 	becameReady := base.DeepCopy()
 	becameReady.Status.Status = constants.AIMStatusReady
 
+	becameDedicated := base.DeepCopy()
+	becameDedicated.Generation++
+	becameDedicated.Spec.Mode = aimv1alpha2.ProfileCacheModeDedicated
+
 	cosmetic := base.DeepCopy()
 
 	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: becameReady}) {
 		t.Error("Update should fire when the cache becomes Ready")
+	}
+	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: becameDedicated}) {
+		t.Error("Update should fire when a spec change removes the cache from shared runtime projection")
 	}
 	if p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: cosmetic}) {
 		t.Error("Update should be filtered for a cosmetic cache write")
 	}
 	if !p.Delete(event.DeleteEvent{Object: base}) {
 		t.Error("Delete should fire so the cache mount is reverted")
+	}
+}
+
+func lazyProfileOwner(profile runtimeprojection.BackingProfile) metav1.OwnerReference {
+	kind := clusterProfileKind
+	if _, ok := profile.(*aimv1alpha2.AIMProfile); ok {
+		kind = namespaceProfileKind
+	}
+	return metav1.OwnerReference{
+		APIVersion: aimv1alpha2.GroupVersion.String(),
+		Kind:       kind,
+		Name:       profile.GetName(),
+		UID:        profile.GetUID(),
+		Controller: ptr.To(true),
+	}
+}
+
+func makeLazyConfigMap(name, namespace string) *corev1.ConfigMap {
+	cm := makeManagedConfigMap(name, namespace)
+	cm.Labels[constants.LabelRuntimeProjection] = constants.LabelValueRuntimeProjectionLazy
+	return cm
+}
+
+func TestRuntimeKeyForInferenceService(t *testing.T) {
+	t.Parallel()
+
+	runtimeName := serving.RuntimeName("p1")
+	isvc := makeConsumerISVC("isvc-name-must-not-be-the-key", testNamespace, runtimeName)
+	assertRequestKeys(t, runtimeKeyForInferenceService(context.Background(), isvc), []string{
+		testNamespace + "/" + runtimeName,
+	})
+
+	if got := runtimeKeyForInferenceService(context.Background(), makeConsumerISVC("foreign", testNamespace, "hand-authored")); got != nil {
+		t.Fatalf("foreign ServingRuntime name mapped to requests: %v", requestKeys(got))
+	}
+}
+
+func TestProfileFanoutIncludesInactiveOwnedShadowsAndDedupes(t *testing.T) {
+	t.Parallel()
+
+	profile := makeClusterProfileWithAimID("p1", "Qwen/Qwen3-0.6B")
+	profile.UID = currentProfileUID
+	perProfileName := serving.RuntimeName(profile.Name)
+	slugName := serving.ModelSlugRuntimeName(profile.Spec.AimId)
+	owner := lazyProfileOwner(profile)
+
+	active := makeConsumerISVC("active", testNamespace, perProfileName)
+	activeSR := makeShadowServingRuntime(perProfileName, testNamespace, true)
+	activeSR.OwnerReferences = []metav1.OwnerReference{owner}
+	activeCM := makeLazyConfigMap(perProfileName, testNamespace)
+	activeCM.OwnerReferences = []metav1.OwnerReference{owner}
+
+	inactiveSR := makeShadowServingRuntime(slugName, "team-b", true)
+	inactiveSR.OwnerReferences = []metav1.OwnerReference{owner}
+	inactiveCM := makeLazyConfigMap(slugName, "team-b")
+	inactiveCM.OwnerReferences = []metav1.OwnerReference{owner}
+
+	staleOwner := owner
+	staleOwner.UID = "profile-old"
+	stale := makeShadowServingRuntime(serving.RuntimeName("stale"), "team-c", true)
+	stale.OwnerReferences = []metav1.OwnerReference{staleOwner}
+
+	r := &RuntimeProjectionReconciler{Client: newRuntimeProjectionClient(
+		t, active, activeSR, activeCM, inactiveSR, inactiveCM, stale,
+	)}
+	got := r.findInferenceServicesForClusterProfile(context.Background(), profile)
+	assertRequestKeys(t, got, []string{
+		testNamespace + "/" + perProfileName,
+		"team-b/" + slugName,
+	})
+}
+
+func TestCacheFanoutIncludesInactiveModelSlugShadow(t *testing.T) {
+	t.Parallel()
+
+	profile := makeClusterProfileWithAimID("p1", "Qwen/Qwen3-0.6B")
+	profile.UID = currentProfileUID
+	perProfileName := serving.RuntimeName(profile.Name)
+	slugName := serving.ModelSlugRuntimeName(profile.Spec.AimId)
+	owner := lazyProfileOwner(profile)
+
+	active := makeConsumerISVC("active", testNamespace, perProfileName)
+	inactiveSlug := makeShadowServingRuntime(slugName, testNamespace, true)
+	inactiveSlug.OwnerReferences = []metav1.OwnerReference{owner}
+	elsewhere := makeShadowServingRuntime(slugName, "team-b", true)
+	elsewhere.OwnerReferences = []metav1.OwnerReference{owner}
+
+	r := &RuntimeProjectionReconciler{Client: newRuntimeProjectionClient(t, profile, active, inactiveSlug, elsewhere)}
+	cache := makeProfileCache("cache", testNamespace, profile.Name, aimv1alpha1.AIMResolutionScopeCluster)
+	got := r.findInferenceServicesForProfileCache(context.Background(), cache)
+	assertRequestKeys(t, got, []string{
+		testNamespace + "/" + perProfileName,
+		testNamespace + "/" + slugName,
+	})
+}
+
+func TestResolveState_OwnerFromEitherPartialLazySibling(t *testing.T) {
+	t.Parallel()
+
+	profile := makeClusterProfileWithAimID("p1", "Qwen/Qwen3-0.6B")
+	profile.UID = currentProfileUID
+	runtimeName := serving.RuntimeName(profile.Name)
+	owner := lazyProfileOwner(profile)
+
+	sr := makeShadowServingRuntime(runtimeName, testNamespace, true)
+	sr.OwnerReferences = []metav1.OwnerReference{owner}
+	cm := makeLazyConfigMap(runtimeName, testNamespace)
+	cm.OwnerReferences = []metav1.OwnerReference{owner}
+
+	tests := []struct {
+		name string
+		obj  client.Object
+	}{
+		{name: "ServingRuntime remains", obj: sr},
+		{name: "ConfigMap remains", obj: cm},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &RuntimeProjectionReconciler{Client: newRuntimeProjectionClient(t, profile.DeepCopyObject().(client.Object), tc.obj)}
+			key := client.ObjectKey{Namespace: testNamespace, Name: runtimeName}
+			state, err := r.resolveState(context.Background(), key)
+			if err != nil {
+				t.Fatalf("resolveState() error = %v", err)
+			}
+			if state.ExistingShadowProfile == nil || state.ExistingShadowProfile.GetUID() != profile.UID {
+				t.Fatalf("existing owner = %v, want profile UID %q", state.ExistingShadowProfile, profile.UID)
+			}
+			desired, err := runtimeprojection.DesiredForRuntime(key.Namespace, key.Name, state)
+			if err != nil {
+				t.Fatalf("DesiredForRuntime() error = %v", err)
+			}
+			if desired.Runtime == nil || desired.ConfigMap == nil {
+				t.Fatalf("partial deletion must recreate both siblings, got servingRuntime=%v configMap=%v", desired.Runtime, desired.ConfigMap)
+			}
+		})
+	}
+}
+
+func TestResolveState_RejectsRecreatedSameNameOwner(t *testing.T) {
+	t.Parallel()
+
+	profile := makeClusterProfileWithAimID("p1", "")
+	profile.UID = "profile-new"
+	runtimeName := serving.RuntimeName(profile.Name)
+	shadow := makeShadowServingRuntime(runtimeName, testNamespace, true)
+	shadow.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: aimv1alpha2.GroupVersion.String(),
+		Kind:       clusterProfileKind,
+		Name:       profile.Name,
+		UID:        "profile-old",
+	}}
+
+	r := &RuntimeProjectionReconciler{Client: newRuntimeProjectionClient(t, profile, shadow)}
+	state, err := r.resolveState(context.Background(), client.ObjectKey{Namespace: testNamespace, Name: runtimeName})
+	if err != nil {
+		t.Fatalf("resolveState() error = %v", err)
+	}
+	if state.BackingProfile() != nil {
+		t.Fatalf("stale same-name owner resolved to recreated profile: %v", state.BackingProfile())
+	}
+}
+
+func TestResolveState_FullyGoneInactiveRuntimeDoesNotBootstrapFromCSR(t *testing.T) {
+	t.Parallel()
+
+	profile := makeClusterProfileWithAimID("p1", "")
+	runtimeName := serving.RuntimeName(profile.Name)
+	csr := &kservev1alpha1.ClusterServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: runtimeName,
+			Labels: map[string]string{
+				constants.LabelK8sManagedBy: constants.LabelValueManagedBy,
+				constants.LabelProfile:      profile.Name,
+			},
+		},
+	}
+	r := &RuntimeProjectionReconciler{Client: newRuntimeProjectionClient(t, profile, csr)}
+	key := client.ObjectKey{Namespace: testNamespace, Name: runtimeName}
+	state, err := r.resolveState(context.Background(), key)
+	if err != nil {
+		t.Fatalf("resolveState() error = %v", err)
+	}
+	desired, err := runtimeprojection.DesiredForRuntime(key.Namespace, key.Name, state)
+	if err != nil {
+		t.Fatalf("DesiredForRuntime() error = %v", err)
+	}
+	if desired.Runtime != nil {
+		t.Fatalf("fully gone inactive ServingRuntime was resurrected: %v", desired.Runtime)
 	}
 }

@@ -1,0 +1,18 @@
+# Deployable cluster profile with a simulated model download. It has no
+# accelerator requirement, so the test runs in kind and GPU environments.
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMClusterProfile
+metadata:
+  name: test-shared-projection-labels
+spec:
+  aimId: test/shared-projection-labels
+  modelId: Qwen/Qwen3-0.6B
+  engine: vllm
+  metric: latency
+  precision: bf16
+  type: unoptimized
+  image: registry.example.com/aim-cpu-base:0.12.0
+  modelSources:
+    - modelId: Qwen/Qwen3-0.6B
+      sourceUri: hf://Qwen/Qwen3-0.6B
+      size: 1Gi

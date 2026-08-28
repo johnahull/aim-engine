@@ -39,6 +39,7 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/runtimeprojection"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
 
@@ -207,8 +208,33 @@ func TestProfilePlanResources_ProjectsNamespaceRuntime(t *testing.T) {
 		t.Errorf("runtime missing %s framework env", constants.EnvAIMProfileID)
 	}
 	// The colocated ConfigMap is also force-applied and named after the runtime.
-	if !hasConfigMap(force, wantName, profile.Namespace) {
-		t.Errorf("expected colocated ConfigMap %q in force bucket", wantName)
+	cm := findConfigMap(t, force, wantName, profile.Namespace)
+
+	// AIMService and the lazy projection controller rebuild expected content
+	// from profile status. That independently-built projection must have exactly
+	// the same hash as the eager producer or the freshness gate cannot converge.
+	profile.Status.Resources = obs.resolvedResources
+	profile.Status.ResolvedNodeAffinity = affinity
+	lazy, err := runtimeprojection.DesiredForRuntime(
+		profile.Namespace,
+		wantName,
+		runtimeprojection.ProjectionState{AnnotatedProfile: profile},
+	)
+	if err != nil {
+		t.Fatalf("build equivalent lazy projection: %v", err)
+	}
+	if lazy.Runtime == nil || lazy.ConfigMap == nil {
+		t.Fatal("equivalent lazy projection did not produce both siblings")
+	}
+	for name, got := range map[string]string{
+		"eager ServingRuntime": sr.Annotations[constants.AnnotationRuntimeProjectionContentHash],
+		"eager ConfigMap":      cm.Annotations[constants.AnnotationRuntimeProjectionContentHash],
+		"lazy ServingRuntime":  lazy.Runtime.Annotations[constants.AnnotationRuntimeProjectionContentHash],
+		"lazy ConfigMap":       lazy.ConfigMap.Annotations[constants.AnnotationRuntimeProjectionContentHash],
+	} {
+		if got != sr.Annotations[constants.AnnotationRuntimeProjectionContentHash] {
+			t.Errorf("%s content hash = %q, want %q", name, got, sr.Annotations[constants.AnnotationRuntimeProjectionContentHash])
+		}
 	}
 }
 
@@ -504,11 +530,9 @@ func TestProfilePlanResources_GatesBlockProjection(t *testing.T) {
 }
 
 // TestProfilePlanResources_AsymmetricTeardownIsAdditive pins the additive
-// asymmetric teardown: once the projection gate flips false the plan STOPS
-// emitting the runtime (it is not in the force-apply bucket) and never deletes
-// it. A previously-projected runtime survives because the apply pipeline prunes
-// only plan.Delete objects (reconciler.go Phase 5) — a kept runtime needs no
-// re-apply. Removal happens only via ownerRef GC on profile delete.
+// asymmetric teardown: a gate-false profile that never projected emits nothing,
+// while a retained projection is reasserted so its content cannot go stale.
+// Neither case deletes; removal happens only via ownerRef GC on profile delete.
 func TestProfilePlanResources_AsymmetricTeardownIsAdditive(t *testing.T) {
 	spec := gpuSpec()
 	profile := &aimv1alpha2.AIMProfile{
@@ -520,19 +544,43 @@ func TestProfilePlanResources_AsymmetricTeardownIsAdditive(t *testing.T) {
 		resolvedResources: ResolveResources(spec.AcceleratorType, spec.AcceleratorCount, nil, spec.AcceleratorModel, nil),
 		deployable:        true,
 		projectable:       false,
+		yamlContract:      profileyaml.CanonicalContract(&spec),
 	}
 	obs.profile = profile
 
 	r := &ProfileReconciler{ProjectionMode: aimv1alpha2.RuntimeProjectionModeExhaustive}
 	plan := r.PlanResources(context.Background(), controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile}, obs)
 	if n := countServingRuntimes(plan.GetToApplyWithForce()); n != 0 {
-		t.Fatalf("additive teardown: gate-false must stop emitting the runtime, got %d applies", n)
+		t.Fatalf("additive teardown: never-projected gate-false profile emitted %d runtimes", n)
 	}
 	if n := len(plan.GetToApply()); n != 0 {
 		t.Fatalf("additive teardown: gate-false must not queue the runtime for apply, got %d", n)
 	}
 	if n := len(plan.GetToDelete()); n != 0 {
 		t.Fatalf("asymmetric teardown must never delete the runtime, got %d deletes", n)
+	}
+
+	profile.Status.ProjectedRuntimeName = serving.RuntimeName(profile.Name)
+	obs = r.ComposeState(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile},
+		ProfileFetchResult{profile: profile},
+	)
+	if obs.projectable {
+		t.Fatal("test precondition: retained profile must no longer be projectable")
+	}
+	if obs.projectionErr != nil {
+		t.Fatalf("retained projection contract/build validation failed: %v", obs.projectionErr)
+	}
+	if err := obs.yamlContract.Validate(); err != nil {
+		t.Fatalf("retained projection must compose a valid YAML contract: %v", err)
+	}
+	plan = r.PlanResources(context.Background(), controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile}, obs)
+	if n := countServingRuntimes(plan.GetToApplyWithForce()); n != 1 {
+		t.Fatalf("additive teardown: retained projection must be reasserted, got %d runtimes", n)
+	}
+	if n := len(plan.GetToDelete()); n != 0 {
+		t.Fatalf("asymmetric teardown must never delete the retained runtime, got %d deletes", n)
 	}
 }
 
@@ -583,8 +631,9 @@ func TestClusterProfilePlanResources_ProjectsClusterRuntime(t *testing.T) {
 }
 
 // TestClusterProfilePlanResources_GatesAndTeardown pins gate-blocking and
-// additive asymmetric teardown for the cluster path: a projectable profile
-// projects the CSR, and a gate flip stops emitting it without ever deleting it.
+// additive asymmetric teardown for the cluster path: a never-projected profile
+// emits nothing after a gate failure, while a retained CSR is reasserted and
+// never explicitly deleted.
 func TestClusterProfilePlanResources_GatesAndTeardown(t *testing.T) {
 	spec := gpuSpec()
 	build := func(projectable bool) (*ClusterProfileReconciler, controllerutils.ReconcileContext[*aimv1alpha2.AIMClusterProfile], ClusterProfileObservation) {
@@ -610,7 +659,7 @@ func TestClusterProfilePlanResources_GatesAndTeardown(t *testing.T) {
 		}
 	})
 
-	t.Run("gate false stops emitting and never deletes (additive teardown)", func(t *testing.T) {
+	t.Run("never-projected gate false stops emitting and never deletes", func(t *testing.T) {
 		r, rc, obs := build(false)
 		plan := r.PlanResources(context.Background(), rc, obs)
 		if n := countClusterServingRuntimes(plan.GetToApplyWithForce()); n != 0 {
@@ -620,13 +669,37 @@ func TestClusterProfilePlanResources_GatesAndTeardown(t *testing.T) {
 			t.Fatalf("must never delete the runtime, got %d deletes", n)
 		}
 	})
+
+	t.Run("retained gate-false projection is reasserted after switch to Reduced", func(t *testing.T) {
+		r, rc, _ := build(false)
+		r.ProjectionMode = aimv1alpha2.RuntimeProjectionModeReduced
+		rc.Object.Status.ProjectedRuntimeName = serving.RuntimeName(rc.Object.Name)
+		obs := r.ComposeState(
+			context.Background(),
+			rc,
+			ClusterProfileFetchResult{profile: rc.Object},
+		)
+		if obs.projectable {
+			t.Fatal("test precondition: retained cluster profile must no longer be projectable")
+		}
+		if obs.projectionErr != nil {
+			t.Fatalf("retained cluster projection validation failed: %v", obs.projectionErr)
+		}
+		plan := r.PlanResources(context.Background(), rc, obs)
+		if n := countClusterServingRuntimes(plan.GetToApplyWithForce()); n != 1 {
+			t.Fatalf("retained cluster runtime must be reasserted, got %d applies", n)
+		}
+		if n := len(plan.GetToDelete()); n != 0 {
+			t.Fatalf("must never delete the retained runtime, got %d deletes", n)
+		}
+	})
 }
 
-// TestProjectionDisabledWhenReduced pins that Reduced mode never projects a
-// per-profile runtime: a non-primary projectable profile (gpuSpec defaults to
-// primary=false) yields no runtime at all, since Reduced publishes only the
-// model-slug primary and this profile is not its model's primary.
-func TestProjectionDisabledWhenReduced(t *testing.T) {
+// TestReducedModeCreatesNoNewPerProfileRuntimeButMaintainsRetained pins the
+// additive mode-flip lifecycle: Reduced does not create a per-profile runtime,
+// but it keeps reasserting one previously published by Exhaustive/Both so the
+// eager marker never strands stale content that the lazy controller defers to.
+func TestReducedModeCreatesNoNewPerProfileRuntimeButMaintainsRetained(t *testing.T) {
 	spec := gpuSpec()
 	profile := &aimv1alpha2.AIMProfile{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
@@ -639,6 +712,27 @@ func TestProjectionDisabledWhenReduced(t *testing.T) {
 	plan := r.PlanResources(context.Background(), controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile}, obs)
 	if n := countServingRuntimes(plan.GetToApplyWithForce()); n != 0 {
 		t.Fatalf("Reduced mode must not project per-profile runtimes for a non-primary profile, got %d", n)
+	}
+
+	profile.Status.ProjectedRuntimeName = serving.RuntimeName(profile.Name)
+	obs = r.ComposeState(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile},
+		ProfileFetchResult{profile: profile},
+	)
+	if obs.projectionErr != nil {
+		t.Fatalf("compose retained Reduced-mode projection: %v", obs.projectionErr)
+	}
+	plan = r.PlanResources(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile},
+		obs,
+	)
+	if n := countServingRuntimes(plan.GetToApplyWithForce()); n != 1 {
+		t.Fatalf("Reduced mode must maintain the retained per-profile runtime, got %d applies", n)
+	}
+	if runtime := findServingRuntime(t, plan.GetToApplyWithForce()); runtime.Name != profile.Status.ProjectedRuntimeName {
+		t.Fatalf("maintained runtime name = %q, want retained %q", runtime.Name, profile.Status.ProjectedRuntimeName)
 	}
 }
 

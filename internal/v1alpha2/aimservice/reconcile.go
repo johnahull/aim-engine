@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	kservev1alpha1 "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	servingv1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -51,6 +52,14 @@ import (
 	aimruntimeconfig "github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimruntimeconfig"
 	v1alpha1service "github.com/amd-enterprise-ai/aim-engine/internal/v1alpha1/aimservice"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofile"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profilecache"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/runtimeprojection"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
+)
+
+const (
+	reasonFetchError           = "FetchError"
+	serviceControllerNameLabel = constants.AimLabelDomain + "/service.name"
 )
 
 // ProfileServiceReconciler implements the domain logic for profile-based
@@ -62,8 +71,8 @@ type ProfileServiceReconciler struct {
 	Recorder record.EventRecorder
 }
 
-// GetApplyOptions returns apply options derived from the merged runtime
-// config so label propagation rules are honoured on child resources
+// GetApplyOptions returns apply options derived from the merged
+// AIMRuntimeConfig so label propagation rules are honoured on child resources
 // (InferenceService, HTTPRoute, ConfigMap, AIMProfileCache).
 func (r *ProfileServiceReconciler) GetApplyOptions(obs ServiceObservation) controllerutils.ApplyOptions {
 	return aimruntimeconfig.GetApplyOptions(obs.mergedRuntimeConfig.Value)
@@ -84,7 +93,12 @@ type ServiceFetchResult struct {
 	// alphabetical winner") to surface through getProfileHealth.
 	resolution profileResolution
 
-	profileCache controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]
+	// profileCache follows the service's requested cache mode and is used for
+	// service-level cache readiness. runtimeProfileCache is always the Ready
+	// Shared cache selected by runtime producers, including for Dedicated
+	// services, so freshness checks rebuild the same projection content.
+	profileCache        controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]
+	runtimeProfileCache controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]
 
 	inferenceService     controllerutils.FetchResult[*servingv1beta1.InferenceService]
 	inferenceServicePods *controllerutils.FetchResult[*corev1.PodList]
@@ -94,10 +108,19 @@ type ServiceFetchResult struct {
 
 	// legacyProfileConfigMap is the legacy inline-predictor service-owned profile
 	// ConfigMap (<service>-profile-<hash>), fetched so PlanResources can
-	// garbage-collect it when a service that predates the runtime-reference
+	// garbage-collect it when a service that predates the ServingRuntime-reference
 	// rewrite is reconciled by the new operator. Absent (IsNotFound) for
 	// services created after the rewrite, in which case cleanup is a no-op.
 	legacyProfileConfigMap controllerutils.FetchResult[*corev1.ConfigMap]
+
+	// profileRuntime and profileRuntimeConfigMap must both exist before a new
+	// InferenceService references a cluster profile's bare ClusterServingRuntime.
+	// Without this precondition, KServe can render the first predictor revision
+	// from the bare ClusterServingRuntime before the lazy ServingRuntime
+	// projection controller has
+	// materialised the profile volume.
+	profileRuntime          controllerutils.FetchResult[*kservev1alpha1.ServingRuntime]
+	profileRuntimeConfigMap controllerutils.FetchResult[*corev1.ConfigMap]
 
 	mergedRuntimeConfig controllerutils.FetchResult[*aimv1alpha1.AIMRuntimeConfigCommon]
 
@@ -145,12 +168,20 @@ type ServiceObservation struct {
 
 	// Pre-computed names and profile artefacts, produced once in ComposeState
 	// so the InferenceService name and the profile YAML filename wired into the
-	// runtime env cannot drift between planning and status decoration. On
-	// failure these stay empty and configErr is set, which getConfigHealth
-	// surfaces as an InvalidSpec condition on the AIMService.
+	// AIM model-serving process environment cannot drift between planning and
+	// status decoration. On failure these stay empty and configErr is set, which
+	// getConfigHealth surfaces as an InvalidSpec condition on the AIMService.
 	isvcName         string
 	profileYAMLName  string
 	profileAssembled bool
+
+	// desiredProfileRuntime and desiredProfileRuntimeConfigMap represent the
+	// current profile/cache projection. Their shared content hash gates
+	// InferenceService reconciliation until both observed siblings match.
+	// PlanResources applies missing resources, while the projection controller
+	// converges stale existing resources under its own field manager.
+	desiredProfileRuntime          *kservev1alpha1.ServingRuntime
+	desiredProfileRuntimeConfigMap *corev1.ConfigMap
 
 	// configErr records failures encountered while deriving profile-dependent
 	// artefacts (e.g. ISVC name generation, profile YAML assembly). It is
@@ -206,6 +237,9 @@ func (obs ServiceObservation) GetComponentHealth(ctx context.Context, clientset 
 	}
 
 	health = append(health, obs.getProfileHealth())
+	if runtimeHealth := obs.getProfileRuntimeHealth(); runtimeHealth.Component != "" {
+		health = append(health, runtimeHealth)
+	}
 
 	if obs.mergedRuntimeConfig.Value != nil || obs.mergedRuntimeConfig.Error != nil {
 		health = append(health, obs.mergedRuntimeConfig.ToUpstreamComponentHealth(
@@ -321,7 +355,7 @@ func (obs ServiceObservation) getProfileCacheHealth() controllerutils.ComponentH
 			return health
 		}
 		health.State = constants.AIMStatusFailed
-		health.Reason = "FetchError"
+		health.Reason = reasonFetchError
 		health.Message = obs.profileCache.Error.Error()
 		health.Errors = []error{obs.profileCache.Error}
 		return health
@@ -346,6 +380,71 @@ func (obs ServiceObservation) getProfileCacheHealth() controllerutils.ComponentH
 			break
 		}
 	}
+	return health
+}
+
+func (obs ServiceObservation) getProfileRuntimeHealth() controllerutils.ComponentHealth {
+	if !obs.profileRuntimeFetched() ||
+		obs.resolvedProfileSpec == nil ||
+		!obs.profileReadyForService() {
+		return controllerutils.ComponentHealth{}
+	}
+	if obs.hasModelSources && !obs.profileCacheReady {
+		return controllerutils.ComponentHealth{}
+	}
+
+	health := controllerutils.ComponentHealth{
+		Component:      "ProfileRuntime",
+		DependencyType: controllerutils.DependencyTypeDownstream,
+	}
+	if hasUnexpectedFetchError(obs.runtimeProfileCache.Error) {
+		health.Errors = append(
+			health.Errors,
+			fmt.Errorf("resolve Shared AIMProfileCache for projected runtime: %w", obs.runtimeProfileCache.Error),
+		)
+	}
+	results := []struct {
+		name  string
+		err   error
+		found bool
+	}{
+		{name: "ServingRuntime", err: obs.profileRuntime.Error, found: obs.profileRuntime.Value != nil},
+		{name: "ConfigMap", err: obs.profileRuntimeConfigMap.Error, found: obs.profileRuntimeConfigMap.Value != nil},
+	}
+
+	// Inspect both lookups before reporting ordinary materialization progress.
+	// One missing sibling must not hide an infrastructure/RBAC failure fetching
+	// the other sibling.
+	for _, result := range results {
+		if hasUnexpectedFetchError(result.err) {
+			health.Errors = append(health.Errors, fmt.Errorf("fetch projected profile %s: %w", result.name, result.err))
+		}
+	}
+	if len(health.Errors) > 0 {
+		health.State = constants.AIMStatusFailed
+		health.Reason = reasonFetchError
+		health.Message = "Failed to resolve projected profile runtime dependencies"
+		return health
+	}
+
+	for _, result := range results {
+		if !result.found {
+			health.State = constants.AIMStatusProgressing
+			health.Reason = "ProfileRuntimeMaterializing"
+			health.Message = "Materializing profile ServingRuntime and ConfigMap before creating the InferenceService"
+			return health
+		}
+	}
+	if !obs.profileRuntimeCurrent() {
+		health.State = constants.AIMStatusProgressing
+		health.Reason = "ProfileRuntimeConverging"
+		health.Message = "Waiting for the profile ServingRuntime and ConfigMap to reflect the current profile and cache state"
+		return health
+	}
+
+	health.State = constants.AIMStatusReady
+	health.Reason = "ProfileRuntimeReady"
+	health.Message = "Profile ServingRuntime and ConfigMap are ready"
 	return health
 }
 
@@ -452,7 +551,7 @@ func (obs ServiceObservation) getInferenceServiceHealth() controllerutils.Compon
 			return health
 		}
 		health.State = constants.AIMStatusFailed
-		health.Reason = "FetchError"
+		health.Reason = reasonFetchError
 		health.Message = obs.inferenceService.Error.Error()
 		health.Errors = []error{obs.inferenceService.Error}
 		return health
@@ -474,8 +573,8 @@ func (obs ServiceObservation) getInferenceServiceHealth() controllerutils.Compon
 	return health
 }
 
-// FetchRemoteState fetches profile, profile cache, runtime config, and existing
-// downstream resources for a profile-based AIMService.
+// FetchRemoteState fetches the profile, profile cache, AIMRuntimeConfig, and
+// existing downstream resources for a profile-based AIMService.
 func (r *ProfileServiceReconciler) FetchRemoteState(
 	ctx context.Context,
 	c client.Client,
@@ -519,7 +618,8 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 
 	// If the resolver picked a candidate, fetch any service-owned overlay
 	// derived from it (so ComposeState can switch downstream resolution
-	// onto the overlay) and the AIMProfileCache feeding the runtime.
+	// onto the overlay) and the AIMProfileCache feeding the projected
+	// ServingRuntime.
 	seedObs := ServiceObservation{ServiceFetchResult: result}
 	seedObs.resolveFetchedProfile()
 	resourceMatchSpec := seedObs.resolvedProfileSpec
@@ -542,6 +642,31 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 			}
 		}
 		result.profileCache = fetchProfileCache(ctx, c, service, cacheProfileName, cacheProfileScope)
+		runtimeCache, runtimeCacheErr := profilecache.FindReadyShared(
+			ctx,
+			c,
+			service.Namespace,
+			cacheProfileName,
+			cacheProfileScope,
+		)
+		result.runtimeProfileCache = controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]{
+			Value: runtimeCache,
+			Error: runtimeCacheErr,
+		}
+
+		// Fetch both namespaced projection resources before planning the ISVC.
+		// Cluster profiles only project a bare ClusterServingRuntime eagerly; the
+		// namespaced ServingRuntime and ConfigMap must be present first so KServe
+		// cannot render an initial pod without the profile mount.
+		runtimeName := serving.RuntimeName(cacheProfileName)
+		result.profileRuntime = controllerutils.Fetch(ctx, c, client.ObjectKey{
+			Namespace: service.Namespace,
+			Name:      runtimeName,
+		}, &kservev1alpha1.ServingRuntime{})
+		result.profileRuntimeConfigMap = controllerutils.Fetch(ctx, c, client.ObjectKey{
+			Namespace: service.Namespace,
+			Name:      runtimeName,
+		}, &corev1.ConfigMap{})
 	}
 
 	// Profile status reflects the profile's own defaults, but service resources
@@ -558,14 +683,14 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 		}
 	}
 
-	// Fetch merged runtime config. Needed for routing (HTTPRoute) and label
-	// propagation. FetchMergedRuntimeConfig falls back to the default
-	// cluster-scoped runtime config when the ref is empty.
+	// Fetch the merged AIMRuntimeConfig. It supplies routing (HTTPRoute) and
+	// label-propagation settings. FetchMergedRuntimeConfig falls back to the
+	// default cluster-scoped AIMClusterRuntimeConfig when the ref is empty.
 	runtimeConfigRef := service.GetRuntimeConfigRef()
 	result.mergedRuntimeConfig = aimruntimeconfig.FetchMergedRuntimeConfig(ctx, c, runtimeConfigRef.Name, service.Namespace)
 
-	// Fetch the HTTPRoute (only exists when routing is enabled on the
-	// service or runtime config).
+	// Fetch the HTTPRoute (only exists when routing is enabled on the service or
+	// AIMRuntimeConfig).
 	result.httpRoute = v1alpha1service.FetchHTTPRoute(ctx, c, service, result.mergedRuntimeConfig.Value)
 
 	// Fetch the parent Gateway so the host-pinning guard can see how many
@@ -592,9 +717,9 @@ func (r *ProfileServiceReconciler) FetchRemoteState(
 }
 
 // ComposeState interprets the fetch result and pre-computes derived artefacts
-// (ISVC name, profile YAML filename, runtime status) that multiple plan steps
-// and the status decorator consume. Computing these in one place guarantees a
-// single source of truth per reconcile cycle.
+// (InferenceService name, profile YAML filename, and AIMService status.runtime)
+// that multiple plan steps and the status decorator consume. Computing these in
+// one place guarantees a single source of truth per reconcile cycle.
 func (r *ProfileServiceReconciler) ComposeState(
 	ctx context.Context,
 	_ controllerutils.ReconcileContext[*aimv1alpha1.AIMService],
@@ -676,9 +801,10 @@ func (r *ProfileServiceReconciler) ComposeState(
 	}
 
 	r.composeDerivedNames(ctx, &obs)
+	r.composeProfileRuntimeProjection(&obs)
 
-	// Runtime status is always computed so the Replicas printcolumn stays
-	// current even when routing, profile, or cache components are degraded.
+	// AIMService status.runtime is always computed so the Replicas printcolumn
+	// stays current even when routing, profile, or cache components are degraded.
 	obs.runtimeStatus = v1alpha1service.ComputeRuntimeStatus(fetch.service, fetch.hpa)
 
 	// Validate and interpret declared adapters (spec.adapters), and keep computing
@@ -700,6 +826,126 @@ func (r *ProfileServiceReconciler) ComposeState(
 	}
 
 	return obs
+}
+
+func (r *ProfileServiceReconciler) composeProfileRuntimeProjection(obs *ServiceObservation) {
+	if obs.configErr != nil ||
+		!obs.profileRuntimeFetched() ||
+		!obs.profileReadyForService() ||
+		(obs.hasModelSources && !obs.profileCacheReady) {
+		return
+	}
+	if hasUnexpectedFetchError(obs.profileRuntime.Error) ||
+		hasUnexpectedFetchError(obs.profileRuntimeConfigMap.Error) ||
+		hasUnexpectedFetchError(obs.runtimeProfileCache.Error) {
+		return
+	}
+
+	backingProfile := obs.runtimeBackingProfile()
+	if backingProfile == nil {
+		return
+	}
+
+	state := runtimeprojection.ProjectionState{AnnotatedProfile: backingProfile}
+	state.Cache = obs.runtimeProfileCache.Value
+	runtimeName := serving.RuntimeName(obs.profileName)
+	desired, err := runtimeprojection.DesiredForRuntime(obs.service.Namespace, runtimeName, state)
+	if err != nil {
+		obs.configErr = fmt.Errorf("build profile KServe ServingRuntime projection: %w", err)
+		return
+	}
+	if desired.Runtime == nil || desired.ConfigMap == nil || desired.Owner == nil {
+		obs.configErr = fmt.Errorf(
+			"build profile KServe ServingRuntime projection: no ServingRuntime produced for name %q",
+			runtimeName,
+		)
+		return
+	}
+
+	ownerRef := runtimeProjectionOwnerReference(desired.Owner)
+	desired.Runtime.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
+	desired.ConfigMap.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
+	obs.desiredProfileRuntime = desired.Runtime
+	obs.desiredProfileRuntimeConfigMap = desired.ConfigMap
+}
+
+// profileRuntimeCurrent requires both the effective projection content and the
+// backing profile incarnation to match. The UID check prevents a same-name
+// profile recreation from accepting siblings that remain subject to the old
+// profile's garbage collection.
+func (obs *ServiceObservation) profileRuntimeCurrent() bool {
+	if !obs.profileRuntime.OK() ||
+		obs.profileRuntime.Value == nil ||
+		!obs.profileRuntimeConfigMap.OK() ||
+		obs.profileRuntimeConfigMap.Value == nil ||
+		obs.desiredProfileRuntime == nil ||
+		obs.desiredProfileRuntimeConfigMap == nil {
+		return false
+	}
+
+	expectedHash := obs.desiredProfileRuntime.GetAnnotations()[constants.AnnotationRuntimeProjectionContentHash]
+	return expectedHash != "" &&
+		obs.desiredProfileRuntimeConfigMap.GetAnnotations()[constants.AnnotationRuntimeProjectionContentHash] == expectedHash &&
+		obs.profileRuntime.Value.GetAnnotations()[constants.AnnotationRuntimeProjectionContentHash] == expectedHash &&
+		obs.profileRuntimeConfigMap.Value.GetAnnotations()[constants.AnnotationRuntimeProjectionContentHash] == expectedHash &&
+		controllerOwnerUIDMatches(obs.profileRuntime.Value, obs.desiredProfileRuntime) &&
+		controllerOwnerUIDMatches(obs.profileRuntimeConfigMap.Value, obs.desiredProfileRuntimeConfigMap)
+}
+
+func controllerOwnerUIDMatches(actual, expected metav1.Object) bool {
+	actualOwner := metav1.GetControllerOf(actual)
+	expectedOwner := metav1.GetControllerOf(expected)
+	return actualOwner != nil &&
+		expectedOwner != nil &&
+		expectedOwner.UID != "" &&
+		actualOwner.UID == expectedOwner.UID
+}
+
+// profileRuntimeFetched reports whether FetchRemoteState looked up both
+// namespaced projection resources. A Fetch call always produces either a value
+// or an error, while an untouched FetchResult has neither.
+func (obs *ServiceObservation) profileRuntimeFetched() bool {
+	runtimeFetched := obs.profileRuntime.Value != nil || obs.profileRuntime.Error != nil
+	configMapFetched := obs.profileRuntimeConfigMap.Value != nil || obs.profileRuntimeConfigMap.Error != nil
+	return runtimeFetched && configMapFetched
+}
+
+func hasUnexpectedFetchError(err error) bool {
+	return err != nil && !apierrors.IsNotFound(err)
+}
+
+func (obs *ServiceObservation) runtimeBackingProfile() runtimeprojection.BackingProfile {
+	if obs.desiredOverlayProfile != nil {
+		if obs.overlayProfile.OK() && obs.overlayProfile.Value != nil {
+			return obs.overlayProfile.Value
+		}
+		return nil
+	}
+	if obs.profileScope == aimv1alpha1.AIMResolutionScopeCluster {
+		if obs.clusterProfile.OK() {
+			return obs.clusterProfile.Value
+		}
+		return nil
+	}
+	if obs.profile.OK() {
+		return obs.profile.Value
+	}
+	return nil
+}
+
+func runtimeProjectionOwnerReference(owner runtimeprojection.BackingProfile) metav1.OwnerReference {
+	kind := "AIMClusterProfile"
+	if _, ok := owner.(*aimv1alpha2.AIMProfile); ok {
+		kind = "AIMProfile"
+	}
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: aimv1alpha2.GroupVersion.String(),
+		Kind:       kind,
+		Name:       owner.GetName(),
+		UID:        owner.GetUID(),
+		Controller: &controller,
+	}
 }
 
 // isDeployable reports whether the resolved profile is allowed to back an
@@ -771,8 +1017,9 @@ func (r *ProfileServiceReconciler) composeDerivedNames(ctx context.Context, obs 
 	}
 
 	// Only the filename is consumed downstream (buildFrameworkEnvVars wires it
-	// into the runtime env); the referenced runtime now carries the projected
-	// profile ConfigMap, so the service no longer keeps the rendered YAML bytes.
+	// into the AIM model-serving process environment); the referenced KServe
+	// ServingRuntime now carries the projected profile ConfigMap, so the service
+	// no longer keeps the rendered YAML bytes.
 	filename, err := profileFilename(obs.resolvedProfileSpec)
 	if err != nil {
 		logger.Error(err, "failed to resolve profile YAML filename",
@@ -782,6 +1029,52 @@ func (r *ProfileServiceReconciler) composeDerivedNames(ctx context.Context, obs 
 	}
 	obs.profileYAMLName = filename
 	obs.profileAssembled = true
+}
+
+// planProfileRuntimeMaterialization applies any missing namespaced projection
+// resources and reports whether InferenceService creation or update must be
+// deferred. An existing InferenceService keeps serving through its old runtime
+// reference until the newly resolved profile's complete projection is ready.
+func planProfileRuntimeMaterialization(
+	planResult *controllerutils.PlanResult,
+	obs ServiceObservation,
+	logger logr.Logger,
+) bool {
+	if !obs.profileRuntimeFetched() || obs.profileRuntimeCurrent() {
+		return false
+	}
+	if hasUnexpectedFetchError(obs.profileRuntime.Error) ||
+		hasUnexpectedFetchError(obs.profileRuntimeConfigMap.Error) ||
+		hasUnexpectedFetchError(obs.runtimeProfileCache.Error) {
+		// The component health reports the fetch failure and lets the pipeline
+		// choose auth handling or exponential backoff. Keep the existing ISVC
+		// untouched, but do not add a fixed one-second retry here.
+		return true
+	}
+
+	// Apply only the missing projection resources. This avoids taking field
+	// ownership from an already-materialised lazy projection while still
+	// repairing a partially deleted ServingRuntime or ConfigMap. Owner
+	// references were pre-set to the backing profile, so the unowned plan
+	// bucket preserves the intended shared lifecycle instead of making one
+	// AIMService own the ServingRuntime.
+	if obs.profileRuntime.Value == nil && obs.desiredProfileRuntime != nil {
+		planResult.ApplyWithoutOwnerRef(obs.desiredProfileRuntime)
+		planResult.SkipLabelPropagation(obs.desiredProfileRuntime)
+		planResult.ExcludeLabels(obs.desiredProfileRuntime, serviceControllerNameLabel)
+	}
+	if obs.profileRuntimeConfigMap.Value == nil && obs.desiredProfileRuntimeConfigMap != nil {
+		planResult.ApplyWithoutOwnerRef(obs.desiredProfileRuntimeConfigMap)
+		planResult.SkipLabelPropagation(obs.desiredProfileRuntimeConfigMap)
+		planResult.ExcludeLabels(obs.desiredProfileRuntimeConfigMap, serviceControllerNameLabel)
+	}
+	planResult.RequestRequeueAfter(time.Second)
+	logger.V(1).Info("Profile ServingRuntime and ConfigMap not ready; deferring ISVC reconciliation",
+		"profile", obs.profileName,
+		"servingRuntimeFound", obs.profileRuntime.Value != nil,
+		"configMapFound", obs.profileRuntimeConfigMap.Value != nil,
+		"contentCurrent", obs.profileRuntimeCurrent())
+	return true
 }
 
 // PlanResources determines the resources to create or update for the profile
@@ -811,7 +1104,7 @@ func (r *ProfileServiceReconciler) PlanResources(
 	}
 
 	// Migration cleanup (independent of profile/cache readiness): a service that
-	// predates the runtime-reference rewrite left behind an orphaned
+	// predates the ServingRuntime-reference rewrite left behind an orphaned
 	// service-owned profile ConfigMap the new reconcile no longer plans. Delete
 	// it once, strictly guarded, so it does not linger for the life of the
 	// service. Runs on every reconcile that gets past config validation so the
@@ -844,10 +1137,10 @@ func (r *ProfileServiceReconciler) PlanResources(
 	}
 
 	// Reject base profiles up-front: status.deployable=false means the
-	// profile is missing aimId or modelSources and cannot back a runtime.
-	// getProfileHealth already surfaces the condition; the explicit gate
-	// here keeps cache / overlay / ISVC from being applied against an
-	// unfinished spec.
+	// profile is missing aimId or modelSources and cannot back a KServe
+	// ServingRuntime or ClusterServingRuntime. getProfileHealth already surfaces
+	// the condition; the explicit gate here keeps cache, overlay, and
+	// InferenceService resources from being applied against an unfinished spec.
 	if !obs.isDeployable() {
 		logger.V(1).Info("Profile is a base profile (status.deployable=false); skipping resource planning",
 			"profile", obs.profileName)
@@ -893,6 +1186,16 @@ func (r *ProfileServiceReconciler) PlanResources(
 		}
 	}
 
+	isvcExists := obs.inferenceService.OK() && obs.inferenceService.Value != nil
+	deferInferenceService := planProfileRuntimeMaterialization(&planResult, obs, logger)
+	if deferInferenceService && !isvcExists {
+		// Preserve initial creation ordering: a route or scaler targeting an
+		// absent workload only creates transient backend/target errors. Existing
+		// services continue below so their independent resources still converge
+		// while the running ISVC waits for fresh profile projection content.
+		return planResult
+	}
+
 	// Adapter staging (v1alpha2 spec.adapters). Adapters load dynamically, so the
 	// ISVC is never gated on downloads: we ensure the per-service subtree exists
 	// and stage adapters asynchronously (the aim-runtime hot-loads each as it
@@ -911,7 +1214,6 @@ func (r *ProfileServiceReconciler) PlanResources(
 	// because the read-only subPath mount requires the subtree directory to exist
 	// before the pod starts (the aim-runtime errors on a missing subPath). This
 	// gate is on the subtree being mountable, never on downloads.
-	isvcExists := obs.inferenceService.OK() && obs.inferenceService.Value != nil
 	if service.Spec.AdaptersEnabled() {
 		if !isvcExists && !obs.adapterState.Ready {
 			logger.V(1).Info("Adapter subtree not mountable yet; deferring ISVC creation",
@@ -922,36 +1224,38 @@ func (r *ProfileServiceReconciler) PlanResources(
 		}
 	}
 
-	// The profile ConfigMap is no longer planned here: the referenced runtime
-	// (projected lazily by the InferenceService-watch reconciler or eagerly by
-	// the profile reconcilers) carries the colocated profile ConfigMap, so the
-	// service does not duplicate it.
+	// The namespaced ServingRuntime and ConfigMap were preflighted above. The
+	// referenced KServe ServingRuntime carries the colocated profile ConfigMap,
+	// so the InferenceService does not duplicate the volume or mount on its
+	// predictor overlay.
 
 	// 2. Plan the InferenceService. When the service needs the adapter disk, mount
 	// the service's adapter subtree read-only at /adapters — present even at zero
 	// adapters in dynamic mode, so add/remove never restarts the pod.
-	if isvc := buildInferenceServiceFromProfile(service, obs); isvc != nil {
-		switch {
-		case aimadapter.PreserveExistingMount(service, obs.adapterState) && isvcExists:
-			// Preserve the current mount while the next PVC generation is unknown
-			// or its service subtree has not finished synchronizing.
-			logger.V(1).Info("Adapter disk binding not mountable yet; preserving running ISVC adapter wiring")
-			planResult.RequestRequeueAfter(5 * time.Second)
-		default:
-			if service.Spec.AdaptersEnabled() {
-				aimadapter.AddVolumeMount(
-					isvc,
-					service,
-					obs.adapterState.AdapterDiskPVC,
-					obs.adapterState.MaxRank,
-				)
+	if !deferInferenceService {
+		if isvc := buildInferenceServiceFromProfile(service, obs); isvc != nil {
+			switch {
+			case aimadapter.PreserveExistingMount(service, obs.adapterState) && isvcExists:
+				// Preserve the current mount while the next PVC generation is unknown
+				// or its service subtree has not finished synchronizing.
+				logger.V(1).Info("Adapter disk binding not mountable yet; preserving running ISVC adapter wiring")
+				planResult.RequestRequeueAfter(5 * time.Second)
+			default:
+				if service.Spec.AdaptersEnabled() {
+					aimadapter.AddVolumeMount(
+						isvc,
+						service,
+						obs.adapterState.AdapterDiskPVC,
+						obs.adapterState.MaxRank,
+					)
+				}
+				planResult.Apply(isvc)
 			}
-			planResult.Apply(isvc)
 		}
 	}
 
-	// 3. Plan the HTTPRoute if routing is enabled on the merged runtime
-	// config. The builder and naming scheme are shared with the v1alpha1
+	// 3. Plan the HTTPRoute if routing is enabled on the merged AIMRuntimeConfig.
+	// The builder and naming scheme are shared with the v1alpha1
 	// pipeline so routing behaves identically regardless of which pipeline
 	// owns the service.
 	if route := v1alpha1service.PlanHTTPRoute(ctx, service, obs.mergedRuntimeConfig.Value, obs.gateway.Value); route != nil {
@@ -971,11 +1275,11 @@ func (r *ProfileServiceReconciler) PlanResources(
 
 // planLegacyProfileConfigMapCleanup queues the orphaned legacy inline-predictor
 // service-owned profile ConfigMap (<service>-profile-<hash>) for deletion when
-// it is still present in observed state. Before the runtime-reference rewrite an
-// AIMService built its own profile ConfigMap; the referenced runtime now carries
-// the colocated one, so the old object is dead state that lingers for the life
-// of the service. It is deleted only when ALL of the following hold, so a
-// coincidentally-named user ConfigMap is never touched:
+// it is still present in observed state. Before the ServingRuntime-reference
+// rewrite an AIMService built its own profile ConfigMap; the referenced KServe
+// ServingRuntime now carries the colocated one, so the old object is dead state
+// that lingers for the life of the service. It is deleted only when ALL of the
+// following hold, so a coincidentally-named user ConfigMap is never touched:
 //   - it exists (fetched by the deterministic legacy name — the name shape), and
 //   - it is owner-ref'd by THIS AIMService (UID match), and
 //   - it carries AIM Engine's managed-by label.
@@ -1059,7 +1363,8 @@ func (r *ProfileServiceReconciler) DecorateStatus(
 		}
 
 		// Surface the model ID carried on the resolved profile so the Model
-		// printcolumn on the AIMService matches what the runtime will serve.
+		// printcolumn on the AIMService matches what the AIM model-serving process
+		// will serve.
 		if obs.resolvedProfileSpec != nil && obs.resolvedProfileSpec.ModelId != "" {
 			status.ResolvedModel = &aimv1alpha1.AIMResolvedReference{
 				Name:  obs.resolvedProfileSpec.ModelId,
@@ -1157,42 +1462,14 @@ func fetchProfileCache(
 		return controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]{Error: cacheList.Error}
 	}
 
-	wantScope := profileScope
-	if wantScope == "" {
-		wantScope = aimv1alpha1.AIMResolutionScopeNamespace
-	}
-	matching := make([]aimv1alpha2.AIMProfileCache, 0)
-	for _, cache := range cacheList.Value.Items {
-		if cache.Spec.ProfileName != profileName {
-			continue
-		}
-		if cache.Spec.Mode != aimv1alpha2.ProfileCacheModeShared {
-			continue
-		}
-		gotScope := cache.Spec.ProfileScope
-		if gotScope == "" {
-			gotScope = aimv1alpha1.AIMResolutionScopeNamespace
-		}
-		if gotScope != wantScope {
-			continue
-		}
-		matching = append(matching, cache)
-	}
-	if len(matching) == 0 {
+	best := profilecache.SelectBestShared(cacheList.Value.Items, profileName, profileScope)
+	if best == nil {
 		// Return a not-found result so downstream callers (and the
 		// component-health logic) treat this as "cache not yet created"
 		// — same semantics as a deterministic-name Fetch that 404s.
 		// Without this, FetchResult{} with both Value and Error nil would
 		// trip getProfileCacheHealth's `OK() == true → Value != nil`
 		// invariant and panic.
-		gvk := schema.GroupResource{Group: aimv1alpha2.GroupVersion.Group, Resource: "aimprofilecaches"}
-		return controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]{Error: apierrors.NewNotFound(gvk, profileName)}
-	}
-
-	best := utils.SelectBestPtr(matching, func(cache *aimv1alpha2.AIMProfileCache) constants.AIMStatus {
-		return cache.Status.GetAIMStatus()
-	})
-	if best == nil {
 		gvk := schema.GroupResource{Group: aimv1alpha2.GroupVersion.Group, Resource: "aimprofilecaches"}
 		return controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]{Error: apierrors.NewNotFound(gvk, profileName)}
 	}

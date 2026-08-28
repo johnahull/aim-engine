@@ -565,6 +565,14 @@ const (
 	// the backing profile's RuntimeProjected condition.
 	AnnotationRuntimeProjectionMessage = AimLabelDomain + "/runtime-projection-message"
 
+	// AnnotationRuntimeProjectionContentHash identifies the workload-affecting
+	// content of a namespaced ServingRuntime and its colocated ConfigMap. Both
+	// objects carry the same hash, computed from ServingRuntime.spec and the
+	// ConfigMap's data, binaryData, and immutable fields. Ephemeral metadata is
+	// deliberately excluded. Consumers use it to wait until both projection
+	// siblings represent the current profile and cache state.
+	AnnotationRuntimeProjectionContentHash = AimLabelDomain + "/runtime-projection-content-hash"
+
 	// AnnotationReconcilerPipeline forces an AIMService onto a specific
 	// reconciliation pipeline, bypassing the default spec-shape dispatch.
 	// Recognised values are ReconcilerPipelineTemplate (v1alpha1 template

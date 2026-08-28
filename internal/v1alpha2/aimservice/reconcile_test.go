@@ -28,14 +28,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	kservev1alpha1 "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	servingv1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
@@ -431,11 +438,504 @@ func TestComposeState_ClusterProfileFallback(t *testing.T) {
 	}
 }
 
+func TestPlanResources_MaterializesProfileRuntimeBeforeInferenceService(t *testing.T) {
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testServiceName,
+			Namespace: "ns",
+			UID:       "service-uid",
+			Labels: map[string]string{
+				"team": "service-team",
+				constants.AimLabelDomain + "/environment": "service-environment",
+			},
+		},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testClusterProfileName},
+		},
+	}
+	clusterProfile := &aimv1alpha2.AIMClusterProfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testClusterProfileName,
+			UID:  "profile-uid",
+		},
+		Spec: aimv1alpha2.AIMClusterProfileSpec{
+			AIMProfileSpecCommon: *sampleProfileSpec(),
+		},
+		Status: aimv1alpha2.AIMProfileStatus{
+			Status:     constants.AIMStatusReady,
+			Deployable: true,
+		},
+	}
+	notFound := func(resource, name string) error {
+		return apierrors.NewNotFound(schema.GroupResource{
+			Group:    "test",
+			Resource: resource,
+		}, name)
+	}
+	reconciler := &ProfileServiceReconciler{}
+	reconcileCtx := controllerutils.ReconcileContext[*aimv1alpha1.AIMService]{Object: service}
+
+	first := reconciler.ComposeState(
+		context.Background(),
+		reconcileCtx,
+		ServiceFetchResult{
+			service:        service,
+			clusterProfile: controllerutils.FetchResult[*aimv1alpha2.AIMClusterProfile]{Value: clusterProfile},
+			inferenceService: controllerutils.FetchResult[*servingv1beta1.InferenceService]{
+				Error: notFound("inferenceservices", testServiceName),
+			},
+			profileRuntime: controllerutils.FetchResult[*kservev1alpha1.ServingRuntime]{
+				Error: notFound("servingruntimes", serving.RuntimeName(testClusterProfileName)),
+			},
+			profileRuntimeConfigMap: controllerutils.FetchResult[*corev1.ConfigMap]{
+				Error: notFound("configmaps", serving.RuntimeName(testClusterProfileName)),
+			},
+		},
+	)
+	if first.configErr != nil {
+		t.Fatalf("ComposeState returned config error: %v", first.configErr)
+	}
+	if health := first.getProfileRuntimeHealth(); health.State != constants.AIMStatusProgressing {
+		t.Fatalf("missing ServingRuntime/ConfigMap health = %q, want Progressing", health.State)
+	}
+
+	firstPlan := reconciler.PlanResources(context.Background(), reconcileCtx, first)
+	runtime, configMap := assertInitialProfileRuntimePlan(t, service, clusterProfile, &firstPlan)
+
+	changedProfile := clusterProfile.DeepCopy()
+	changedProfile.Spec.Image += "-updated"
+	stale := reconciler.ComposeState(
+		context.Background(),
+		reconcileCtx,
+		ServiceFetchResult{
+			service:        service,
+			clusterProfile: controllerutils.FetchResult[*aimv1alpha2.AIMClusterProfile]{Value: changedProfile},
+			inferenceService: controllerutils.FetchResult[*servingv1beta1.InferenceService]{
+				Error: notFound("inferenceservices", testServiceName),
+			},
+			profileRuntime:          controllerutils.FetchResult[*kservev1alpha1.ServingRuntime]{Value: runtime},
+			profileRuntimeConfigMap: controllerutils.FetchResult[*corev1.ConfigMap]{Value: configMap},
+		},
+	)
+	if stale.configErr != nil {
+		t.Fatalf("ComposeState with stale projection returned config error: %v", stale.configErr)
+	}
+	oldHash := runtime.Annotations[constants.AnnotationRuntimeProjectionContentHash]
+	wantHash := stale.desiredProfileRuntime.Annotations[constants.AnnotationRuntimeProjectionContentHash]
+	if oldHash == "" || wantHash == "" || oldHash == wantHash {
+		t.Fatalf("profile content change hashes: observed=%q desired=%q, want different non-empty hashes", oldHash, wantHash)
+	}
+	if health := stale.getProfileRuntimeHealth(); health.State != constants.AIMStatusProgressing ||
+		health.Reason != "ProfileRuntimeConverging" {
+		t.Fatalf("stale projection health = %q/%q, want Progressing/ProfileRuntimeConverging", health.State, health.Reason)
+	}
+	assertStaleProfileRuntimePlan(t, reconciler, reconcileCtx, service, stale)
+	assertStaleProfileRuntimeOwnerUID(t, reconciler, reconcileCtx, first, runtime, configMap)
+
+	second := first
+	second.profileRuntime = controllerutils.FetchResult[*kservev1alpha1.ServingRuntime]{Value: runtime}
+	second.profileRuntimeConfigMap = controllerutils.FetchResult[*corev1.ConfigMap]{Value: configMap}
+	if health := second.getProfileRuntimeHealth(); health.State != constants.AIMStatusReady {
+		t.Fatalf("materialized ServingRuntime/ConfigMap health = %q, want Ready", health.State)
+	}
+	secondPlan := reconciler.PlanResources(context.Background(), reconcileCtx, second)
+
+	if !planAppliesType[*servingv1beta1.InferenceService](secondPlan.GetToApply()) {
+		t.Fatal("InferenceService must be planned after the ServingRuntime and ConfigMap are observed")
+	}
+}
+
+func assertInitialProfileRuntimePlan(
+	t *testing.T,
+	service *aimv1alpha1.AIMService,
+	clusterProfile *aimv1alpha2.AIMClusterProfile,
+	plan *controllerutils.PlanResult,
+) (*kservev1alpha1.ServingRuntime, *corev1.ConfigMap) {
+	t.Helper()
+	if plan.RequeueAfter == 0 {
+		t.Fatal("missing ServingRuntime and ConfigMap must request a follow-up reconcile")
+	}
+	if planAppliesType[*servingv1beta1.InferenceService](plan.GetToApply()) {
+		t.Fatal("InferenceService must not be planned before the ServingRuntime and ConfigMap exist")
+	}
+
+	var runtime *kservev1alpha1.ServingRuntime
+	var configMap *corev1.ConfigMap
+	for _, obj := range plan.GetToApplyWithoutOwnerRef() {
+		switch typed := obj.(type) {
+		case *kservev1alpha1.ServingRuntime:
+			runtime = typed
+		case *corev1.ConfigMap:
+			configMap = typed
+		}
+	}
+	if runtime == nil || configMap == nil {
+		t.Fatalf("first pass must plan both ServingRuntime and ConfigMap, got servingRuntime=%v configMap=%v", runtime != nil, configMap != nil)
+	}
+
+	controllerutils.PropagateLabelsForResult(
+		service,
+		plan,
+		&controllerutils.LabelPropagationSettings{Enabled: true, Match: []string{"team"}},
+	)
+	controllerutils.ApplyControllerLabelsToResult(plan, map[string]string{
+		constants.LabelK8sManagedBy: constants.LabelValueManagedBy,
+		serviceControllerNameLabel:  service.Name,
+	})
+	controllerutils.RemoveExcludedLabelsFromResult(plan)
+	assertSharedProjectionMetadata(t, clusterProfile, runtime, configMap)
+	return runtime, configMap
+}
+
+func assertSharedProjectionMetadata(
+	t *testing.T,
+	clusterProfile *aimv1alpha2.AIMClusterProfile,
+	objects ...metav1.Object,
+) {
+	t.Helper()
+	for _, obj := range objects {
+		for _, label := range []string{"team", constants.AimLabelDomain + "/environment", serviceControllerNameLabel} {
+			if _, exists := obj.GetLabels()[label]; exists {
+				t.Errorf("shared projected object inherited service label %q", label)
+			}
+		}
+		if got := obj.GetLabels()[constants.LabelProfile]; got != clusterProfile.Name {
+			t.Errorf("profile label = %q, want %q", got, clusterProfile.Name)
+		}
+		refs := obj.GetOwnerReferences()
+		if len(refs) != 1 || refs[0].Kind != "AIMClusterProfile" || refs[0].UID != clusterProfile.UID {
+			t.Fatalf("projected object must remain owned by the cluster profile, got %#v", refs)
+		}
+	}
+}
+
+func assertStaleProfileRuntimePlan(
+	t *testing.T,
+	reconciler *ProfileServiceReconciler,
+	reconcileCtx controllerutils.ReconcileContext[*aimv1alpha1.AIMService],
+	service *aimv1alpha1.AIMService,
+	stale ServiceObservation,
+) {
+	t.Helper()
+	previousRouting := service.Spec.Routing
+	defer func() { service.Spec.Routing = previousRouting }()
+	service.Spec.Routing = &aimv1alpha1.AIMRuntimeRoutingConfig{
+		Enabled:    ptr.To(true),
+		GatewayRef: &gatewayapiv1.ParentReference{Name: "gateway"},
+	}
+
+	freshPlan := reconciler.PlanResources(context.Background(), reconcileCtx, stale)
+	if planAppliesType[*gatewayapiv1.HTTPRoute](freshPlan.GetToApply()) {
+		t.Fatal("brand-new service must not plan HTTPRoute before its InferenceService exists")
+	}
+
+	stale.inferenceService = controllerutils.FetchResult[*servingv1beta1.InferenceService]{
+		Value: &servingv1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: service.Namespace},
+		},
+	}
+	stalePlan := reconciler.PlanResources(context.Background(), reconcileCtx, stale)
+	if stalePlan.RequeueAfter == 0 {
+		t.Fatal("stale ServingRuntime and ConfigMap must request a follow-up reconcile")
+	}
+	if planAppliesType[*servingv1beta1.InferenceService](stalePlan.GetToApply()) {
+		t.Fatal("InferenceService must not be planned against stale ServingRuntime/ConfigMap content")
+	}
+	if !planAppliesType[*gatewayapiv1.HTTPRoute](stalePlan.GetToApply()) {
+		t.Fatal("stale runtime projection must defer only the InferenceService, not independent HTTPRoute planning")
+	}
+	if got := len(stalePlan.GetToApplyWithoutOwnerRef()); got != 0 {
+		t.Fatalf("AIMService must leave stale existing projection repair to its projection controller, got %d applies", got)
+	}
+}
+
+func assertStaleProfileRuntimeOwnerUID(
+	t *testing.T,
+	reconciler *ProfileServiceReconciler,
+	reconcileCtx controllerutils.ReconcileContext[*aimv1alpha1.AIMService],
+	first ServiceObservation,
+	runtime *kservev1alpha1.ServingRuntime,
+	configMap *corev1.ConfigMap,
+) {
+	t.Helper()
+	for _, sibling := range []string{"ServingRuntime", "ConfigMap"} {
+		t.Run("stale "+sibling+" owner UID", func(t *testing.T) {
+			actualRuntime := runtime.DeepCopy()
+			actualConfigMap := configMap.DeepCopy()
+			if sibling == "ServingRuntime" {
+				actualRuntime.OwnerReferences[0].UID = "previous-profile-uid"
+			} else {
+				actualConfigMap.OwnerReferences[0].UID = "previous-profile-uid"
+			}
+
+			staleOwner := first
+			staleOwner.profileRuntime = controllerutils.FetchResult[*kservev1alpha1.ServingRuntime]{Value: actualRuntime}
+			staleOwner.profileRuntimeConfigMap = controllerutils.FetchResult[*corev1.ConfigMap]{Value: actualConfigMap}
+			if staleOwner.profileRuntimeCurrent() {
+				t.Fatalf("matching content hash must not hide stale %s owner UID", sibling)
+			}
+			ownerPlan := reconciler.PlanResources(context.Background(), reconcileCtx, staleOwner)
+			if ownerPlan.RequeueAfter == 0 {
+				t.Fatalf("stale %s owner UID must request a follow-up reconcile", sibling)
+			}
+			if planAppliesType[*servingv1beta1.InferenceService](ownerPlan.GetToApply()) {
+				t.Fatalf("InferenceService must not be planned with stale %s ownership", sibling)
+			}
+		})
+	}
+}
+
+func planAppliesType[T client.Object](objects []client.Object) bool {
+	for _, obj := range objects {
+		if _, ok := obj.(T); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProfileRuntimeHealth_UnexpectedErrorWinsOverMissingSibling(t *testing.T) {
+	t.Parallel()
+
+	runtimeName := serving.RuntimeName(testClusterProfileName)
+	notFound := apierrors.NewNotFound(
+		schema.GroupResource{Group: "serving.kserve.io", Resource: "servingruntimes"},
+		runtimeName,
+	)
+	forbidden := apierrors.NewForbidden(
+		schema.GroupResource{Resource: "configmaps"},
+		runtimeName,
+		errors.New("access denied"),
+	)
+	spec := sampleProfileSpec()
+	status := &aimv1alpha2.AIMProfileStatus{Status: constants.AIMStatusReady}
+	obs := ServiceObservation{
+		resolvedProfileSpec:   spec,
+		resolvedProfileStatus: status,
+		ServiceFetchResult: ServiceFetchResult{
+			profileRuntime: controllerutils.FetchResult[*kservev1alpha1.ServingRuntime]{
+				Error: notFound,
+			},
+			profileRuntimeConfigMap: controllerutils.FetchResult[*corev1.ConfigMap]{
+				Error: forbidden,
+			},
+		},
+	}
+
+	health := obs.getProfileRuntimeHealth()
+	if health.State != constants.AIMStatusFailed {
+		t.Fatalf("health state = %q, want Failed", health.State)
+	}
+	if health.Reason != reasonFetchError {
+		t.Fatalf("health reason = %q, want %q", health.Reason, reasonFetchError)
+	}
+	if len(health.Errors) != 1 || !apierrors.IsForbidden(health.Errors[0]) {
+		t.Fatalf("health errors = %v, want the ConfigMap Forbidden error", health.Errors)
+	}
+
+	plan := controllerutils.PlanResult{}
+	if !planProfileRuntimeMaterialization(&plan, obs, logr.Discard()) {
+		t.Fatal("runtime fetch error must defer InferenceService reconciliation")
+	}
+	if plan.RequeueAfter != 0 {
+		t.Fatalf("runtime fetch error requested fixed requeue %s; want pipeline-managed retry", plan.RequeueAfter)
+	}
+}
+
+func TestPipelineRun_MaterializesProfileRuntimeBeforeInferenceService(t *testing.T) {
+	ctx := context.Background()
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testServiceName,
+			Namespace: "ns",
+			UID:       "service-uid",
+		},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testClusterProfileName},
+		},
+	}
+	clusterProfile := &aimv1alpha2.AIMClusterProfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testClusterProfileName,
+			UID:  "profile-uid",
+		},
+		Spec: aimv1alpha2.AIMClusterProfileSpec{
+			AIMProfileSpecCommon: *sampleProfileSpec(),
+		},
+		Status: aimv1alpha2.AIMProfileStatus{
+			Status:     constants.AIMStatusReady,
+			Deployable: true,
+		},
+	}
+
+	c, pipeline := newProfileRuntimePipelineFixture(t, service, clusterProfile)
+
+	serviceKey := client.ObjectKey{Name: testServiceName, Namespace: "ns"}
+	isvcName, err := v1alpha1service.GenerateInferenceServiceName(testServiceName, "ns")
+	if err != nil {
+		t.Fatalf("generate InferenceService name: %v", err)
+	}
+	isvcKey := client.ObjectKey{Name: isvcName, Namespace: "ns"}
+	currentService := getProfileServiceForTest(t, ctx, c, serviceKey)
+	if requeueAfter := runProfileServicePipelineCycle(t, ctx, pipeline, currentService); requeueAfter == 0 {
+		t.Fatal("first pipeline cycle must request a follow-up after materializing the ServingRuntime")
+	}
+
+	runtimeName := serving.RuntimeName(testClusterProfileName)
+	runtimeKey := client.ObjectKey{Name: runtimeName, Namespace: "ns"}
+	projectedRuntime := getObjectForTest(t, ctx, c, runtimeKey, &kservev1alpha1.ServingRuntime{})
+	projectedConfigMap := getObjectForTest(t, ctx, c, runtimeKey, &corev1.ConfigMap{})
+	for _, obj := range []client.Object{projectedRuntime, projectedConfigMap} {
+		if _, exists := obj.GetLabels()[serviceControllerNameLabel]; exists {
+			t.Errorf("%T has misleading shared-resource label %q", obj, serviceControllerNameLabel)
+		}
+	}
+	if err := c.Get(ctx, isvcKey, &servingv1beta1.InferenceService{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("InferenceService after first pipeline cycle: got error %v, want NotFound", err)
+	}
+
+	currentService = getProfileServiceForTest(t, ctx, c, serviceKey)
+	runProfileServicePipelineCycle(t, ctx, pipeline, currentService)
+	isvc := getObjectForTest(t, ctx, c, isvcKey, &servingv1beta1.InferenceService{})
+	assertInferenceServiceRuntime(t, isvc, runtimeName)
+
+	// Changing the resolved profile is a two-pass rollout. The first pass
+	// materializes the new projection while the existing ISVC keeps serving
+	// through the old one; the second updates the ISVC reference.
+	updatedProfile := clusterProfile.DeepCopy()
+	updatedProfile.Name = testClusterProfileName + "-updated"
+	updatedProfile.UID = "updated-profile-uid"
+	updatedProfile.ResourceVersion = ""
+	if err := c.Create(ctx, updatedProfile); err != nil {
+		t.Fatalf("create updated profile: %v", err)
+	}
+	currentService = getProfileServiceForTest(t, ctx, c, serviceKey)
+	currentService.Spec.Profile.Name = updatedProfile.Name
+	if err := c.Update(ctx, currentService); err != nil {
+		t.Fatalf("update service profile: %v", err)
+	}
+
+	currentService = getProfileServiceForTest(t, ctx, c, serviceKey)
+	if requeueAfter := runProfileServicePipelineCycle(t, ctx, pipeline, currentService); requeueAfter == 0 {
+		t.Fatal("profile change must request a follow-up after materializing the new ServingRuntime")
+	}
+
+	updatedRuntimeName := serving.RuntimeName(updatedProfile.Name)
+	updatedRuntimeKey := client.ObjectKey{Name: updatedRuntimeName, Namespace: "ns"}
+	getObjectForTest(t, ctx, c, updatedRuntimeKey, &kservev1alpha1.ServingRuntime{})
+	getObjectForTest(t, ctx, c, updatedRuntimeKey, &corev1.ConfigMap{})
+	isvc = getObjectForTest(t, ctx, c, isvcKey, &servingv1beta1.InferenceService{})
+	assertInferenceServiceRuntime(t, isvc, runtimeName)
+
+	currentService = getProfileServiceForTest(t, ctx, c, serviceKey)
+	runProfileServicePipelineCycle(t, ctx, pipeline, currentService)
+	isvc = getObjectForTest(t, ctx, c, isvcKey, &servingv1beta1.InferenceService{})
+	assertInferenceServiceRuntime(t, isvc, updatedRuntimeName)
+}
+
+type profileRuntimeTestPipeline = controllerutils.Pipeline[
+	*aimv1alpha1.AIMService,
+	*aimv1alpha1.AIMServiceStatus,
+	ServiceFetchResult,
+	ServiceObservation,
+]
+
+func newProfileRuntimePipelineFixture(
+	t *testing.T,
+	service *aimv1alpha1.AIMService,
+	clusterProfile *aimv1alpha2.AIMClusterProfile,
+) (client.Client, *profileRuntimeTestPipeline) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	for _, addToScheme := range []func(*runtime.Scheme) error{
+		corev1.AddToScheme,
+		autoscalingv2.AddToScheme,
+		aimv1alpha1.AddToScheme,
+		aimv1alpha2.AddToScheme,
+		kservev1alpha1.AddToScheme,
+		servingv1beta1.AddToScheme,
+		gatewayapiv1.Install,
+	} {
+		if err := addToScheme(scheme); err != nil {
+			t.Fatalf("add test types to scheme: %v", err)
+		}
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&aimv1alpha1.AIMService{}).
+		WithObjects(service, clusterProfile).
+		Build()
+	recorder := record.NewFakeRecorder(20)
+	reconciler := &ProfileServiceReconciler{Scheme: scheme, Recorder: recorder}
+	pipeline := &profileRuntimeTestPipeline{
+		Client:         c,
+		StatusClient:   c.Status(),
+		Recorder:       recorder,
+		ControllerName: "service",
+		Reconciler:     reconciler,
+		Scheme:         scheme,
+	}
+	return c, pipeline
+}
+
+func runProfileServicePipelineCycle(
+	t *testing.T,
+	ctx context.Context,
+	pipeline *profileRuntimeTestPipeline,
+	service *aimv1alpha1.AIMService,
+) time.Duration {
+	t.Helper()
+	result, err := pipeline.Run(ctx, service)
+	if err != nil {
+		t.Fatalf("profile service pipeline cycle: %v", err)
+	}
+	return result.RequeueAfter
+}
+
+func getProfileServiceForTest(
+	t *testing.T,
+	ctx context.Context,
+	c client.Client,
+	key client.ObjectKey,
+) *aimv1alpha1.AIMService {
+	t.Helper()
+	return getObjectForTest(t, ctx, c, key, &aimv1alpha1.AIMService{})
+}
+
+func getObjectForTest[T client.Object](
+	t *testing.T,
+	ctx context.Context,
+	c client.Client,
+	key client.ObjectKey,
+	obj T,
+) T {
+	t.Helper()
+	if err := c.Get(ctx, key, obj); err != nil {
+		t.Fatalf("get %T %s: %v", obj, key, err)
+	}
+	return obj
+}
+
+func assertInferenceServiceRuntime(
+	t *testing.T,
+	isvc *servingv1beta1.InferenceService,
+	want string,
+) {
+	t.Helper()
+	if isvc.Spec.Predictor.Model == nil ||
+		isvc.Spec.Predictor.Model.Runtime == nil ||
+		*isvc.Spec.Predictor.Model.Runtime != want {
+		t.Fatalf("InferenceService ServingRuntime reference = %#v, want %q", isvc.Spec.Predictor.Model, want)
+	}
+}
+
 // TestBuildInferenceServiceFromProfile_ReferencesRuntime pins the Phase C
-// contract: the ISVC references the projected runtime (aim-<profile.Name>) via
-// predictor.model.runtime + modelFormat and emits NO inline predictor (no
-// container image, no profile ConfigMap volume/mount, no framework env). The
-// runtime carries all of that; the service only references it.
+// contract: the InferenceService references the projected KServe ServingRuntime
+// (aim-<profile.Name>) via predictor.model.runtime + modelFormat and emits NO
+// inline predictor (no container image, profile ConfigMap volume/mount, or
+// framework env). The ServingRuntime carries all of that; the service only
+// references it.
 func TestBuildInferenceServiceFromProfile_ReferencesRuntime(t *testing.T) {
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
@@ -449,7 +949,7 @@ func TestBuildInferenceServiceFromProfile_ReferencesRuntime(t *testing.T) {
 		Resources: &corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8")},
 		},
-		// Affinity belongs on the runtime, never the overlay; pin that the
+		// Affinity belongs on the ServingRuntime, never the overlay; pin that the
 		// overlay drops it even when the profile resolved one.
 		ResolvedNodeAffinity: &corev1.NodeAffinity{},
 	}
@@ -500,19 +1000,19 @@ func TestBuildInferenceServiceFromProfile_ReferencesRuntime(t *testing.T) {
 	}
 	for _, v := range isvc.Spec.Predictor.Volumes {
 		if v.Name == profileVolumePrefix {
-			t.Errorf("overlay must not mount the profile ConfigMap volume %q (runtime owns it)", profileVolumePrefix)
+			t.Errorf("overlay must not mount the profile ConfigMap volume %q (ServingRuntime owns it)", profileVolumePrefix)
 		}
 	}
 	for _, e := range model.Env {
 		if e.Name == constants.EnvAIMProfileID {
-			t.Errorf("overlay must not carry framework env %q (runtime owns it)", constants.EnvAIMProfileID)
+			t.Errorf("overlay must not carry framework env %q (ServingRuntime owns it)", constants.EnvAIMProfileID)
 		}
 	}
 	if isvc.Spec.Predictor.Affinity != nil {
-		t.Errorf("overlay must not carry node affinity (runtime owns it)")
+		t.Errorf("overlay must not carry node affinity (ServingRuntime owns it)")
 	}
 	// No service-level resource override -> the overlay leaves resources to the
-	// runtime (empty requests/limits on the model).
+	// ServingRuntime (empty requests/limits on the InferenceService model).
 	if len(model.Resources.Requests) != 0 || len(model.Resources.Limits) != 0 {
 		t.Errorf("overlay must not carry profile resources without a service override, got %+v", model.Resources)
 	}
@@ -543,22 +1043,20 @@ func TestBuildInferenceServiceFromProfile_ServiceAccountPrecedence(t *testing.T)
 	}
 }
 
-// TestBuildInferenceServiceFromProfile_StickyReference pins that an existing
-// ISVC keeps its current runtime reference even when the resolved profile name
-// would now project a different runtime (e.g. a projection-mode change), so a
-// mode change never re-rolls a live ISVC.
-func TestBuildInferenceServiceFromProfile_StickyReference(t *testing.T) {
+// TestBuildInferenceServiceFromProfile_ConvergesRuntimeReference pins that an
+// existing InferenceService follows the currently resolved profile rather than
+// indefinitely serving through a stale projection.
+func TestBuildInferenceServiceFromProfile_ConvergesRuntimeReference(t *testing.T) {
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
 		Spec: aimv1alpha1.AIMServiceSpec{
 			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
 		},
 	}
-	existingRef := "aim-some-previous-runtime"
 	existing := &servingv1beta1.InferenceService{
 		Spec: servingv1beta1.InferenceServiceSpec{
 			Predictor: servingv1beta1.PredictorSpec{
-				Model: &servingv1beta1.ModelSpec{Runtime: ptr.To(existingRef)},
+				Model: &servingv1beta1.ModelSpec{Runtime: ptr.To("aim-some-previous-runtime")},
 			},
 		},
 	}
@@ -579,17 +1077,18 @@ func TestBuildInferenceServiceFromProfile_StickyReference(t *testing.T) {
 	if isvc == nil {
 		t.Fatalf("expected non-nil ISVC")
 	}
-	if got := isvc.Spec.Predictor.Model.Runtime; got == nil || *got != existingRef {
-		t.Errorf("runtime reference must be sticky: got %v, want %q", got, existingRef)
+	want := serving.RuntimeName(testProfileA)
+	if got := isvc.Spec.Predictor.Model.Runtime; got == nil || *got != want {
+		t.Errorf("ServingRuntime reference = %v, want resolved profile runtime %q", got, want)
 	}
 }
 
 // TestBuildInferenceServiceFromProfile_StampsRuntimeProfile pins the lazy
-// runtime-projection fast-path: a service stamps the backing profile name so the
-// lazy watcher can materialize the runtime in the service's namespace before it
-// exists. Stamped for BOTH scopes — a cluster profile is the cross-scope case,
-// and a namespace profile needs it under Reduced mode (no eager per-profile
-// runtime), where the watcher resolves the namespace AIMProfile from it.
+// ServingRuntime-projection fast-path: a service stamps the backing profile name
+// so the lazy ServingRuntime-keyed controller can materialize the ServingRuntime
+// in the service's namespace before it exists. The annotation is stamped for
+// BOTH scopes: a cluster profile is the cross-scope case, and a namespace
+// profile needs it under Reduced mode (no eager per-profile ServingRuntime).
 func TestBuildInferenceServiceFromProfile_StampsRuntimeProfile(t *testing.T) {
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
@@ -625,8 +1124,9 @@ func TestBuildInferenceServiceFromProfile_StampsRuntimeProfile(t *testing.T) {
 
 // TestBuildInferenceServiceFromProfile_ServiceResourceOverrideOnModel pins that
 // a service-level resource override carries the fully merged, valid resource
-// block. KServe preserves omitted runtime keys, so sending only requests.memory
-// could otherwise retain a smaller runtime limits.memory.
+// block. KServe preserves resource-map keys inherited from a ServingRuntime when
+// the InferenceService omits them, so sending only requests.memory could
+// otherwise retain a smaller ServingRuntime limits.memory.
 func TestBuildInferenceServiceFromProfile_ServiceResourceOverrideOnModel(t *testing.T) {
 	override := &corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Gi")},
@@ -777,11 +1277,13 @@ func TestBuildInferenceServiceFromProfile_NilSpecReturnsNil(t *testing.T) {
 }
 
 // TestResolvedModelIdFromProfile verifies the model-id identity follows the
-// runtime resolution chain `profile.model_id or config.model_id or config.aim_id`:
-// ModelId wins, then modelSources[0].modelId, then aimId.
+// AIM model-serving process's resolution chain
+// `profile.model_id or config.model_id or config.aim_id`: ModelId wins, then
+// modelSources[0].modelId, then aimId.
 func TestResolvedModelIdFromProfile(t *testing.T) {
 	// ModelId wins even when modelSources carry a different id (matches the
-	// runtime, which writes profile.model_id from spec.ModelId).
+	// projected profile YAML consumed by the AIM model-serving process, which
+	// writes profile.model_id from spec.ModelId).
 	modelIDWins := sampleProfileSpec() // ModelId = qwen/qwen3-32b-fp8
 	modelIDWins.ModelSources = []aimv1alpha1.AIMModelSource{
 		{ModelID: "acme/my-finetune-v1", SourceURI: "hf://acme/my-finetune-v1"},
@@ -1145,7 +1647,7 @@ func TestGetComponentHealth_ScaleToZeroIdleReportsReady(t *testing.T) {
 			MaxReplicas: ptr.To(int32(3)),
 		},
 	}
-	// Routing enabled (promoted field from the inlined runtime config) so the
+	// Routing enabled (promoted field from the inlined AIMRuntimeConfig) so the
 	// scale-to-zero routing prerequisite passes and does not add an unrelated
 	// ConfigValid=False entry.
 	service.Spec.Routing = &aimv1alpha1.AIMRuntimeRoutingConfig{Enabled: ptr.To(true)}
@@ -1307,8 +1809,9 @@ func TestBuildInferenceServiceFromProfile_Replicas_AutoScalingHandsOffToExternal
 }
 
 // TestBuildInferenceServiceFromProfile_SharedCacheNotOverlaid pins that a
-// profile-owned (Shared) cache is NOT overlaid onto the ISVC — the runtime
-// mounts it instead, so overlaying it would duplicate the runtime's volume.
+// profile-owned (Shared) cache is NOT overlaid onto the InferenceService — the
+// ServingRuntime mounts it instead, so overlaying it would duplicate the
+// ServingRuntime's volume.
 func TestBuildInferenceServiceFromProfile_SharedCacheNotOverlaid(t *testing.T) {
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
@@ -1345,8 +1848,8 @@ func TestBuildInferenceServiceFromProfile_SharedCacheNotOverlaid(t *testing.T) {
 
 // TestBuildInferenceServiceFromProfile_DedicatedCacheOverlaid pins that a
 // service-owned (Dedicated) cache lands on the overlay: the PVC volume, the
-// model volume mount, and the framework redirect env (overriding the runtime
-// container by name).
+// model volume mount, and the framework redirect environment (overriding
+// same-named entries from the ServingRuntime container).
 func TestBuildInferenceServiceFromProfile_DedicatedCacheOverlaid(t *testing.T) {
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
@@ -1380,11 +1883,87 @@ func TestBuildInferenceServiceFromProfile_DedicatedCacheOverlaid(t *testing.T) {
 	if len(model.VolumeMounts) == 0 {
 		t.Errorf("Dedicated cache must add a model volume mount")
 	}
-	// Redirect env must be present so the runtime loads from the local cache,
-	// overriding the runtime container env by name.
+	// Redirect environment must be present so the AIM model-serving process
+	// loads from the local cache, overriding same-named entries from the
+	// ServingRuntime container.
 	env := envMap(model.Env)
 	if env[constants.EnvAIMModelID] == "" {
 		t.Errorf("Dedicated cache overlay must carry the %s redirect env", constants.EnvAIMModelID)
+	}
+}
+
+func TestComposeProfileRuntimeProjection_DedicatedServiceUsesSharedProjectionCache(t *testing.T) {
+	spec := profileSpecWithModelSources()
+	profile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testProfileA,
+			Namespace: "ns",
+			UID:       types.UID("profile-uid"),
+		},
+		Spec: aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: *spec},
+		Status: aimv1alpha2.AIMProfileStatus{
+			Status:     constants.AIMStatusReady,
+			Deployable: true,
+		},
+	}
+	service := &aimv1alpha1.AIMService{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},
+		Spec: aimv1alpha1.AIMServiceSpec{
+			Profile: &aimv1alpha1.AIMServiceProfileConfig{Name: testProfileA},
+			Caching: &aimv1alpha1.AIMServiceCachingConfig{Mode: aimv1alpha1.CachingModeDedicated},
+		},
+	}
+	dedicatedCache := readyCacheFixture()
+	dedicatedCache.Spec.Mode = aimv1alpha2.ProfileCacheModeDedicated
+	dedicatedCache.Status.Artifacts["weights"] = aimv1alpha1.AIMResolvedArtifact{
+		Name:                  "weights",
+		Model:                 "org/model",
+		Status:                constants.AIMStatusReady,
+		PersistentVolumeClaim: "dedicated-pvc",
+		MountPoint:            "/workspace/cache/org/model",
+	}
+	sharedCache := readyCacheFixture()
+	sharedCache.Spec.Mode = aimv1alpha2.ProfileCacheModeShared
+	sharedCache.Status.Artifacts["weights"] = aimv1alpha1.AIMResolvedArtifact{
+		Name:                  "weights",
+		Model:                 "org/model",
+		Status:                constants.AIMStatusReady,
+		PersistentVolumeClaim: "shared-pvc",
+		MountPoint:            "/workspace/cache/org/model",
+	}
+	notFound := apierrors.NewNotFound(schema.GroupResource{}, serving.RuntimeName(testProfileA))
+	obs := ServiceObservation{
+		ServiceFetchResult: ServiceFetchResult{
+			service:                 service,
+			profile:                 controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+			profileCache:            controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]{Value: dedicatedCache},
+			runtimeProfileCache:     controllerutils.FetchResult[*aimv1alpha2.AIMProfileCache]{Value: sharedCache},
+			profileRuntime:          controllerutils.FetchResult[*kservev1alpha1.ServingRuntime]{Error: notFound},
+			profileRuntimeConfigMap: controllerutils.FetchResult[*corev1.ConfigMap]{Error: notFound},
+		},
+		resolvedProfileSpec:   spec,
+		resolvedProfileStatus: &profile.Status,
+		profileName:           testProfileA,
+		profileScope:          aimv1alpha1.AIMResolutionScopeNamespace,
+		hasModelSources:       true,
+		profileCacheReady:     true,
+	}
+
+	(&ProfileServiceReconciler{}).composeProfileRuntimeProjection(&obs)
+
+	if obs.configErr != nil {
+		t.Fatalf("composeProfileRuntimeProjection() error = %v", obs.configErr)
+	}
+	if obs.desiredProfileRuntime == nil {
+		t.Fatal("expected desired profile ServingRuntime")
+	}
+	if !volumeRefsPVC(obs.desiredProfileRuntime.Spec.Volumes, "shared-pvc") {
+		t.Fatalf("runtime projection must use producer-selected Shared cache; volumes = %+v",
+			obs.desiredProfileRuntime.Spec.Volumes)
+	}
+	if volumeRefsPVC(obs.desiredProfileRuntime.Spec.Volumes, "dedicated-pvc") {
+		t.Fatalf("runtime projection must not use the service-owned Dedicated cache; volumes = %+v",
+			obs.desiredProfileRuntime.Spec.Volumes)
 	}
 }
 
@@ -1594,9 +2173,10 @@ func TestPlanProfileCache_ServiceCachingEnvOverridesProfile(t *testing.T) {
 	}
 }
 
-// TestPlanProfileCache_PropagatesRuntimeConfigRef verifies the service's runtime
-// config reference flows onto the AIMProfileCache so a named AIMRuntimeConfig's
-// env can feed the download Job (instead of always the default-named config).
+// TestPlanProfileCache_PropagatesRuntimeConfigRef verifies the service's
+// AIMRuntimeConfig reference flows onto the AIMProfileCache so a named
+// AIMRuntimeConfig's env can feed the download Job (instead of always the
+// default-named config).
 func TestPlanProfileCache_PropagatesRuntimeConfigRef(t *testing.T) {
 	service := &aimv1alpha1.AIMService{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: "ns"},

@@ -34,13 +34,16 @@ manager:
   args:
     - --leader-elect
 
-  # -- Eager runtime projection mode for the profile reconcilers, rendered as
-  # the operator's --runtime-projection-mode arg. Exhaustive projects one
-  # runtime per projectable profile. Reduced projects one model-slug primary
-  # runtime per model that native KServe references by name. Both runs the two
-  # together. Every projected runtime keeps autoSelect off (all share one model
-  # format, so autoSelect would collide across models). The lazy
-  # InferenceService-watch projection is always on and is not governed by this
+  # -- Eager KServe ServingRuntime/ClusterServingRuntime projection mode for the
+  # profile reconcilers, rendered as the operator's --runtime-projection-mode
+  # arg. Exhaustive projects one scope-appropriate ServingRuntime or
+  # ClusterServingRuntime per projectable profile. Reduced projects one
+  # model-slug primary ServingRuntime or ClusterServingRuntime per model that
+  # native KServe references by name. Both runs the two together. All projected
+  # ServingRuntimes and ClusterServingRuntimes keep autoSelect off
+  # (all share one model format, so autoSelect would collide across models).
+  # The lazy namespaced
+  # ServingRuntime-keyed projection is always on and is not governed by this
   # value. See the runtime-projection ADR (docs/adr).
   runtimeProjectionMode: Both
 

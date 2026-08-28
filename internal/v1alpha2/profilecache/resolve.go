@@ -28,12 +28,14 @@ package profilecache
 
 import (
 	"context"
+	"sort"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 )
 
 // FindReadyShared returns a Ready, profile-owned (Shared) AIMProfileCache in
@@ -73,9 +75,31 @@ func FindReadyShared(
 	if err := c.List(ctx, &caches, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
+
+	cache := SelectBestShared(caches.Items, profileName, scope)
+	if cache == nil || cache.Status.Status != constants.AIMStatusReady {
+		return nil, nil
+	}
+	return cache, nil
+}
+
+// SelectBestShared returns the healthiest Shared cache matching the profile and
+// scope. Equal-health candidates are ordered by name before selection so every
+// projection producer and consumer chooses the same cache independently of API
+// list order.
+func SelectBestShared(
+	caches []aimv1alpha2.AIMProfileCache,
+	profileName string,
+	scope aimv1alpha1.AIMResolutionScope,
+) *aimv1alpha2.AIMProfileCache {
+	if profileName == "" {
+		return nil
+	}
+
 	wantScope := normalizeScope(scope)
-	for i := range caches.Items {
-		cache := &caches.Items[i]
+	matching := make([]aimv1alpha2.AIMProfileCache, 0, len(caches))
+	for i := range caches {
+		cache := caches[i]
 		if cache.Spec.ProfileName != profileName {
 			continue
 		}
@@ -88,12 +112,14 @@ func FindReadyShared(
 		if cache.Spec.Mode != aimv1alpha2.ProfileCacheModeShared {
 			continue
 		}
-		if cache.Status.Status != constants.AIMStatusReady {
-			continue
-		}
-		return cache, nil
+		matching = append(matching, cache)
 	}
-	return nil, nil
+	sort.Slice(matching, func(i, j int) bool {
+		return matching[i].Name < matching[j].Name
+	})
+	return utils.SelectBestPtr(matching, func(cache *aimv1alpha2.AIMProfileCache) constants.AIMStatus {
+		return cache.Status.GetAIMStatus()
+	})
 }
 
 // normalizeScope treats an empty scope as Namespace, matching the AIMService

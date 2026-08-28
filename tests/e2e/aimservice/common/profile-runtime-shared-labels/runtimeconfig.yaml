@@ -1,0 +1,12 @@
+# Namespaced runtime config enabling propagation of the service labels used by
+# this regression test. Shared profile projections must explicitly skip it.
+apiVersion: aim.eai.amd.com/v1alpha1
+kind: AIMRuntimeConfig
+metadata:
+  name: shared-projection-labels
+spec:
+  labelPropagation:
+    enabled: true
+    match:
+      - "team-*"
+      - "cost-center"

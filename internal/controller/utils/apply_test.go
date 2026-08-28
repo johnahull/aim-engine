@@ -30,6 +30,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 )
 
 const testLabelValueAlpha = "alpha"
@@ -222,6 +224,85 @@ func TestApplyControllerLabelsToResult_ForceBucket(t *testing.T) {
 	}
 	if v := got[0].GetLabels()["app.kubernetes.io/managed-by"]; v != "test-controller" {
 		t.Errorf("force-bucket object missing controller label, got %q", v)
+	}
+}
+
+func TestRemoveExcludedLabelsFromResult(t *testing.T) {
+	const excludedLabel = "aim.eai.amd.com/service.name"
+	obj := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "shared",
+			Labels: map[string]string{"existing": "preserved"},
+		},
+	}
+	parent := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "parent",
+			Labels: map[string]string{excludedLabel: "service-a"},
+		},
+	}
+	planResult := &PlanResult{}
+	planResult.ApplyWithoutOwnerRef(obj)
+	planResult.ExcludeLabels(obj, excludedLabel)
+
+	PropagateLabelsForResult(parent, planResult, nil)
+	ApplyControllerLabelsToResult(planResult, map[string]string{
+		"app.kubernetes.io/managed-by": "test-controller",
+		excludedLabel:                  "service-a",
+	})
+	RemoveExcludedLabelsFromResult(planResult)
+
+	if _, exists := obj.Labels[excludedLabel]; exists {
+		t.Fatalf("excluded label %q remains on object", excludedLabel)
+	}
+	if got := obj.Labels["existing"]; got != "preserved" {
+		t.Errorf("existing label = %q, want preserved", got)
+	}
+	if got := obj.Labels["app.kubernetes.io/managed-by"]; got != "test-controller" {
+		t.Errorf("non-excluded controller label = %q, want test-controller", got)
+	}
+}
+
+func TestSkipLabelPropagationForResult(t *testing.T) {
+	parent := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "parent",
+			Labels: map[string]string{
+				"team":                            testLabelValueAlpha,
+				constants.AimLabelDomain + "/env": "service-owned",
+			},
+		},
+	}
+	obj := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "shared",
+			Labels: map[string]string{constants.LabelProfile: "profile-a"},
+		},
+	}
+	planResult := &PlanResult{}
+	planResult.ApplyWithoutOwnerRef(obj)
+	planResult.SkipLabelPropagation(obj)
+
+	PropagateLabelsForResult(
+		parent,
+		planResult,
+		&LabelPropagationSettings{Enabled: true, Match: []string{"team"}},
+	)
+	ApplyControllerLabelsToResult(planResult, map[string]string{
+		constants.LabelK8sManagedBy: constants.LabelValueManagedBy,
+	})
+
+	if _, exists := obj.Labels["team"]; exists {
+		t.Error("shared object inherited configured parent label")
+	}
+	if _, exists := obj.Labels[constants.AimLabelDomain+"/env"]; exists {
+		t.Error("shared object inherited AIM parent label")
+	}
+	if got := obj.Labels[constants.LabelProfile]; got != "profile-a" {
+		t.Errorf("profile label = %q, want profile-a", got)
+	}
+	if got := obj.Labels[constants.LabelK8sManagedBy]; got != constants.LabelValueManagedBy {
+		t.Errorf("managed-by label = %q, want %q", got, constants.LabelValueManagedBy)
 	}
 }
 

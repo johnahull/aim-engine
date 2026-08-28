@@ -1,0 +1,15 @@
+apiVersion: aim.eai.amd.com/v1alpha2
+kind: AIMService
+metadata:
+  name: shared-label-consumer-a
+  labels:
+    team-bootstrap: service-a
+    cost-center: service-a
+    aim.eai.amd.com/requester: service-a
+spec:
+  profile:
+    name: test-shared-projection-labels
+  runtimeConfigName: shared-projection-labels
+  replicas: 1
+  caching:
+    mode: Shared

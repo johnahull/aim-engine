@@ -18,6 +18,9 @@
 #      overwrites it with aim.eai.amd.com/runtime-projection: eager, so
 #      the lazy path defers; and the object's resourceVersion STABILIZES (sampled
 #      twice with a delay, required unchanged) — a single settled owner.
+#   4. Restore Reduced, patch the profile, and assert the retained eager pair gets
+#      a new matching content hash. Reduced must maintain an existing eager
+#      projection even though it would not create that per-profile runtime anew.
 #
 # Follows v1alpha2 conventions (profile-based, no AIMServiceTemplate) and the
 # computed hashed runtime name aim-flip-ns-profile-bba2ad9c
@@ -153,8 +156,8 @@ spec:
         (unchanged across a short interval, bounded timeout) and only then
         establishes the baseline: with a single settled owner the runtime's
         resourceVersion no longer churns — sampled twice with a delay and required
-        unchanged. The `finally` restores Reduced so the other reduced-mode tests
-        run cleanly.
+        unchanged. The `finally` restores Reduced; the next step validates that
+        the retained eager pair is still maintained before other tests run.
       try:
         - script:
             timeout: 210s
@@ -265,10 +268,85 @@ spec:
               set -eu
               NS="${OPERATOR_NAMESPACE:-aim-system}"
               DEPLOY="${OPERATOR_DEPLOYMENT:-aim-engine-controller-manager}"
-              # Restore Reduced for the rest of the CI leg (append again; last
-              # flag wins). Best-effort rollout wait so a slow restore never fails
-              # this cleanup.
+              # Restore Reduced (append again; last flag wins). Best-effort
+              # rollout wait keeps cleanup robust; the next step waits strictly
+              # before testing retained maintenance under Reduced.
               kubectl -n "$NS" patch deployment "$DEPLOY" --type=json \
                 -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--runtime-projection-mode=Reduced"}]'
               kubectl -n "$NS" rollout status deployment/"$DEPLOY" --timeout=180s || true
               echo "restored --runtime-projection-mode=Reduced"
+
+    - name: Patch the profile in Reduced and assert the retained eager projection converges
+      description: |
+        This is the Exhaustive/Both -> Reduced regression guard. The per-profile
+        runtime remains marked eager after the mode switch, so the lazy controller
+        intentionally defers to it. The profile controller must therefore keep
+        maintaining the retained pair in Reduced; otherwise the old content hash
+        survives forever and AIMService remains ProfileRuntimeConverging.
+      try:
+        - script:
+            timeout: 150s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              NS="${OPERATOR_NAMESPACE:-aim-system}"
+              DEPLOY="${OPERATOR_DEPLOYMENT:-aim-engine-controller-manager}"
+              SR=aim-flip-ns-profile-bba2ad9c
+              IMAGE=registry.example.com/aim-cpu-reduced:9.9.9
+
+              # The previous step restores Reduced in finally. Wait strictly here
+              # before mutating the profile so this cannot pass under Exhaustive.
+              kubectl -n "$NS" rollout status deployment/"$DEPLOY" --timeout=120s
+              args="$(kubectl -n "$NS" get deployment "$DEPLOY" -o jsonpath='{.spec.template.spec.containers[0].args}')"
+              printf '%s' "${args}" | grep -q -- '--runtime-projection-mode=Reduced'
+
+              before="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" \
+                -o jsonpath='{.metadata.annotations.aim\.eai\.amd\.com/runtime-projection-content-hash}')"
+              if [ -z "${before}" ]; then
+                echo "retained eager ServingRuntime has no baseline content hash" >&2
+                exit 1
+              fi
+
+              kubectl -n "$NAMESPACE" patch aimprofile flip-ns-profile \
+                --type=merge \
+                -p "{\"spec\":{\"image\":\"${IMAGE}\"}}"
+
+              deadline=$(( $(date +%s) + 90 ))
+              while [ "$(date +%s)" -lt "${deadline}" ]; do
+                image="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" \
+                  -o jsonpath='{.spec.containers[0].image}')"
+                sr_hash="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" \
+                  -o jsonpath='{.metadata.annotations.aim\.eai\.amd\.com/runtime-projection-content-hash}')"
+                cm_hash="$(kubectl -n "$NAMESPACE" get configmap "$SR" \
+                  -o jsonpath='{.metadata.annotations.aim\.eai\.amd\.com/runtime-projection-content-hash}')"
+                marker="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" \
+                  -o jsonpath='{.metadata.labels.aim\.eai\.amd\.com/runtime-projection}')"
+                if [ "${image}" = "${IMAGE}" ] &&
+                   [ -n "${sr_hash}" ] &&
+                   [ "${sr_hash}" != "${before}" ] &&
+                   [ "${cm_hash}" = "${sr_hash}" ] &&
+                   [ "${marker}" = "eager" ]; then
+                  echo "retained eager projection converged in Reduced: ${before} -> ${sr_hash}"
+                  exit 0
+                fi
+                sleep 2
+              done
+
+              echo "retained eager projection did not converge after profile drift in Reduced" >&2
+              kubectl -n "$NAMESPACE" get aimprofile flip-ns-profile -o yaml >&2
+              kubectl -n "$NAMESPACE" get servingruntime "$SR" -o yaml >&2
+              kubectl -n "$NAMESPACE" get configmap "$SR" -o yaml >&2
+              exit 1
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha1
+              kind: AIMService
+              metadata:
+                name: flip-ns-consumer
+              status:
+                (conditions[?type == 'ProfileRuntimeReady']):
+                  - status: "True"
+                    reason: ProfileRuntimeReady

@@ -109,6 +109,15 @@ type PlanResult struct {
 	// toDelete are objects to delete
 	toDelete []client.Object
 
+	// labelExclusions removes labels that the generic pipeline would otherwise
+	// propagate or stamp on a specific planned object.
+	labelExclusions map[client.Object]map[string]struct{}
+
+	// labelPropagationSkips identifies shared objects that must not inherit
+	// labels from the reconciling parent. Standard controller labels are still
+	// applied unless separately excluded through labelExclusions.
+	labelPropagationSkips map[client.Object]struct{}
+
 	// RequeueAfter signals to the controller that reconciliation should be retried
 	// after the specified duration. Use this when the reconciler cannot proceed
 	// (e.g., blocked by a rate limit) but should retry later.
@@ -139,6 +148,37 @@ func (pr *PlanResult) ApplyWithForce(obj client.Object) {
 // Delete adds an object to be deleted
 func (pr *PlanResult) Delete(obj client.Object) {
 	pr.toDelete = append(pr.toDelete, obj)
+}
+
+// ExcludeLabels prevents the generic apply pipeline from persisting the given
+// labels on a specific planned object.
+func (pr *PlanResult) ExcludeLabels(obj client.Object, labels ...string) {
+	if obj == nil || len(labels) == 0 {
+		return
+	}
+	if pr.labelExclusions == nil {
+		pr.labelExclusions = make(map[client.Object]map[string]struct{})
+	}
+	excluded := pr.labelExclusions[obj]
+	if excluded == nil {
+		excluded = make(map[string]struct{}, len(labels))
+		pr.labelExclusions[obj] = excluded
+	}
+	for _, label := range labels {
+		excluded[label] = struct{}{}
+	}
+}
+
+// SkipLabelPropagation prevents a specific planned object from inheriting
+// labels from the reconciling parent. Controller labels are handled separately.
+func (pr *PlanResult) SkipLabelPropagation(obj client.Object) {
+	if obj == nil {
+		return
+	}
+	if pr.labelPropagationSkips == nil {
+		pr.labelPropagationSkips = make(map[client.Object]struct{})
+	}
+	pr.labelPropagationSkips[obj] = struct{}{}
 }
 
 // GetToApply returns the objects to be applied with owner references (for testing)
@@ -181,6 +221,14 @@ func (pr *PlanResult) Merge(other PlanResult) {
 	pr.toApplyWithoutOwnerRef = append(pr.toApplyWithoutOwnerRef, other.toApplyWithoutOwnerRef...)
 	pr.toApplyWithForce = append(pr.toApplyWithForce, other.toApplyWithForce...)
 	pr.toDelete = append(pr.toDelete, other.toDelete...)
+	for obj, labels := range other.labelExclusions {
+		for label := range labels {
+			pr.ExcludeLabels(obj, label)
+		}
+	}
+	for obj := range other.labelPropagationSkips {
+		pr.SkipLabelPropagation(obj)
+	}
 	pr.RequestRequeueAfter(other.RequeueAfter)
 }
 
@@ -390,6 +438,7 @@ func (p *Pipeline[T, S, F, Obs]) Run(ctx context.Context, obj T) (ctrl.Result, e
 			fmt.Sprintf("%s/%s.name", constants.AimLabelDomain, p.ControllerName): obj.GetName(),
 		}
 		ApplyControllerLabelsToResult(&planResult, controllerLabels)
+		RemoveExcludedLabelsFromResult(&planResult)
 
 		// When ForceApply is set (field-manager rename migration), the owned and
 		// unowned buckets must reassert ownership from the previous field manager.

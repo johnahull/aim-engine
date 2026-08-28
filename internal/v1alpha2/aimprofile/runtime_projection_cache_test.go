@@ -36,6 +36,8 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/runtimeprojection"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/serving"
 )
 
 // TestEagerProjection_MountsServiceDrivenSharedCache is the regression guard for
@@ -110,6 +112,77 @@ func TestEagerProjection_MountsServiceDrivenSharedCache(t *testing.T) {
 	// The cache-redirect framework env must accompany the mount.
 	if !hasEnv(sr.Spec.Containers[0].Env, constants.EnvAIMCachePath) {
 		t.Fatalf("projected runtime missing %s env for cache redirect", constants.EnvAIMCachePath)
+	}
+}
+
+func TestRetainedReducedProjection_MatchesConsumerHashWithSharedCache(t *testing.T) {
+	profile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "retained-cpu", Namespace: "team-a"},
+		Spec: aimv1alpha2.AIMProfileSpec{
+			AIMProfileSpecCommon: aimv1alpha2.AIMProfileSpecCommon{
+				AimId: "qwen/qwen3-32b",
+				Image: "registry.io/qwen3-32b:2.0.0",
+				ModelSources: []aimv1alpha1.AIMModelSource{
+					{ModelID: "qwen/qwen3-32b", SourceURI: "hf://qwen/qwen3-32b"},
+				},
+			},
+		},
+	}
+	profile.Status.ProjectedRuntimeName = serving.RuntimeName(profile.Name)
+	cache := &aimv1alpha2.AIMProfileCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "a-retained-shared-cache", Namespace: profile.Namespace},
+		Spec: aimv1alpha2.AIMProfileCacheSpec{
+			ProfileName:  profile.Name,
+			ProfileScope: aimv1alpha1.AIMResolutionScopeNamespace,
+			Mode:         aimv1alpha2.ProfileCacheModeShared,
+		},
+		Status: aimv1alpha2.AIMProfileCacheStatus{
+			Status: constants.AIMStatusReady,
+			Artifacts: map[string]aimv1alpha1.AIMResolvedArtifact{
+				"weights": {
+					Name:                  "weights",
+					Model:                 "qwen/qwen3-32b",
+					Status:                constants.AIMStatusReady,
+					PersistentVolumeClaim: "retained-cache-pvc",
+					MountPoint:            "/workspace/cache/qwen3-32b",
+				},
+			},
+		},
+	}
+
+	c := newProfileTestClient(t, profile, cache)
+	r := &ProfileReconciler{Client: c, ProjectionMode: aimv1alpha2.RuntimeProjectionModeReduced}
+	reconcileCtx := controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile}
+	fetch := r.FetchRemoteState(context.Background(), c, reconcileCtx)
+	obs := r.ComposeState(context.Background(), reconcileCtx, fetch)
+	if obs.projectionErr != nil {
+		t.Fatalf("compose retained Reduced projection: %v", obs.projectionErr)
+	}
+
+	plan := r.PlanResources(context.Background(), reconcileCtx, obs)
+	eagerRuntime := findServingRuntime(t, plan.GetToApplyWithForce())
+	eagerConfigMap := findConfigMap(t, plan.GetToApplyWithForce(), eagerRuntime.Name, profile.Namespace)
+	if !runtimeHasPVCVolume(eagerRuntime.Spec.Volumes, "retained-cache-pvc") {
+		t.Fatalf("retained Reduced projection did not select current Shared cache: %+v", eagerRuntime.Spec.Volumes)
+	}
+
+	profile.Status.Resources = obs.resolvedResources
+	profile.Status.ResolvedNodeAffinity = obs.matchResult.NodeAffinity
+	profile.Status.Origin = obs.origin
+	desired, err := runtimeprojection.DesiredForRuntime(
+		profile.Namespace,
+		eagerRuntime.Name,
+		runtimeprojection.ProjectionState{AnnotatedProfile: profile, Cache: cache},
+	)
+	if err != nil {
+		t.Fatalf("build consumer projection: %v", err)
+	}
+	wantHash := desired.Runtime.Annotations[constants.AnnotationRuntimeProjectionContentHash]
+	if got := eagerRuntime.Annotations[constants.AnnotationRuntimeProjectionContentHash]; got != wantHash {
+		t.Fatalf("retained Reduced runtime hash = %q, consumer wants %q", got, wantHash)
+	}
+	if got := eagerConfigMap.Annotations[constants.AnnotationRuntimeProjectionContentHash]; got != wantHash {
+		t.Fatalf("retained Reduced ConfigMap hash = %q, consumer wants %q", got, wantHash)
 	}
 }
 

@@ -24,6 +24,7 @@ package controller
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	kservev1alpha1 "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
@@ -56,37 +57,41 @@ import (
 )
 
 const (
-	inferenceServiceRuntimeControllerName = "runtime-projection"
+	runtimeProjectionControllerName = "runtime-projection"
 	// runtimeProjectionFieldOwner is the SSA field manager for the lazily
 	// materialized namespace ServingRuntime + ConfigMap. Distinct from the
 	// profile/service field owners so authority over these objects is traceable.
 	runtimeProjectionFieldOwner = "aim-runtime-projection-controller"
 
-	// inferenceServiceRuntimeIndexKey indexes InferenceServices by the runtime
-	// they reference (spec.predictor.model.runtime). The mapping handlers use it
-	// to fan a changed profile / cache / shadow object back to the ISVCs that
-	// consume the affected runtime, without paging every ISVC on each event.
+	// inferenceServiceRuntimeIndexKey indexes KServe InferenceServices by the
+	// ServingRuntime or ClusterServingRuntime name they reference
+	// (spec.predictor.model.runtime). The mapping handlers use it to fan a
+	// changed profile, cache, or shadow object back to the InferenceServices
+	// that consume the affected ServingRuntime or ClusterServingRuntime, without
+	// paging every InferenceService on each event.
 	inferenceServiceRuntimeIndexKey = ".spec.predictor.model.runtime"
+
+	namespaceProfileKind = "AIMProfile"
+	clusterProfileKind   = "AIMClusterProfile"
 )
 
-// InferenceServiceRuntimeReconciler watches KServe InferenceServices and lazily
-// materializes a complete namespace ServingRuntime (+ colocated profile
-// ConfigMap) in the ISVC's namespace when it references a managed runtime that
-// does not already resolve to a complete runtime there. The materialized
-// objects are owned by the backing AIMClusterProfile (garbage collected on
-// profile delete) and applied authoritatively (SSA + ForceOwnership) under the
-// reserved aim- prefix.
+// RuntimeProjectionReconciler reconciles
+// namespace/KServe-ServingRuntime-name keys and lazily materializes a complete
+// namespaced KServe ServingRuntime plus its colocated ConfigMap.
+// The objects are owned by the backing profile and applied authoritatively
+// (SSA + ForceOwnership) under the reserved aim- prefix.
 //
 // This reconciler is mode-independent and always on: it guarantees an
-// AIMService's runtime (and any native KServe ISVC referencing a managed CSR)
-// gets its colocated profile ConfigMap regardless of the eager projection mode.
-type InferenceServiceRuntimeReconciler struct {
+// AIMService's referenced ServingRuntime (and any native KServe InferenceService
+// referencing a managed ClusterServingRuntime) gets its colocated profile
+// ConfigMap regardless of the eager projection mode.
+type RuntimeProjectionReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	// APIReader is the uncached, direct-to-API reader. It is used only where a
 	// read may target an unlabeled ConfigMap the label-scoped cache does not
-	// hold (a hand-authored runtime's colocated ConfigMap in
+	// hold (a hand-authored KServe ServingRuntime's colocated ConfigMap in
 	// namespaceRuntimeComplete). Nil in unit tests, which fall back to Client.
 	APIReader client.Reader
 	Clientset kubernetes.Interface
@@ -95,7 +100,7 @@ type InferenceServiceRuntimeReconciler struct {
 // configMapReader returns the reader used for ConfigMap point reads that must
 // see objects outside the label-scoped cache. Falls back to the cached client
 // when APIReader is unset (unit tests wiring only Client).
-func (r *InferenceServiceRuntimeReconciler) configMapReader() client.Reader {
+func (r *RuntimeProjectionReconciler) configMapReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
 	}
@@ -110,23 +115,15 @@ func (r *InferenceServiceRuntimeReconciler) configMapReader() client.Reader {
 // +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimprofilecaches,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 
-func (r *InferenceServiceRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *RuntimeProjectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var isvc servingv1beta1.InferenceService
-	if err := r.Get(ctx, req.NamespacedName, &isvc); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-	if isvc.DeletionTimestamp != nil {
-		return ctrl.Result{}, nil
-	}
-
-	state, err := r.resolveState(ctx, &isvc)
+	state, err := r.resolveState(ctx, req.NamespacedName)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	desired, err := runtimeprojection.DesiredFor(&isvc, state)
+	desired, err := runtimeprojection.DesiredForRuntime(req.Namespace, req.Name, state)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -141,54 +138,111 @@ func (r *InferenceServiceRuntimeReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("materialized namespace serving runtime for referenced runtime",
-		"runtime", desired.Runtime.Name,
+	logger.Info("materialized namespaced KServe ServingRuntime",
+		"servingRuntime", desired.Runtime.Name,
 		"namespace", desired.Runtime.Namespace,
-		"profile", desired.Owner.GetName(),
-		"inferenceService", isvc.Name)
+		"profile", desired.Owner.GetName())
 	return ctrl.Result{}, nil
 }
 
-// resolveState reads the cluster state the pure DesiredFor seam needs: whether a
-// complete namespace runtime already serves the reference, and the backing
-// profile candidates in resolution order.
-func (r *InferenceServiceRuntimeReconciler) resolveState(
+// resolveState reads the state for one namespace/KServe-ServingRuntime-name key.
+// Existing lazy sibling ownership is authoritative, followed by a managed
+// ClusterServingRuntime and then deterministic annotations on active indexed
+// InferenceService consumers.
+func (r *RuntimeProjectionReconciler) resolveState(
 	ctx context.Context,
-	isvc *servingv1beta1.InferenceService,
+	key types.NamespacedName,
 ) (runtimeprojection.ProjectionState, error) {
 	var state runtimeprojection.ProjectionState
 
-	runtimeName := runtimeprojection.ReferencedRuntimeName(isvc)
-	if runtimeName == "" || !strings.HasPrefix(runtimeName, serving.RuntimeNamePrefix) {
+	if key.Name == "" || !strings.HasPrefix(key.Name, serving.RuntimeNamePrefix) {
 		return state, nil
 	}
 
-	complete, err := r.namespaceRuntimeComplete(ctx, isvc.Namespace, runtimeName)
+	sr, cm, err := r.runtimeSiblings(ctx, key)
 	if err != nil {
 		return state, err
 	}
-	if complete {
+	if runtimeSiblingsComplete(sr, cm) {
 		state.NamespaceRuntimeComplete = true
 		return state, nil
 	}
 
-	state.ManagedRuntimeProfile, err = r.profileFromManagedClusterRuntime(ctx, runtimeName)
-	if err != nil {
-		return state, err
-	}
-	state.AnnotatedProfile, err = r.profileFromAnnotation(ctx, isvc)
+	consumers, err := r.activeInferenceServicesForRuntime(ctx, key)
 	if err != nil {
 		return state, err
 	}
 
+	// A stale queue entry must not resurrect a fully removed inactive shadow.
+	if sr == nil && cm == nil && len(consumers) == 0 {
+		return state, nil
+	}
+
+	state.ExistingShadowProfile, err = r.profileFromLazySiblings(ctx, sr, cm)
+	if err != nil {
+		return state, err
+	}
+	if state.ExistingShadowProfile == nil {
+		state.ManagedRuntimeProfile, err = r.profileFromManagedClusterRuntime(ctx, key.Name)
+		if err != nil {
+			return state, err
+		}
+	}
+	if state.ExistingShadowProfile == nil && state.ManagedRuntimeProfile == nil {
+		state.AnnotatedProfile, err = r.profileFromInferenceServices(ctx, key.Name, consumers)
+		if err != nil {
+			return state, err
+		}
+	}
+
 	if profile := state.BackingProfile(); profile != nil {
-		state.Cache, err = r.readyProfileCache(ctx, isvc.Namespace, profile.GetName(), backingProfileScope(profile))
+		state.Cache, err = r.readyProfileCache(ctx, key.Namespace, profile.GetName(), backingProfileScope(profile))
 		if err != nil {
 			return state, err
 		}
 	}
 
 	return state, nil
+}
+
+func (r *RuntimeProjectionReconciler) runtimeSiblings(
+	ctx context.Context,
+	key types.NamespacedName,
+) (*kservev1alpha1.ServingRuntime, *corev1.ConfigMap, error) {
+	var sr kservev1alpha1.ServingRuntime
+	if err := r.Get(ctx, key, &sr); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, nil, err
+		}
+	} else {
+		var cm corev1.ConfigMap
+		if err := r.configMapReader().Get(ctx, key, &cm); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return nil, nil, err
+			}
+			return &sr, nil, nil
+		}
+		return &sr, &cm, nil
+	}
+
+	var cm corev1.ConfigMap
+	if err := r.configMapReader().Get(ctx, key, &cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	return nil, &cm, nil
+}
+
+func runtimeSiblingsComplete(sr *kservev1alpha1.ServingRuntime, cm *corev1.ConfigMap) bool {
+	if sr == nil || cm == nil {
+		return false
+	}
+	if sr.GetLabels()[constants.LabelRuntimeProjection] == constants.LabelValueRuntimeProjectionEager {
+		return true
+	}
+	return !ownedByLazyProjection(sr) && !ownedByLazyProjection(cm)
 }
 
 // backingProfileScope classifies a resolved backing profile so the colocated
@@ -202,47 +256,25 @@ func backingProfileScope(profile runtimeprojection.BackingProfile) aimv1alpha1.A
 	return aimv1alpha1.AIMResolutionScopeCluster
 }
 
-// namespaceRuntimeComplete reports whether a complete namespace runtime — a
-// ServingRuntime plus its colocated ConfigMap of the same name — that the lazy
-// projection must defer to already exists in the namespace, in which case no
-// shadow is materialized.
+// namespaceRuntimeComplete reports whether a complete namespaced KServe
+// ServingRuntime plus its colocated ConfigMap of the same name already exists.
+// The lazy projection defers to that pair and materializes no shadow.
 //
-// A complete runtime this controller materialized itself (its lazy shadow) does
-// NOT count: it must be re-applied on every reconcile so a drift edit, a
-// late-Ready cache, or backing-profile changes are reasserted by the
-// authoritative force-apply. Only a complete runtime materialized by something
-// else — a profile reconciler's eager projection, or a hand-authored runtime —
-// is deferred to.
-func (r *InferenceServiceRuntimeReconciler) namespaceRuntimeComplete(
+// A complete ServingRuntime this controller materialized itself (its lazy
+// shadow) does NOT count: it must be re-applied on every reconcile so a drift
+// edit, a late-Ready cache, or backing-profile changes are reasserted by the
+// authoritative force-apply. Only a complete ServingRuntime materialized by
+// something else — a profile reconciler's eager projection or a hand-authored
+// ServingRuntime — is deferred to.
+func (r *RuntimeProjectionReconciler) namespaceRuntimeComplete(
 	ctx context.Context,
 	namespace, name string,
 ) (bool, error) {
-	var sr kservev1alpha1.ServingRuntime
-	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &sr); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
+	sr, cm, err := r.runtimeSiblings(ctx, types.NamespacedName{Namespace: namespace, Name: name})
+	if err != nil {
 		return false, err
 	}
-
-	// Read the colocated ConfigMap through the uncached reader: the ConfigMap
-	// cache is label-scoped to managed-by=aim-engine, so a hand-authored
-	// complete runtime's unlabeled ConfigMap is invisible to the cached client
-	// and we must not mistake it for "incomplete" and shadow over it.
-	var cm corev1.ConfigMap
-	if err := r.configMapReader().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &cm); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	// Our own lazy shadow is never "complete enough to stop" — re-materialize it
-	// so drift / late cache / profile changes reconcile.
-	if ownedByLazyProjection(&sr) {
-		return false, nil
-	}
-	return true, nil
+	return runtimeSiblingsComplete(sr, cm), nil
 }
 
 // ownedByLazyProjection reports whether the object is a shadow this controller
@@ -253,18 +285,120 @@ func (r *InferenceServiceRuntimeReconciler) namespaceRuntimeComplete(
 // projection share the same AIMProfile ownerRef, so the kind can't distinguish
 // them, and adopting an eager object would hot-loop against the profile
 // controller's force-apply. Only the exact lazy value is ours; the eager value
-// and unmarked hand-authored runtimes are deferred to — which is how ownership
-// settles once a mode flip has the eager force-apply overwrite the lazy marker.
+// and unmarked hand-authored ServingRuntimes are deferred to — which is how
+// ownership settles once a mode flip has the eager force-apply overwrite the
+// lazy marker.
 func ownedByLazyProjection(obj client.Object) bool {
 	return obj.GetLabels()[constants.LabelRuntimeProjection] == constants.LabelValueRuntimeProjectionLazy
 }
 
+func (r *RuntimeProjectionReconciler) profileFromLazySiblings(
+	ctx context.Context,
+	sr *kservev1alpha1.ServingRuntime,
+	cm *corev1.ConfigMap,
+) (runtimeprojection.BackingProfile, error) {
+	objects := make([]client.Object, 0, 2)
+	if sr != nil {
+		objects = append(objects, sr)
+	}
+	if cm != nil {
+		objects = append(objects, cm)
+	}
+	for _, obj := range objects {
+		if !isManagedLazyRuntimeObject(obj) {
+			continue
+		}
+		profile, err := r.profileFromOwnerReferences(ctx, obj.GetNamespace(), obj.GetOwnerReferences())
+		if err != nil {
+			return nil, err
+		}
+		if profile != nil {
+			return profile, nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *RuntimeProjectionReconciler) profileFromOwnerReferences(
+	ctx context.Context,
+	namespace string,
+	refs []metav1.OwnerReference,
+) (runtimeprojection.BackingProfile, error) {
+	for _, ref := range refs {
+		if ref.APIVersion != "" && ref.APIVersion != aimv1alpha2.GroupVersion.String() {
+			continue
+		}
+		switch ref.Kind {
+		case namespaceProfileKind:
+			profile, err := r.namespaceBackingProfile(ctx, namespace, ref.Name)
+			if err != nil {
+				return nil, err
+			}
+			if profile != nil && profile.GetUID() == ref.UID {
+				return profile, nil
+			}
+		case clusterProfileKind:
+			profile, err := r.clusterBackingProfile(ctx, ref.Name)
+			if err != nil {
+				return nil, err
+			}
+			if profile != nil && profile.GetUID() == ref.UID {
+				return profile, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+func (r *RuntimeProjectionReconciler) activeInferenceServicesForRuntime(
+	ctx context.Context,
+	key types.NamespacedName,
+) ([]servingv1beta1.InferenceService, error) {
+	var isvcs servingv1beta1.InferenceServiceList
+	if err := r.List(
+		ctx,
+		&isvcs,
+		client.InNamespace(key.Namespace),
+		client.MatchingFields{inferenceServiceRuntimeIndexKey: key.Name},
+	); err != nil {
+		return nil, err
+	}
+	active := make([]servingv1beta1.InferenceService, 0, len(isvcs.Items))
+	for i := range isvcs.Items {
+		if isvcs.Items[i].DeletionTimestamp == nil {
+			active = append(active, isvcs.Items[i])
+		}
+	}
+	sort.Slice(active, func(i, j int) bool {
+		return active[i].Name < active[j].Name
+	})
+	return active, nil
+}
+
+func (r *RuntimeProjectionReconciler) profileFromInferenceServices(
+	ctx context.Context,
+	runtimeName string,
+	isvcs []servingv1beta1.InferenceService,
+) (runtimeprojection.BackingProfile, error) {
+	for i := range isvcs {
+		profileName := isvcs[i].GetAnnotations()[constants.AnnotationRuntimeProfile]
+		profile, err := r.lookupBackingProfile(ctx, isvcs[i].Namespace, profileName)
+		if err != nil {
+			return nil, err
+		}
+		if profile != nil && runtimeprojection.RuntimeNameMatchesProfile(profile, runtimeName) {
+			return profile, nil
+		}
+	}
+	return nil, nil
+}
+
 // profileFromManagedClusterRuntime resolves the backing AIMClusterProfile of a
-// referenced runtime by following a managed ClusterServingRuntime's
-// ownerReference (Kind=AIMClusterProfile) or its profile correlator label. This
-// is the native, annotation-free flow; it only ever yields a cluster profile (a
-// namespace profile projects a namespace ServingRuntime, never a CSR).
-func (r *InferenceServiceRuntimeReconciler) profileFromManagedClusterRuntime(
+// referenced KServe ClusterServingRuntime by following its ownerReference
+// (Kind=AIMClusterProfile) or profile correlator label. This is the native,
+// annotation-free flow; it only ever yields a cluster profile (a namespace
+// profile projects a namespaced ServingRuntime, never a ClusterServingRuntime).
+func (r *RuntimeProjectionReconciler) profileFromManagedClusterRuntime(
 	ctx context.Context,
 	runtimeName string,
 ) (runtimeprojection.BackingProfile, error) {
@@ -276,23 +410,20 @@ func (r *InferenceServiceRuntimeReconciler) profileFromManagedClusterRuntime(
 		return nil, err
 	}
 
-	profileName := backingProfileNameFromRuntimeMeta(csr.GetOwnerReferences(), csr.GetLabels())
+	if !isManagedRuntimeObject(&csr) {
+		return nil, nil
+	}
+	for _, ref := range csr.GetOwnerReferences() {
+		if ref.Kind != clusterProfileKind {
+			continue
+		}
+		return r.profileFromOwnerReferences(ctx, "", []metav1.OwnerReference{ref})
+	}
+	profileName := csr.GetLabels()[constants.LabelProfile]
 	if profileName == "" {
 		return nil, nil
 	}
 	return r.clusterBackingProfile(ctx, profileName)
-}
-
-// profileFromAnnotation resolves the backing profile from the AIMService-stamped
-// runtime-profile annotation on the ISVC — the fast-path for a runtime that has
-// not been created yet (cross-scope, or Reduced mode). Resolved namespace-first
-// so a namespace-scope service settles on its namespace AIMProfile.
-func (r *InferenceServiceRuntimeReconciler) profileFromAnnotation(
-	ctx context.Context,
-	isvc *servingv1beta1.InferenceService,
-) (runtimeprojection.BackingProfile, error) {
-	profileName := isvc.GetAnnotations()[constants.AnnotationRuntimeProfile]
-	return r.lookupBackingProfile(ctx, isvc.Namespace, profileName)
 }
 
 // lookupBackingProfile resolves a backing profile by name, preferring a
@@ -302,7 +433,7 @@ func (r *InferenceServiceRuntimeReconciler) profileFromAnnotation(
 // lazy resolver settles on the same profile scope the service did. Returns a
 // genuine nil interface (never a typed-nil pointer) when neither exists, so the
 // first-non-nil resolution order in ProjectionState.BackingProfile stays sound.
-func (r *InferenceServiceRuntimeReconciler) lookupBackingProfile(
+func (r *RuntimeProjectionReconciler) lookupBackingProfile(
 	ctx context.Context,
 	namespace, name string,
 ) (runtimeprojection.BackingProfile, error) {
@@ -324,7 +455,7 @@ func (r *InferenceServiceRuntimeReconciler) lookupBackingProfile(
 
 // clusterBackingProfile resolves a cluster AIMClusterProfile by name, returning a
 // genuine nil interface (not a typed-nil pointer) when absent.
-func (r *InferenceServiceRuntimeReconciler) clusterBackingProfile(
+func (r *RuntimeProjectionReconciler) clusterBackingProfile(
 	ctx context.Context,
 	name string,
 ) (runtimeprojection.BackingProfile, error) {
@@ -341,7 +472,7 @@ func (r *InferenceServiceRuntimeReconciler) clusterBackingProfile(
 // readyProfileCache returns a Ready, profile-owned (Shared) AIMProfileCache in
 // the namespace that caches the given profile at the given scope, or nil when
 // none exists. The cache contributes the profile-owned cache mount on the
-// materialized runtime. Scope must match the backing profile's scope: a
+// materialized ServingRuntime. Scope must match the backing profile's scope: a
 // cluster-scope cache for an AIMClusterProfile-backed shadow, a namespace-scope
 // cache for a namespace-AIMProfile-backed shadow.
 //
@@ -349,7 +480,7 @@ func (r *InferenceServiceRuntimeReconciler) clusterBackingProfile(
 // eager profile-reconciler projection mount the identical cache — the fix for
 // the mode-dependent Shared-cache mount (a service-driven Shared cache resolves
 // here whether or not the profile set caching.enabled).
-func (r *InferenceServiceRuntimeReconciler) readyProfileCache(
+func (r *RuntimeProjectionReconciler) readyProfileCache(
 	ctx context.Context,
 	namespace, profileName string,
 	scope aimv1alpha1.AIMResolutionScope,
@@ -357,28 +488,17 @@ func (r *InferenceServiceRuntimeReconciler) readyProfileCache(
 	return profilecache.FindReadyShared(ctx, r.Client, namespace, profileName, scope)
 }
 
-// backingProfileNameFromRuntimeMeta extracts the backing AIMClusterProfile name
-// from a managed runtime's metadata, preferring a controller ownerReference and
-// falling back to the profile correlator label.
-func backingProfileNameFromRuntimeMeta(ownerRefs []metav1.OwnerReference, labels map[string]string) string {
-	for _, ref := range ownerRefs {
-		if ref.Kind == "AIMClusterProfile" && ref.Name != "" {
-			return ref.Name
-		}
-	}
-	return labels[constants.LabelProfile]
-}
-
-func (r *InferenceServiceRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *RuntimeProjectionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Recorder == nil {
-		r.Recorder = mgr.GetEventRecorderFor("aim-" + inferenceServiceRuntimeControllerName + "-controller")
+		r.Recorder = mgr.GetEventRecorderFor("aim-" + runtimeProjectionControllerName + "-controller")
 	}
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
 
-	// Index ISVCs by their referenced runtime name so the mapping handlers can
-	// look up the affected consumers efficiently.
+	// Index InferenceServices by their referenced ServingRuntime or
+	// ClusterServingRuntime name so the mapping handlers can look up the
+	// affected consumers efficiently.
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&servingv1beta1.InferenceService{},
@@ -388,20 +508,18 @@ func (r *InferenceServiceRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) e
 		return err
 	}
 
-	// The materialized shadow objects are owned by the backing AIMClusterProfile,
-	// not the InferenceService this controller reconciles, so `.Owns(...)` would
-	// never fire on them. Instead, watch the inputs (managed shadow SR/ConfigMap,
-	// backing profile, profile-owned cache) and map each change back to the
-	// consuming ISVC(s) so the lazy shadow self-heals like the eager path does.
+	// KServe ServingRuntime is the primary source, so every queue key is
+	// consistently namespace/ServingRuntime-name. Other sources map to that same
+	// key shape.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(
-			&servingv1beta1.InferenceService{},
-			builder.WithPredicates(inferenceServiceProjectionPredicate()),
+			&kservev1alpha1.ServingRuntime{},
+			builder.WithPredicates(managedRuntimeObjectPredicate()),
 		).
 		Watches(
-			&kservev1alpha1.ServingRuntime{},
-			handler.EnqueueRequestsFromMapFunc(r.findInferenceServicesForManagedRuntimeObject),
-			builder.WithPredicates(managedRuntimeObjectPredicate()),
+			&servingv1beta1.InferenceService{},
+			handler.EnqueueRequestsFromMapFunc(runtimeKeyForInferenceService),
+			builder.WithPredicates(inferenceServiceProjectionPredicate()),
 		).
 		Watches(
 			&corev1.ConfigMap{},
@@ -423,12 +541,13 @@ func (r *InferenceServiceRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) e
 			handler.EnqueueRequestsFromMapFunc(r.findInferenceServicesForProfileCache),
 			builder.WithPredicates(profileCacheProjectionPredicate()),
 		).
-		Named(inferenceServiceRuntimeControllerName).
+		Named(runtimeProjectionControllerName).
 		Complete(r)
 }
 
-// indexInferenceServiceRuntime extracts the runtime an InferenceService
-// references for the field index; ISVCs with no runtime reference are omitted.
+// indexInferenceServiceRuntime extracts the KServe ServingRuntime or
+// ClusterServingRuntime name an InferenceService references for the field
+// index; InferenceServices with no runtime reference are omitted.
 func indexInferenceServiceRuntime(obj client.Object) []string {
 	isvc, ok := obj.(*servingv1beta1.InferenceService)
 	if !ok {
@@ -441,27 +560,38 @@ func indexInferenceServiceRuntime(obj client.Object) []string {
 	return []string{name}
 }
 
-// findInferenceServicesForManagedRuntimeObject maps a changed managed shadow
-// object (a ServingRuntime or its colocated ConfigMap under the reserved aim-
-// prefix, labelled managed-by=aim-engine) back to the ISVCs in its namespace
-// that reference its name. A hand-edit or delete of the shadow therefore
-// re-triggers the authoritative force-apply that reasserts it.
-func (r *InferenceServiceRuntimeReconciler) findInferenceServicesForManagedRuntimeObject(
-	ctx context.Context,
+func runtimeKeyForInferenceService(_ context.Context, obj client.Object) []reconcile.Request {
+	isvc, ok := obj.(*servingv1beta1.InferenceService)
+	if !ok {
+		return nil
+	}
+	name := runtimeprojection.ReferencedRuntimeName(isvc)
+	if name == "" || !strings.HasPrefix(name, serving.RuntimeNamePrefix) {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: isvc.Namespace,
+		Name:      name,
+	}}}
+}
+
+// findInferenceServicesForManagedRuntimeObject preserves the historical helper
+// name while mapping a lazy ServingRuntime or ConfigMap sibling directly to its
+// ServingRuntime key.
+func (r *RuntimeProjectionReconciler) findInferenceServicesForManagedRuntimeObject(
+	_ context.Context,
 	obj client.Object,
 ) []reconcile.Request {
 	if !isManagedRuntimeObject(obj) {
 		return nil
 	}
-	return r.inferenceServicesReferencingRuntimes(ctx, obj.GetNamespace(), []string{obj.GetName()})
+	return []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(obj)}}
 }
 
-// findInferenceServicesForClusterProfile maps a changed AIMClusterProfile to
-// every InferenceService (cluster-wide) whose referenced runtime resolves to
-// that profile, so backing-profile spec drift (image / resources / affinity)
-// propagates into already-shadowed namespaces and a late-Ready profile
-// materializes for an ISVC that raced ahead of it.
-func (r *InferenceServiceRuntimeReconciler) findInferenceServicesForClusterProfile(
+// findInferenceServicesForClusterProfile returns the union of active consumer
+// ServingRuntime keys and every existing lazy shadow owned by this exact
+// profile.
+func (r *RuntimeProjectionReconciler) findInferenceServicesForClusterProfile(
 	ctx context.Context,
 	obj client.Object,
 ) []reconcile.Request {
@@ -469,17 +599,14 @@ func (r *InferenceServiceRuntimeReconciler) findInferenceServicesForClusterProfi
 	if !ok {
 		return nil
 	}
-	return r.inferenceServicesReferencingRuntimes(ctx, "", runtimeNamesForProfile(profile.Name, profile.Spec.AimId))
+	return mergeRequests(
+		r.inferenceServicesReferencingRuntimes(ctx, "", runtimeNamesForProfile(profile.Name, profile.Spec.AimId)),
+		r.lazyShadowRequestsForProfile(ctx, profile, ""),
+	)
 }
 
-// findInferenceServicesForProfile maps a changed namespace AIMProfile to the
-// InferenceServices in the profile's own namespace whose referenced runtime
-// resolves to it, so backing-profile spec drift and a late-Ready namespace
-// profile self-heal a namespace-profile-backed lazy shadow (the Reduced-mode
-// case, where no eager per-profile runtime exists). Namespace-scoped, so the
-// fan-out is confined to the profile's namespace — the only namespace whose
-// shadows this profile can back.
-func (r *InferenceServiceRuntimeReconciler) findInferenceServicesForProfile(
+// findInferenceServicesForProfile is the namespace-scoped equivalent.
+func (r *RuntimeProjectionReconciler) findInferenceServicesForProfile(
 	ctx context.Context,
 	obj client.Object,
 ) []reconcile.Request {
@@ -487,28 +614,15 @@ func (r *InferenceServiceRuntimeReconciler) findInferenceServicesForProfile(
 	if !ok {
 		return nil
 	}
-	return r.inferenceServicesReferencingRuntimes(ctx, profile.Namespace, runtimeNamesForProfile(profile.Name, profile.Spec.AimId))
+	return mergeRequests(
+		r.inferenceServicesReferencingRuntimes(ctx, profile.Namespace, runtimeNamesForProfile(profile.Name, profile.Spec.AimId)),
+		r.lazyShadowRequestsForProfile(ctx, profile, profile.Namespace),
+	)
 }
 
-// findInferenceServicesForProfileCache maps a changed profile-owned cache to the
-// ISVCs in the cache's namespace whose runtime resolves to the cache's profile,
-// so a cache reaching Ready after the ISVC exists gains its mount on the shadow
-// without the ISVC being re-applied. Both scopes are relevant now that the lazy
-// shadow completes namespace-profile-backed runtimes too: a cluster-scope cache
-// backs a cross-scope AIMClusterProfile shadow, a namespace-scope cache backs a
-// namespace-AIMProfile shadow. Either way the shadow and its cache live in the
-// cache's namespace, so the fan-out is confined there.
-//
-// The cache carries only spec.profileName — never an aimId — so we resolve its
-// backing profile to recover spec.aimId and fan out to BOTH reserved names the
-// profile can back: the per-profile runtime AND the model-slug primary. Without
-// this, a Reduced/Both model-slug consumer whose cache goes Ready after the
-// shadow already exists would never be woken (the model-slug name is derived
-// from the aimId the cache doesn't carry), leaving the profile-owned cache mount
-// stranded until an unrelated reconcile. Resolution is best-effort — a mapping
-// function cannot return an error — so a missing/unresolvable profile degrades
-// to the per-profile fan-out (see aimIDForCache).
-func (r *InferenceServiceRuntimeReconciler) findInferenceServicesForProfileCache(
+// findInferenceServicesForProfileCache returns active ServingRuntime keys plus
+// inactive lazy shadows in the cache's namespace and exact profile scope.
+func (r *RuntimeProjectionReconciler) findInferenceServicesForProfileCache(
 	ctx context.Context,
 	obj client.Object,
 ) []reconcile.Request {
@@ -516,36 +630,24 @@ func (r *InferenceServiceRuntimeReconciler) findInferenceServicesForProfileCache
 	if !ok {
 		return nil
 	}
-	aimID := r.aimIDForCache(ctx, cache)
-	return r.inferenceServicesReferencingRuntimes(ctx, cache.Namespace, runtimeNamesForProfile(cache.Spec.ProfileName, aimID))
-}
-
-// aimIDForCache recovers the spec.aimId of the profile a cache backs so the
-// cache-event fan-out can also reach model-slug primary consumers, resolving the
-// profile strictly at the cache's declared ProfileScope. It is best-effort by
-// contract (a watch mapping function cannot return an error):
-//
-//   - profile resolves → its aimId (fans out to per-profile + model-slug names);
-//   - profile NotFound  → "" (fans out to per-profile names only — no regression);
-//   - any other lookup failure → logged, then "" (same safe degradation).
-//
-// An empty aimId is harmless downstream: runtimeNamesForProfile simply omits the
-// model-slug name, and even a widened fan-out is filtered by DesiredFor, so the
-// worst case of a stale/mismatched aimId is a redundant (dropped) reconcile.
-func (r *InferenceServiceRuntimeReconciler) aimIDForCache(
-	ctx context.Context,
-	cache *aimv1alpha2.AIMProfileCache,
-) string {
 	profile, err := r.backingProfileForCache(ctx, cache)
 	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to resolve backing profile for cache event; falling back to per-profile fan-out",
+		log.FromContext(ctx).Error(err, "failed to resolve backing profile for cache event",
 			"cache", cache.Name, "namespace", cache.Namespace, "profile", cache.Spec.ProfileName)
-		return ""
 	}
-	if profile == nil {
-		return ""
+	aimID := ""
+	if profile != nil {
+		aimID = profile.GetProfileSpecCommon().AimId
 	}
-	return profile.GetProfileSpecCommon().AimId
+	requests := r.inferenceServicesReferencingRuntimes(
+		ctx,
+		cache.Namespace,
+		runtimeNamesForProfile(cache.Spec.ProfileName, aimID),
+	)
+	if profile != nil {
+		requests = mergeRequests(requests, r.lazyShadowRequestsForProfile(ctx, profile, cache.Namespace))
+	}
+	return requests
 }
 
 // backingProfileForCache resolves the profile a cache caches, keyed on the
@@ -557,7 +659,7 @@ func (r *InferenceServiceRuntimeReconciler) aimIDForCache(
 // namespace-first lookupBackingProfile — avoids a cluster-scope cache picking up
 // a same-named namespace profile (or vice versa). Returns a genuine nil
 // interface (never a typed-nil pointer) when the profile is absent.
-func (r *InferenceServiceRuntimeReconciler) backingProfileForCache(
+func (r *RuntimeProjectionReconciler) backingProfileForCache(
 	ctx context.Context,
 	cache *aimv1alpha2.AIMProfileCache,
 ) (runtimeprojection.BackingProfile, error) {
@@ -572,7 +674,7 @@ func (r *InferenceServiceRuntimeReconciler) backingProfileForCache(
 // absent. Unlike lookupBackingProfile it does not fall back to a cluster
 // profile: callers that already know the scope (a namespace-scope cache) must
 // not silently resolve a same-named cluster profile.
-func (r *InferenceServiceRuntimeReconciler) namespaceBackingProfile(
+func (r *RuntimeProjectionReconciler) namespaceBackingProfile(
 	ctx context.Context,
 	namespace, name string,
 ) (runtimeprojection.BackingProfile, error) {
@@ -589,13 +691,10 @@ func (r *InferenceServiceRuntimeReconciler) namespaceBackingProfile(
 	return &profile, nil
 }
 
-// inferenceServicesReferencingRuntimes lists, via the runtime field index, the
-// ISVCs that reference any of runtimeNames and returns their reconcile requests,
-// de-duplicated. An empty namespace widens the lookup cluster-wide (correct for
-// cluster-scoped sources like AIMClusterProfile). List errors are logged and
-// skipped so the fan-out is best-effort; the watch loop retries on the next
-// event.
-func (r *InferenceServiceRuntimeReconciler) inferenceServicesReferencingRuntimes(
+// inferenceServicesReferencingRuntimes returns de-duplicated namespaced
+// ServingRuntime keys for active indexed InferenceService consumers. An empty
+// namespace widens the lookup cluster-wide.
+func (r *RuntimeProjectionReconciler) inferenceServicesReferencingRuntimes(
 	ctx context.Context,
 	namespace string,
 	runtimeNames []string,
@@ -611,26 +710,123 @@ func (r *InferenceServiceRuntimeReconciler) inferenceServicesReferencingRuntimes
 		}
 		var isvcs servingv1beta1.InferenceServiceList
 		if err := r.List(ctx, &isvcs, opts...); err != nil {
-			log.FromContext(ctx).Error(err, "failed to list InferenceServices referencing runtime",
-				"runtime", name, "namespace", namespace)
+			log.FromContext(ctx).Error(err, "failed to list InferenceServices referencing a KServe ServingRuntime or ClusterServingRuntime",
+				"runtimeName", name, "namespace", namespace)
 			continue
 		}
 		for i := range isvcs.Items {
-			requests[client.ObjectKeyFromObject(&isvcs.Items[i])] = struct{}{}
+			if isvcs.Items[i].DeletionTimestamp != nil {
+				continue
+			}
+			runtimeName := runtimeprojection.ReferencedRuntimeName(&isvcs.Items[i])
+			requests[types.NamespacedName{
+				Namespace: isvcs.Items[i].Namespace,
+				Name:      runtimeName,
+			}] = struct{}{}
 		}
 	}
 
-	out := make([]reconcile.Request, 0, len(requests))
-	for nn := range requests {
-		out = append(out, reconcile.Request{NamespacedName: nn})
+	return requestsFromSet(requests)
+}
+
+func (r *RuntimeProjectionReconciler) lazyShadowRequestsForProfile(
+	ctx context.Context,
+	profile runtimeprojection.BackingProfile,
+	namespace string,
+) []reconcile.Request {
+	requests := map[types.NamespacedName]struct{}{}
+	opts := []client.ListOption{}
+	if namespace != "" {
+		opts = append(opts, client.InNamespace(namespace))
+	}
+
+	var runtimes kservev1alpha1.ServingRuntimeList
+	if err := r.List(ctx, &runtimes, opts...); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list lazy ServingRuntime shadows",
+			"profile", profile.GetName(), "namespace", namespace)
+	} else {
+		for i := range runtimes.Items {
+			r.addOwnedLazyShadowRequest(requests, &runtimes.Items[i], profile)
+		}
+	}
+
+	var configMaps corev1.ConfigMapList
+	if err := r.List(ctx, &configMaps, opts...); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list lazy ConfigMap shadows",
+			"profile", profile.GetName(), "namespace", namespace)
+	} else {
+		for i := range configMaps.Items {
+			r.addOwnedLazyShadowRequest(requests, &configMaps.Items[i], profile)
+		}
+	}
+	return requestsFromSet(requests)
+}
+
+func (r *RuntimeProjectionReconciler) addOwnedLazyShadowRequest(
+	requests map[types.NamespacedName]struct{},
+	obj client.Object,
+	profile runtimeprojection.BackingProfile,
+) {
+	if !isManagedLazyRuntimeObject(obj) || !ownedByExactProfile(obj, profile) {
+		return
+	}
+	requests[client.ObjectKeyFromObject(obj)] = struct{}{}
+}
+
+func ownedByExactProfile(obj client.Object, profile runtimeprojection.BackingProfile) bool {
+	kind := ""
+	switch profile.(type) {
+	case *aimv1alpha2.AIMProfile:
+		kind = namespaceProfileKind
+	case *aimv1alpha2.AIMClusterProfile:
+		kind = clusterProfileKind
+	default:
+		return false
+	}
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == aimv1alpha2.GroupVersion.String() &&
+			ref.Kind == kind &&
+			ref.Name == profile.GetName() &&
+			ref.UID == profile.GetUID() {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeRequests(groups ...[]reconcile.Request) []reconcile.Request {
+	requests := map[types.NamespacedName]struct{}{}
+	for _, group := range groups {
+		for _, request := range group {
+			requests[request.NamespacedName] = struct{}{}
+		}
+	}
+	return requestsFromSet(requests)
+}
+
+func requestsFromSet(requests map[types.NamespacedName]struct{}) []reconcile.Request {
+	keys := make([]types.NamespacedName, 0, len(requests))
+	for key := range requests {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Namespace != keys[j].Namespace {
+			return keys[i].Namespace < keys[j].Namespace
+		}
+		return keys[i].Name < keys[j].Name
+	})
+	out := make([]reconcile.Request, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, reconcile.Request{NamespacedName: key})
 	}
 	return out
 }
 
-// runtimeNamesForProfile returns the reserved runtime names a profile can back:
-// the per-profile name and, when the aimId is known, the model-slug primary
-// name. Listing the slug name only widens the re-enqueue fan-out, which is
-// harmless when DesiredFor declines it.
+// runtimeNamesForProfile returns the reserved KServe ServingRuntime or
+// ClusterServingRuntime names a profile can back: the per-profile name and,
+// when the aimId is known, the model-slug primary name. Listing the slug name
+// only widens the re-enqueue fan-out, which is harmless when DesiredFor declines
+// it.
 func runtimeNamesForProfile(profileName, aimID string) []string {
 	names := []string{serving.RuntimeName(profileName)}
 	if aimID != "" {
@@ -639,19 +835,27 @@ func runtimeNamesForProfile(profileName, aimID string) []string {
 	return names
 }
 
-// isManagedRuntimeObject reports whether an object is a shadow AIM Engine owns:
-// its name is under the reserved aim- prefix and it carries the managed-by
-// label. Both the ServingRuntime and its colocated ConfigMap qualify.
+// isManagedRuntimeObject is the stable portion of lazy-shadow identification.
+// It intentionally excludes the lazy marker so an update that removes only that
+// marker can still map the object after the predicate matched the old value.
 func isManagedRuntimeObject(obj client.Object) bool {
+	if obj == nil {
+		return false
+	}
 	return strings.HasPrefix(obj.GetName(), serving.RuntimeNamePrefix) &&
 		obj.GetLabels()[constants.LabelK8sManagedBy] == constants.LabelValueManagedBy
 }
 
-// inferenceServiceProjectionPredicate drops ISVC updates that can't change the
-// lazy shadow. The reconcile reads only the referenced runtime (spec) and the
-// runtime-profile annotation, never status, so KServe's frequent status writes
-// are pure churn — worst for the never-"complete" cross-scope/Reduced shadows
-// that force-apply on every pass. Create/Delete/Generic keep the default (fire).
+func isManagedLazyRuntimeObject(obj client.Object) bool {
+	return isManagedRuntimeObject(obj) && ownedByLazyProjection(obj)
+}
+
+// inferenceServiceProjectionPredicate drops InferenceService updates that can't
+// change the lazy ServingRuntime shadow. The reconcile reads only the referenced
+// ServingRuntime or ClusterServingRuntime name (spec) and the runtime-profile
+// annotation, never status, so KServe's frequent status writes are pure churn —
+// worst for the never-"complete" cross-scope/Reduced shadows that force-apply on
+// every pass. Create/Delete/Generic keep the default (fire).
 func inferenceServiceProjectionPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -669,16 +873,17 @@ func inferenceServiceProjectionPredicate() predicate.Predicate {
 	}
 }
 
-// managedRuntimeObjectPredicate restricts the SR/ConfigMap watches to managed
-// shadow objects (aim- prefix + managed-by label) and to the events that
-// warrant reasserting the force-apply: a drift update or a delete. The
-// controller's own create is ignored — it already applied the object in the
-// reconcile that produced it.
+// managedRuntimeObjectPredicate restricts SR/ConfigMap events to lazy shadows.
+// Testing both update sides preserves a reconcile when drift removes the lazy
+// marker itself. Creates are ignored because the producing reconcile already
+// force-applied both siblings.
 func managedRuntimeObjectPredicate() predicate.Predicate {
 	return predicate.Funcs{
-		CreateFunc:  func(_ event.CreateEvent) bool { return false },
-		DeleteFunc:  func(e event.DeleteEvent) bool { return isManagedRuntimeObject(e.Object) },
-		UpdateFunc:  func(e event.UpdateEvent) bool { return isManagedRuntimeObject(e.ObjectNew) },
+		CreateFunc: func(_ event.CreateEvent) bool { return false },
+		DeleteFunc: func(e event.DeleteEvent) bool { return isManagedLazyRuntimeObject(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return isManagedLazyRuntimeObject(e.ObjectOld) || isManagedLazyRuntimeObject(e.ObjectNew)
+		},
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 	}
 }
@@ -687,12 +892,13 @@ func managedRuntimeObjectPredicate() predicate.Predicate {
 // move what the shadow should contain: a spec change (image / resources /
 // affinity source), a readiness transition (covers an ISVC that raced ahead of
 // its profile), or a recomputed status.resources / status.resolvedNodeAffinity.
-// A profile delete is ignored — ownerRef GC removes the shadow, and nothing can
-// re-materialize it. Cosmetic status writes are filtered to avoid hot-loops.
+// Deletes fire so existing ServingRuntime keys are enqueued before
+// owner-reference garbage collection settles. Cosmetic status writes are
+// filtered.
 func clusterProfileProjectionPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc:  func(_ event.CreateEvent) bool { return true },
-		DeleteFunc:  func(_ event.DeleteEvent) bool { return false },
+		DeleteFunc:  func(_ event.DeleteEvent) bool { return true },
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldProfile, ok1 := e.ObjectOld.(*aimv1alpha2.AIMClusterProfile)
@@ -715,12 +921,11 @@ func clusterProfileProjectionPredicate() predicate.Predicate {
 // profileProjectionPredicate is the namespace-AIMProfile analogue of
 // clusterProfileProjectionPredicate: it fires on the spec/status changes that
 // move what a namespace-profile-backed lazy shadow should contain, and mirrors
-// the cluster predicate's create/delete/generic policy (a delete is ignored —
-// ownerRef GC removes the shadow and nothing re-materializes it).
+// the cluster predicate's create/delete/generic policy.
 func profileProjectionPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc:  func(_ event.CreateEvent) bool { return true },
-		DeleteFunc:  func(_ event.DeleteEvent) bool { return false },
+		DeleteFunc:  func(_ event.DeleteEvent) bool { return true },
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldProfile, ok1 := e.ObjectOld.(*aimv1alpha2.AIMProfile)
@@ -762,10 +967,12 @@ func profileProjectionChanged(oldGen, newGen int64, oldStatus, newStatus *aimv1a
 	return !equality.Semantic.DeepEqual(oldStatus.ResolvedNodeAffinity, newStatus.ResolvedNodeAffinity)
 }
 
-// profileCacheProjectionPredicate fires when a cache's readiness or resolved
-// artifacts change — the signals that add or remove the profile-owned cache
-// mount on the shadow (a late-Ready cache adds it; a delete reverts it).
-// Cosmetic status writes are filtered to avoid hot-loops.
+// profileCacheProjectionPredicate fires when a cache's spec generation,
+// readiness, or resolved artifacts change — the signals that add, remove, or
+// retarget the profile-owned cache mount on the shadow. Generation is
+// load-bearing: profileName, profileScope, and mode all live in spec, and an
+// update handler maps both the old and new cache objects to their affected
+// runtime keys. Cosmetic status writes are filtered to avoid hot-loops.
 func profileCacheProjectionPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc:  func(_ event.CreateEvent) bool { return true },
@@ -775,6 +982,9 @@ func profileCacheProjectionPredicate() predicate.Predicate {
 			oldCache, ok1 := e.ObjectOld.(*aimv1alpha2.AIMProfileCache)
 			newCache, ok2 := e.ObjectNew.(*aimv1alpha2.AIMProfileCache)
 			if !ok1 || !ok2 {
+				return true
+			}
+			if oldCache.Generation != newCache.Generation {
 				return true
 			}
 			if oldCache.Status.Status != newCache.Status.Status {

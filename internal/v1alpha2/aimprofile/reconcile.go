@@ -230,7 +230,8 @@ func (r *ProfileReconciler) ComposeState(
 	obs.origin = DeriveProfileOrigin(fetch.profile)
 	obs.baseImage = BaseImageFromProfile(fetch.profile, fetch.profile.Status.BaseImage)
 	obs.projectable = runtimeProjectable(spec, obs.deployable, obs.matchResult)
-	if runtimeProjectionNeedsContract(r.ProjectionMode, spec, obs.projectable, obs.modelSlugWinner) {
+	if runtimeProjectionNeedsContract(r.ProjectionMode, spec, obs.projectable, obs.modelSlugWinner) ||
+		shouldMaintainNamespaceRuntime(r.ProjectionMode, fetch.profile, obs.projectable) {
 		obs.yamlContract, obs.projectionErr = profileyaml.ForProfile(fetch.profile.Annotations, obs.origin, &spec)
 		if obs.projectionErr == nil {
 			obs.projectionErr = validateNamespaceRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
@@ -263,6 +264,10 @@ func (r *ClusterProfileReconciler) ComposeState(
 		if obs.projectionErr == nil {
 			obs.projectionErr = validateClusterRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
 		}
+	} else if shouldMaintainClusterRuntime(r.ProjectionMode, fetch.profile, obs.projectable) {
+		// A bare ClusterServingRuntime does not consume profile YAML, so a
+		// retained projection can be rebuilt directly after its gate flips.
+		obs.projectionErr = validateClusterRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
 	}
 	return obs
 }
@@ -310,8 +315,8 @@ func (r *ProfileReconciler) PlanResources(
 	}
 
 	if obs.projectionErr == nil {
-		if r.ProjectionMode.ProjectsPerProfile() {
-			planNamespaceRuntime(ctx, &plan, profile, obs)
+		if shouldMaintainNamespaceRuntime(r.ProjectionMode, profile, obs.projectable) {
+			planNamespaceRuntime(ctx, &plan, r.ProjectionMode, profile, obs)
 		}
 		if r.ProjectionMode.ProjectsModelSlug() {
 			planNamespaceModelSlugRuntime(ctx, &plan, profile, obs)
@@ -338,8 +343,8 @@ func (r *ClusterProfileReconciler) PlanResources(
 		return plan
 	}
 	if obs.projectionErr == nil {
-		if r.ProjectionMode.ProjectsPerProfile() {
-			planClusterRuntime(ctx, &plan, profile, obs)
+		if shouldMaintainClusterRuntime(r.ProjectionMode, profile, obs.projectable) {
+			planClusterRuntime(ctx, &plan, r.ProjectionMode, profile, obs)
 		}
 		if r.ProjectionMode.ProjectsModelSlug() {
 			planClusterModelSlugRuntime(ctx, &plan, profile, obs)
