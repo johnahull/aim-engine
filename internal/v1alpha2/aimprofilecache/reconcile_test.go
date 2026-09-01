@@ -24,6 +24,7 @@ package aimprofilecache
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -277,6 +278,77 @@ func TestComposeState_MissingArtifact(t *testing.T) {
 	}
 	if obs.MissingCaches[0].ModelID != "org/model-a" {
 		t.Errorf("expected org/model-a, got %s", obs.MissingCaches[0].ModelID)
+	}
+}
+
+func TestArtifactListErrorPreservesLastKnownCacheState(t *testing.T) {
+	r := &ProfileCacheReconciler{}
+	pc := makeProfileCache("pc1", "my-profile", aimv1alpha1.AIMResolutionScopeNamespace, aimv1alpha2.ProfileCacheModeShared, "")
+	pc.Generation = 7
+	profile := makeProfile("my-profile", []aimv1alpha1.AIMModelSource{
+		{ModelID: "org/model-a", SourceURI: "hf://org/model-a"},
+	})
+	listErr := errors.New("transient artifact list failure")
+	fetch := ProfileCacheFetchResult{
+		profileCache: pc,
+		profile:      controllerutils.FetchResult[*aimv1alpha2.AIMProfile]{Value: profile},
+		artifacts: controllerutils.FetchResult[*aimv1alpha1.AIMArtifactList]{
+			Value: &aimv1alpha1.AIMArtifactList{},
+			Error: listErr,
+		},
+	}
+
+	obs := r.ComposeState(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMProfileCache]{Object: pc},
+		fetch,
+	)
+	if len(obs.MissingCaches) != 0 {
+		t.Fatalf("artifact list failure produced %d missing caches, want 0", len(obs.MissingCaches))
+	}
+	var reported bool
+	for _, health := range obs.GetComponentHealth() {
+		if health.Component == artifactsComponentName &&
+			len(health.Errors) == 1 &&
+			errors.Is(health.Errors[0], listErr) {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Fatal("artifact list failure was not reported through component health")
+	}
+	plan := r.PlanResources(
+		context.Background(),
+		controllerutils.ReconcileContext[*aimv1alpha2.AIMProfileCache]{Object: pc},
+		obs,
+	)
+	if got := len(plan.GetToApply()) + len(plan.GetToApplyWithoutOwnerRef()); got != 0 {
+		t.Fatalf("artifact list failure planned %d artifact applies, want 0", got)
+	}
+
+	status := &aimv1alpha2.AIMProfileCacheStatus{
+		Artifacts: map[string]aimv1alpha1.AIMResolvedArtifact{
+			"artifact-a": {
+				Name:                  "artifact-a",
+				Status:                constants.AIMStatusReady,
+				PersistentVolumeClaim: "working-cache-pvc",
+			},
+		},
+	}
+	cm := controllerutils.NewConditionManager([]metav1.Condition{{
+		Type:   artifactsReadyConditionType,
+		Status: metav1.ConditionTrue,
+	}})
+	r.DecorateStatus(status, cm, obs)
+
+	if got := status.Artifacts["artifact-a"].PersistentVolumeClaim; got != "working-cache-pvc" {
+		t.Fatalf("preserved artifact PVC = %q, want working-cache-pvc", got)
+	}
+	if status.ObservedGeneration != pc.Generation {
+		t.Fatalf("observed generation = %d, want %d", status.ObservedGeneration, pc.Generation)
+	}
+	if condition := cm.Get(artifactsReadyConditionType); condition == nil || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("last known %s condition was not preserved: %+v", artifactsReadyConditionType, condition)
 	}
 }
 

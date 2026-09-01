@@ -28,19 +28,23 @@ package profilecache
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 )
 
 // FindReadyShared returns a Ready, profile-owned (Shared) AIMProfileCache in
 // namespace that caches the profile named profileName at the given scope, or nil
-// when none exists.
+// when none exists. It returns an error instead of nil when a matching cache's
+// readiness is unknown, preventing callers from treating an outage as no cache.
 //
 // This is the single cache-resolution used by BOTH runtime-projection paths: the
 // eager profile reconciler (which mounts the cache on the per-profile / model-slug
@@ -76,17 +80,75 @@ func FindReadyShared(
 		return nil, err
 	}
 
-	cache := SelectBestShared(caches.Items, profileName, scope)
-	if cache == nil || cache.Status.Status != constants.AIMStatusReady {
-		return nil, nil
+	var ready *aimv1alpha2.AIMProfileCache
+	var unknown *aimv1alpha2.AIMProfileCache
+	for i := range caches.Items {
+		cache := &caches.Items[i]
+		if !matchesShared(cache, profileName, scope) {
+			continue
+		}
+		if cacheReadinessUnknown(cache) {
+			if unknown == nil || cache.Name < unknown.Name {
+				unknown = cache
+			}
+			continue
+		}
+		if cache.Status.Status == constants.AIMStatusReady &&
+			(ready == nil || cache.Name < ready.Name) {
+			ready = cache
+		}
 	}
-	return cache, nil
+	if ready != nil {
+		return ready, nil
+	}
+	if unknown != nil {
+		return nil, fmt.Errorf(
+			"AIMProfileCache %s/%s readiness is unknown because its status is stale or reconciliation has an active error condition",
+			unknown.Namespace,
+			unknown.Name,
+		)
+	}
+	return nil, nil
+}
+
+func matchesShared(
+	cache *aimv1alpha2.AIMProfileCache,
+	profileName string,
+	scope aimv1alpha1.AIMResolutionScope,
+) bool {
+	if cache.Spec.ProfileName != profileName {
+		return false
+	}
+	if normalizeScope(cache.Spec.ProfileScope) != normalizeScope(scope) {
+		return false
+	}
+	return cache.Spec.Mode == aimv1alpha2.ProfileCacheModeShared
+}
+
+func cacheReadinessUnknown(cache *aimv1alpha2.AIMProfileCache) bool {
+	if !cacheStatusCurrent(cache) {
+		return true
+	}
+	for _, conditionType := range []string{
+		controllerutils.ConditionTypeDependenciesReachable,
+		controllerutils.ConditionTypeAuthValid,
+		controllerutils.ConditionTypeConfigValid,
+	} {
+		if meta.IsStatusConditionFalse(cache.Status.Conditions, conditionType) {
+			return true
+		}
+	}
+	return false
+}
+
+func cacheStatusCurrent(cache *aimv1alpha2.AIMProfileCache) bool {
+	return cache.Status.ObservedGeneration == cache.Generation
 }
 
 // SelectBestShared returns the healthiest Shared cache matching the profile and
-// scope. Equal-health candidates are ordered by name before selection so every
-// projection producer and consumer chooses the same cache independently of API
-// list order.
+// scope whose status describes its current spec generation. Equal-health
+// candidates are ordered by name before selection so every projection producer
+// and consumer chooses the same cache independently of API list order.
 func SelectBestShared(
 	caches []aimv1alpha2.AIMProfileCache,
 	profileName string,
@@ -96,20 +158,16 @@ func SelectBestShared(
 		return nil
 	}
 
-	wantScope := normalizeScope(scope)
 	matching := make([]aimv1alpha2.AIMProfileCache, 0, len(caches))
 	for i := range caches {
 		cache := caches[i]
-		if cache.Spec.ProfileName != profileName {
-			continue
-		}
-		if normalizeScope(cache.Spec.ProfileScope) != wantScope {
-			continue
-		}
 		// Only a profile-owned (Shared) cache belongs on the shared runtime. A
 		// service-owned (Dedicated) cache is overlaid on its own consuming ISVC
 		// instead, so mounting it here too would duplicate the volume.
-		if cache.Spec.Mode != aimv1alpha2.ProfileCacheModeShared {
+		if !matchesShared(&cache, profileName, scope) {
+			continue
+		}
+		if !cacheStatusCurrent(&cache) {
 			continue
 		}
 		matching = append(matching, cache)

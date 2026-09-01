@@ -80,6 +80,7 @@ type AIMProfileReconciler struct {
 // +kubebuilder:rbac:groups=aim.eai.amd.com,resources=aimprofilecaches,verbs=get;list;watch
 // +kubebuilder:rbac:groups=serving.kserve.io,resources=servingruntimes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *AIMProfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -209,9 +210,11 @@ func (r *AIMProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Re-elect the model-slug owner when a same-model candidate changes or
 		// disappears. This same-kind secondary watch fans the event out to peers.
 		Watches(&aimv1alpha2.AIMProfile{}, modelSlugElectionHandler).
-		// Own the projected ServingRuntime so drift (hand-edits) and
-		// node-inventory changes (via the Node watch) self-heal through reconcile.
+		// Own both siblings of the eager projection so deleting or editing either
+		// the ServingRuntime or its colocated ConfigMap re-enqueues the profile
+		// and authoritatively restores the complete pair.
 		Owns(&kservev1alpha1.ServingRuntime{}).
+		Owns(&corev1.ConfigMap{}).
 		Watches(&corev1.Node{}, nodeHandler, builder.WithPredicates(utils.NodeGPUChangePredicate())).
 		// Re-project when the profile's cache reaches Ready (or its artifacts
 		// change), so the eager per-profile / model-slug runtime gains the cache

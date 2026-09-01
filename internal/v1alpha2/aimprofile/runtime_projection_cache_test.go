@@ -24,6 +24,7 @@ package aimprofile
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -186,6 +187,106 @@ func TestRetainedReducedProjection_MatchesConsumerHashWithSharedCache(t *testing
 	}
 }
 
+func TestEagerProjection_CacheUncertaintySkipsProjectionApply(t *testing.T) {
+	profile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "cached-cpu", Namespace: "team-a"},
+		Spec: aimv1alpha2.AIMProfileSpec{
+			AIMProfileSpecCommon: aimv1alpha2.AIMProfileSpecCommon{
+				AimId: "qwen/qwen3-32b",
+				Image: "registry.io/qwen3-32b:1.0.0",
+				ModelSources: []aimv1alpha1.AIMModelSource{
+					{ModelID: "qwen/qwen3-32b", SourceURI: "hf://qwen/qwen3-32b"},
+				},
+			},
+		},
+	}
+	cache := &aimv1alpha2.AIMProfileCache{
+		ObjectMeta: metav1.ObjectMeta{Name: "cached-cpu-shared", Namespace: profile.Namespace},
+		Spec: aimv1alpha2.AIMProfileCacheSpec{
+			ProfileName:  profile.Name,
+			ProfileScope: aimv1alpha1.AIMResolutionScopeNamespace,
+			Mode:         aimv1alpha2.ProfileCacheModeShared,
+		},
+		Status: aimv1alpha2.AIMProfileCacheStatus{
+			Status: constants.AIMStatusReady,
+			Artifacts: map[string]aimv1alpha1.AIMResolvedArtifact{
+				"weights": {
+					Name:                  "weights",
+					Model:                 "qwen/qwen3-32b",
+					Status:                constants.AIMStatusReady,
+					PersistentVolumeClaim: "working-cache-pvc",
+					MountPoint:            "/workspace/cache/qwen3-32b",
+				},
+			},
+		},
+	}
+
+	healthyClient := newProfileTestClient(t, profile, cache)
+	r := &ProfileReconciler{Client: healthyClient, ProjectionMode: aimv1alpha2.RuntimeProjectionModeExhaustive}
+	reconcileCtx := controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile}
+	healthyObs := r.ComposeState(
+		context.Background(),
+		reconcileCtx,
+		r.FetchRemoteState(context.Background(), healthyClient, reconcileCtx),
+	)
+	healthyPlan := r.PlanResources(context.Background(), reconcileCtx, healthyObs)
+	healthyRuntime := findServingRuntime(t, healthyPlan.GetToApplyWithForce())
+	if !runtimeHasPVCVolume(healthyRuntime.Spec.Volumes, "working-cache-pvc") {
+		t.Fatalf("precondition: projected runtime did not mount working cache: %+v", healthyRuntime.Spec.Volumes)
+	}
+
+	unknownCache := cache.DeepCopy()
+	unknownCache.Status.Status = constants.AIMStatusDegraded
+	unknownCache.Status.Conditions = []metav1.Condition{{
+		Type:   controllerutils.ConditionTypeDependenciesReachable,
+		Status: metav1.ConditionFalse,
+	}}
+	unknownClient := newProfileTestClient(t, profile, unknownCache)
+	unknownFetch := r.FetchRemoteState(context.Background(), unknownClient, reconcileCtx)
+	if unknownFetch.profileCacheErr == nil {
+		t.Fatal("cache with unreachable dependencies must report unknown readiness")
+	}
+	unknownObs := r.ComposeState(context.Background(), reconcileCtx, unknownFetch)
+	unknownPlan := r.PlanResources(context.Background(), reconcileCtx, unknownObs)
+	if got := len(unknownPlan.GetToApplyWithForce()); got != 0 {
+		t.Fatalf("unknown cache readiness must preserve the last known-good projection; got %d force-applied objects", got)
+	}
+
+	listErr := errors.New("transient cache list failure")
+	failingClient := &profileCacheListErrorClient{Client: healthyClient, err: listErr}
+	fetch := r.FetchRemoteState(context.Background(), failingClient, reconcileCtx)
+	if !errors.Is(fetch.profileCacheErr, listErr) {
+		t.Fatalf("cache lookup error = %v, want %v", fetch.profileCacheErr, listErr)
+	}
+
+	obs := r.ComposeState(context.Background(), reconcileCtx, fetch)
+	if !errors.Is(obs.projectionErr, listErr) {
+		t.Fatalf("projection error = %v, want wrapped cache lookup error", obs.projectionErr)
+	}
+	stateErr, ok := obs.projectionErr.(controllerutils.StateEngineError)
+	if !ok || stateErr.Category() != controllerutils.ErrorCategoryInfrastructure {
+		t.Fatalf("projection error = %#v, want infrastructure StateEngineError", obs.projectionErr)
+	}
+	health := obs.GetComponentHealth(context.Background(), nil)
+	var projectionHealth *controllerutils.ComponentHealth
+	for i := range health {
+		if health[i].Component == runtimeProjectionComponent {
+			projectionHealth = &health[i]
+			break
+		}
+	}
+	if projectionHealth == nil || len(projectionHealth.Errors) != 1 {
+		t.Fatalf("runtime projection health missing cache lookup error: %+v", projectionHealth)
+	}
+	if got := controllerutils.CategorizeError(projectionHealth.Errors[0]).Category(); got != controllerutils.ErrorCategoryInfrastructure {
+		t.Fatalf("runtime projection health error category = %v, want Infrastructure", got)
+	}
+	failedPlan := r.PlanResources(context.Background(), reconcileCtx, obs)
+	if got := len(failedPlan.GetToApplyWithForce()); got != 0 {
+		t.Fatalf("cache lookup failure must preserve the last known-good projection; got %d force-applied objects", got)
+	}
+}
+
 func runtimeHasPVCVolume(volumes []corev1.Volume, claimName string) bool {
 	for _, v := range volumes {
 		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claimName {
@@ -202,6 +303,22 @@ func containerMountsCache(mounts []corev1.VolumeMount, mountPath string) bool {
 		}
 	}
 	return false
+}
+
+type profileCacheListErrorClient struct {
+	client.Client
+	err error
+}
+
+func (c *profileCacheListErrorClient) List(
+	ctx context.Context,
+	list client.ObjectList,
+	opts ...client.ListOption,
+) error {
+	if _, ok := list.(*aimv1alpha2.AIMProfileCacheList); ok {
+		return c.err
+	}
+	return c.Client.List(ctx, list, opts...)
 }
 
 func newProfileTestClient(t *testing.T, objs ...client.Object) client.Client {

@@ -34,6 +34,7 @@ import (
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
 )
 
 const testNamespace = "team-a"
@@ -164,6 +165,95 @@ func TestFindReadyShared(t *testing.T) {
 	}
 }
 
+func TestFindReadyShared_ReturnsErrorWhenCacheReadinessIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	const profile = "qwen3-32b-mi300x"
+	for _, conditionType := range []string{
+		controllerutils.ConditionTypeDependenciesReachable,
+		controllerutils.ConditionTypeAuthValid,
+		controllerutils.ConditionTypeConfigValid,
+	} {
+		t.Run(conditionType, func(t *testing.T) {
+			unknown := cache(
+				profile+"-cache",
+				profile,
+				aimv1alpha1.AIMResolutionScopeNamespace,
+				aimv1alpha2.ProfileCacheModeShared,
+				constants.AIMStatusDegraded,
+			)
+			unknown.Status.Conditions = []metav1.Condition{{
+				Type:   conditionType,
+				Status: metav1.ConditionFalse,
+			}}
+
+			got, err := FindReadyShared(
+				context.Background(),
+				newClient(t, unknown),
+				testNamespace,
+				profile,
+				aimv1alpha1.AIMResolutionScopeNamespace,
+			)
+			if err == nil {
+				t.Fatal("FindReadyShared() error = nil, want unknown-readiness error")
+			}
+			if got != nil {
+				t.Fatalf("FindReadyShared() = %q, want nil on unknown readiness", got.Name)
+			}
+		})
+	}
+}
+
+func TestFindReadyShared_ReturnsErrorWhenReadyStatusIsStale(t *testing.T) {
+	t.Parallel()
+
+	const profile = "qwen3-32b-mi300x"
+	stale := cache(
+		profile+"-cache",
+		profile,
+		aimv1alpha1.AIMResolutionScopeNamespace,
+		aimv1alpha2.ProfileCacheModeShared,
+		constants.AIMStatusReady,
+	)
+	stale.Generation = 2
+	stale.Status.ObservedGeneration = 1
+
+	got, err := FindReadyShared(
+		context.Background(),
+		newClient(t, stale),
+		testNamespace,
+		profile,
+		aimv1alpha1.AIMResolutionScopeNamespace,
+	)
+	if err == nil {
+		t.Fatal("FindReadyShared() error = nil, want stale-status error")
+	}
+	if got != nil {
+		t.Fatalf("FindReadyShared() = %q, want nil for stale Ready status", got.Name)
+	}
+}
+
+func TestFindReadyShared_PrefersKnownReadyCacheOverUnknownCandidate(t *testing.T) {
+	t.Parallel()
+
+	const profile = "qwen3-32b-mi300x"
+	scope := aimv1alpha1.AIMResolutionScopeNamespace
+	unknown := cache("a-unknown", profile, scope, aimv1alpha2.ProfileCacheModeShared, constants.AIMStatusDegraded)
+	unknown.Status.Conditions = []metav1.Condition{{
+		Type:   controllerutils.ConditionTypeDependenciesReachable,
+		Status: metav1.ConditionFalse,
+	}}
+	ready := cache("z-ready", profile, scope, aimv1alpha2.ProfileCacheModeShared, constants.AIMStatusReady)
+
+	got, err := FindReadyShared(context.Background(), newClient(t, unknown, ready), testNamespace, profile, scope)
+	if err != nil {
+		t.Fatalf("FindReadyShared() error = %v", err)
+	}
+	if got == nil || got.Name != ready.Name {
+		t.Fatalf("FindReadyShared() = %v, want %q", got, ready.Name)
+	}
+}
+
 func TestSelectBestShared_DeterministicAcrossReadyCandidates(t *testing.T) {
 	t.Parallel()
 
@@ -179,6 +269,30 @@ func TestSelectBestShared_DeterministicAcrossReadyCandidates(t *testing.T) {
 	got := SelectBestShared(caches, profile, scope)
 	if got == nil || got.Name != "a-ready" {
 		t.Fatalf("SelectBestShared() = %v, want lexicographically first Ready cache a-ready", got)
+	}
+}
+
+func TestSelectBestShared_IgnoresStaleStatus(t *testing.T) {
+	t.Parallel()
+
+	const profile = "qwen3-32b-mi300x"
+	scope := aimv1alpha1.AIMResolutionScopeNamespace
+	shared := aimv1alpha2.ProfileCacheModeShared
+
+	stale := cache("a-stale", profile, scope, shared, constants.AIMStatusReady)
+	stale.Generation = 2
+	stale.Status.ObservedGeneration = 1
+	current := cache("z-current", profile, scope, shared, constants.AIMStatusReady)
+	current.Generation = 2
+	current.Status.ObservedGeneration = 2
+
+	got := SelectBestShared([]aimv1alpha2.AIMProfileCache{*stale, *current}, profile, scope)
+	if got == nil || got.Name != current.Name {
+		t.Fatalf("SelectBestShared() = %v, want current cache %q", got, current.Name)
+	}
+
+	if got := SelectBestShared([]aimv1alpha2.AIMProfileCache{*stale}, profile, scope); got != nil {
+		t.Fatalf("SelectBestShared() = %q, want nil when only stale status exists", got.Name)
 	}
 }
 

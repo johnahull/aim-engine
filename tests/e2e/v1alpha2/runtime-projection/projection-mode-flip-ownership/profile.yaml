@@ -1,12 +1,13 @@
 # Backing namespace profile for the projection-mode-flip ownership test.
 #
-# NON-primary and no accelerator on purpose (mirrors reduced-namespace-service):
+# Primary and no accelerator on purpose:
 #   - no accelerator => reaches Ready in any cluster (kind or GPU vcluster);
-#   - non-primary + Reduced => the eager AIMProfile reconciler projects NOTHING
-#     for it, so the referencing AIMService's runtime can only be materialized by
-#     the always-on LAZY InferenceService-watch projection (a shadow marked
-#     aim.eai.amd.com/runtime-projection: lazy). That lazy shadow is the object
-#     the mode flip below then hands over to the eager path.
+#   - primary + Reduced => the eager AIMProfile reconciler projects the portable
+#     model-slug runtime, but NOT the hashed per-profile runtime referenced by
+#     the AIMService. That per-profile runtime can only be materialized by the
+#     always-on lazy projection and is the object handed to the eager path.
+# The retained model-slug runtime is also patched after the switch to Exhaustive,
+# proving the now-disabled projection type remains actively maintained.
 #
 # Deployable (aimId + modelSources both set), so once the mode flips to
 # Exhaustive the eager per-profile projection turns on for the SAME hashed name
@@ -26,7 +27,7 @@ spec:
   metric: latency
   precision: bf16
   type: general
-  primary: false
+  primary: true
   image: registry.example.com/aim-cpu-base:0.12.0
   modelSources:
     - modelId: Qwen/Qwen3-0.6B

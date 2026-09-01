@@ -526,11 +526,12 @@ func TestPlanResources_MaterializesProfileRuntimeBeforeInferenceService(t *testi
 		t.Fatalf("profile content change hashes: observed=%q desired=%q, want different non-empty hashes", oldHash, wantHash)
 	}
 	if health := stale.getProfileRuntimeHealth(); health.State != constants.AIMStatusProgressing ||
-		health.Reason != "ProfileRuntimeConverging" {
+		health.Reason != reasonProfileRuntimeConverging {
 		t.Fatalf("stale projection health = %q/%q, want Progressing/ProfileRuntimeConverging", health.State, health.Reason)
 	}
 	assertStaleProfileRuntimePlan(t, reconciler, reconcileCtx, service, stale)
 	assertStaleProfileRuntimeOwnerUID(t, reconciler, reconcileCtx, first, runtime, configMap)
+	assertStaleProfileRuntimeObservedContent(t, reconciler, reconcileCtx, service, first, runtime, configMap)
 
 	second := first
 	second.profileRuntime = controllerutils.FetchResult[*kservev1alpha1.ServingRuntime]{Value: runtime}
@@ -681,6 +682,56 @@ func assertStaleProfileRuntimeOwnerUID(
 			if planAppliesType[*servingv1beta1.InferenceService](ownerPlan.GetToApply()) {
 				t.Fatalf("InferenceService must not be planned with stale %s ownership", sibling)
 			}
+		})
+	}
+}
+
+func assertStaleProfileRuntimeObservedContent(
+	t *testing.T,
+	reconciler *ProfileServiceReconciler,
+	reconcileCtx controllerutils.ReconcileContext[*aimv1alpha1.AIMService],
+	service *aimv1alpha1.AIMService,
+	first ServiceObservation,
+	runtime *kservev1alpha1.ServingRuntime,
+	configMap *corev1.ConfigMap,
+) {
+	t.Helper()
+	tests := []struct {
+		name   string
+		mutate func(*kservev1alpha1.ServingRuntime, *corev1.ConfigMap)
+	}{
+		{
+			name: "ServingRuntime spec drift with unchanged annotation",
+			mutate: func(actualRuntime *kservev1alpha1.ServingRuntime, _ *corev1.ConfigMap) {
+				actualRuntime.Spec.Containers[0].Image += "-drifted"
+			},
+		},
+		{
+			name: "ConfigMap data drift with unchanged annotation",
+			mutate: func(_ *kservev1alpha1.ServingRuntime, actualConfigMap *corev1.ConfigMap) {
+				actualConfigMap.Data["drifted-profile.yaml"] = "unexpected"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actualRuntime := runtime.DeepCopy()
+			actualConfigMap := configMap.DeepCopy()
+			tt.mutate(actualRuntime, actualConfigMap)
+
+			stale := first
+			stale.profileRuntime = controllerutils.FetchResult[*kservev1alpha1.ServingRuntime]{Value: actualRuntime}
+			stale.profileRuntimeConfigMap = controllerutils.FetchResult[*corev1.ConfigMap]{Value: actualConfigMap}
+			if stale.profileRuntimeCurrent() {
+				t.Fatal("stored content hash must not hide drift in observed projection content")
+			}
+			if health := stale.getProfileRuntimeHealth(); health.State != constants.AIMStatusProgressing ||
+				health.Reason != reasonProfileRuntimeConverging {
+				t.Fatalf("drifted projection health = %q/%q, want Progressing/ProfileRuntimeConverging",
+					health.State, health.Reason)
+			}
+			assertStaleProfileRuntimePlan(t, reconciler, reconcileCtx, service, stale)
 		})
 	}
 }

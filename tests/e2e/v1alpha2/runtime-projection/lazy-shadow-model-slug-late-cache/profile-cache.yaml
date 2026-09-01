@@ -20,6 +20,7 @@ spec:
   profileScope: Cluster
   mode: Shared
 status:
+  observedGeneration: 1
   status: Ready
   conditions:
     - type: ProfileFound

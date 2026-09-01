@@ -70,10 +70,12 @@ const (
 	// stamps LabelValueRuntimeProjectionLazy on the shadow ServingRuntime (and
 	// its colocated ConfigMap) it materialises; the eager per-profile / model-slug
 	// projection stamps LabelValueRuntimeProjectionEager; hand-authored runtimes
-	// leave it unset. The lazy reconciler uses it to tell its own shadow — which
-	// it must re-apply on every reconcile to self-heal drift / a late cache /
-	// backing-profile changes — apart from an eager projection or hand-authored
-	// runtime of the same name, which it defers to. A namespace-AIMProfile-backed
+	// leave it unset. The lazy reconciler primarily uses it to tell its own
+	// shadow — which it must re-apply on every reconcile to self-heal drift / a
+	// late cache / backing-profile changes — apart from an eager projection or
+	// hand-authored runtime of the same name, which it defers to. Its SSA field
+	// manager is fallback identity if an edit removes this marker. A
+	// namespace-AIMProfile-backed
 	// shadow and a namespace AIMProfile's eager projection carry the SAME
 	// AIMProfile ownerReference, so the ownerRef kind alone cannot make this
 	// distinction; this label can. The eager marker is what settles ownership

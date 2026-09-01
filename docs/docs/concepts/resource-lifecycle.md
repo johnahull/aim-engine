@@ -12,6 +12,7 @@ AIM Engine uses Kubernetes owner references to express resource relationships. W
 AIMModel / AIMClusterModel  (spec.image — official / base-image flow)
     ├── Discovery Job + ConfigMap (owned by model)
     └── AIMProfile / AIMClusterProfile  (owned by model)
+            ├── Projected KServe runtime (+ ConfigMap for namespaced runtimes)
             └── AIMProfileCache  (owned by profile only when spec.caching.enabled)
                     └── AIMArtifact  (owned by cache in Dedicated mode; orphan in Shared)
                             └── PVC + Download Job  (owned by artifact)
@@ -36,6 +37,43 @@ Key behaviours:
 - **Auto-created models**:
     - v1alpha1 `spec.model.image` path: no owner reference; the model persists for reuse by other services.
     - v1alpha2 `spec.model.image` path (requires the `aim.eai.amd.com/reconciler-pipeline: profile` annotation): owner-referenced by the originating service and garbage-collected with it. Named `<service>-auto-<6charHash(image)>`. See [Services → By image](services.md#by-image).
+
+### Runtime projection lifecycle and operational caveats
+
+Runtime projection deliberately favors continuity over immediate cleanup:
+
+- Projection is additive. If a profile later becomes unprojectable, its
+  existing runtime is kept and the profile reports
+  `RuntimeProjected=False / RuntimeDegraded`. The runtime is removed when its
+  owning profile is deleted.
+- A namespaced `ServingRuntime` and its same-name profile ConfigMap are separate
+  Kubernetes objects. Initial force-owned publication applies the ConfigMap
+  first and stops on failure, but creation and updates are not transactional.
+  `AIMService` waits for matching content hashes before changing its
+  InferenceService; native KServe consumers do not have that gate.
+- ConfigMap-only changes do not change the pod template and therefore do not
+  guarantee a rollout. Kubernetes eventually refreshes mounted ConfigMap
+  volumes, but a process that reads its profile only at startup needs an
+  explicit predictor-pod restart.
+- The first native InferenceService that references a projected
+  `ClusterServingRuntime` can briefly bind the bare cluster runtime before its
+  namespaced shadow and ConfigMap exist. The pod can restart during this window
+  and self-heals after materialization.
+- Generated `aim-*` runtimes and same-name ConfigMaps are read-only operational
+  objects. Out-of-band mutation is unsupported; server-side apply reclaims
+  desired fields but may not remove extra foreign-owned fields. If undoing the
+  edit does not converge, delete both generated siblings and let AIM Engine
+  recreate them, accounting for disruption to active consumers.
+- Model-slug aliases are best-effort across projectability and projection-mode
+  changes. A retained alias can temporarily expose an older revision or winner
+  until its profile becomes projectable or model-slug election resumes.
+- When shared-cache readiness is unknown because of a transient API,
+  authentication, or reconciliation error, AIM Engine preserves the last-known
+  cache mount and retries instead of treating the cache as absent.
+
+See [Bring Your Own KServe](../guides/bring-your-own-kserve.md) for the complete
+consumer workflow and [Conditions](../reference/conditions.md) for the
+authoritative health signals.
 
 ### v1alpha1 graph (legacy)
 

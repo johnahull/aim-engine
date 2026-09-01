@@ -24,8 +24,10 @@ package controllerutils
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	kservev1alpha1 "github.com/kserve/kserve/pkg/apis/serving/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -64,6 +66,9 @@ func ssaTestScheme(t *testing.T) *runtime.Scheme {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 to scheme: %v", err)
 	}
+	if err := kservev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add KServe v1alpha1 to scheme: %v", err)
+	}
 	return scheme
 }
 
@@ -72,7 +77,7 @@ func ssaTestScheme(t *testing.T) *runtime.Scheme {
 func applyAsForeignManager(ctx context.Context, t *testing.T, cl client.Client) {
 	t.Helper()
 	foreign := &corev1.ConfigMap{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: coreConfigMapKind},
 		ObjectMeta: metav1.ObjectMeta{Namespace: ssaTestNamespace, Name: ssaTestConfigMap},
 		Data:       map[string]string{ssaContendedKey: ssaForeignFieldData},
 	}
@@ -143,6 +148,82 @@ func TestApplyDesiredStateWithForce_ReclaimsForeignField(t *testing.T) {
 	if got := contendedValue(ctx, t, cl); got != ssaAimFieldData {
 		t.Fatalf("contended field = %q after force apply, want it reclaimed to AIM Engine's value %q", got, ssaAimFieldData)
 	}
+}
+
+func TestApplyDesiredStateWithForce_StillAttemptsEveryObject(t *testing.T) {
+	ctx := context.Background()
+	scheme := ssaTestScheme(t)
+	cl := &failConfigMapPatchClient{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		err:    errors.New("configmap apply failed"),
+	}
+	desired := []client.Object{
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ssaTestNamespace, Name: "first"}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ssaTestNamespace, Name: "second"}},
+	}
+
+	if err := ApplyDesiredStateWithForce(ctx, cl, ssaAimFieldManager, scheme, desired, nil); err == nil {
+		t.Fatal("ApplyDesiredStateWithForce() error = nil, want aggregate apply error")
+	}
+	if len(cl.patchedKinds) != len(desired) {
+		t.Fatalf("Patch() calls = %d, want %d", len(cl.patchedKinds), len(desired))
+	}
+}
+
+func TestApplyDesiredStateWithForceFailFast_ConfigMapFailureStopsRuntimeApply(t *testing.T) {
+	ctx := context.Background()
+	scheme := ssaTestScheme(t)
+	configMapErr := errors.New("configmap apply failed")
+	cl := &failConfigMapPatchClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		failName: "aim-runtime-b",
+		err:      configMapErr,
+	}
+	desired := []client.Object{
+		&kservev1alpha1.ServingRuntime{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ssaTestNamespace, Name: "aim-runtime-a"},
+		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ssaTestNamespace, Name: "aim-runtime-b"},
+		},
+		&kservev1alpha1.ServingRuntime{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ssaTestNamespace, Name: "aim-runtime-b"},
+		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ssaTestNamespace, Name: "aim-runtime-a"},
+		},
+	}
+
+	err := ApplyDesiredStateWithForceFailFast(ctx, cl, ssaAimFieldManager, scheme, desired, nil)
+	if !errors.Is(err, configMapErr) {
+		t.Fatalf("ApplyDesiredStateWithForceFailFast() error = %v, want %v", err, configMapErr)
+	}
+	if len(cl.patchedKinds) != 2 ||
+		cl.patchedKinds[0] != coreConfigMapKind ||
+		cl.patchedKinds[1] != coreConfigMapKind {
+		t.Fatalf("patched kinds = %v, want both ConfigMaps and no ServingRuntime", cl.patchedKinds)
+	}
+}
+
+type failConfigMapPatchClient struct {
+	client.Client
+	err          error
+	failName     string
+	patchedKinds []string
+}
+
+func (c *failConfigMapPatchClient) Patch(
+	ctx context.Context,
+	obj client.Object,
+	patch client.Patch,
+	opts ...client.PatchOption,
+) error {
+	kind := obj.GetObjectKind().GroupVersionKind().Kind
+	c.patchedKinds = append(c.patchedKinds, kind)
+	if kind == coreConfigMapKind && (c.failName == "" || obj.GetName() == c.failName) {
+		return c.err
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
 // TestApplyDesiredState_ReassertsOwnField documents why cooperative SSA is the

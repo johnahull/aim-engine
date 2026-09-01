@@ -118,7 +118,7 @@ Per-profile KServe `ServingRuntime` / `ClusterServingRuntime` objects are named 
 | `aim.eai.amd.com/precision` | `fp8`, `fp16`, … | Filter by numeric precision |
 | `aim.eai.amd.com/accelerator-class` | `MI300X`, … | Filter by accelerator class |
 | `aim.eai.amd.com/runtime-projection` | `eager`, `lazy` | How it was materialized — `eager` (by the profile) or `lazy` (namespaced `ServingRuntime` shadow via the `ServingRuntime`-keyed controller). Provenance, not health |
-| `aim.eai.amd.com/runtime-projection-state` | `projected` | Projection **health** surfaced on the `ServingRuntime` / `ClusterServingRuntime` object. `projected` is the only value stamped; the degraded transition is reported on the profile's [`RuntimeProjected`](conditions.md#runtimeprojected) condition, not this label |
+| `aim.eai.amd.com/runtime-projection-state` | `projected` | Projection provenance surfaced on the `ServingRuntime` / `ClusterServingRuntime` object. `projected` is the only value stamped; the degraded transition is reported on the profile's [`RuntimeProjected`](conditions.md#runtimeprojected) condition, not this label |
 
 | Annotation | Value | Purpose |
 |---|---|---|

@@ -313,6 +313,48 @@ func TestProfileRuntimeProjectionBuildErrorSurfacesInStatusAndSkipsApply(t *test
 	}
 }
 
+func TestProjectionInfrastructureErrorPreservesRuntimeProjectedCondition(t *testing.T) {
+	prior := metav1.Condition{
+		Type:    aimv1alpha2.AIMProfileConditionRuntimeProjected,
+		Status:  metav1.ConditionTrue,
+		Reason:  aimv1alpha2.AIMProfileReasonRuntimeProjected,
+		Message: "Runtime projected for this profile",
+	}
+	cm := controllerutils.NewConditionManager([]metav1.Condition{prior})
+
+	decorateProjectionCondition(
+		cm,
+		aimv1alpha2.RuntimeProjectionModeExhaustive,
+		false,
+		true,
+		nil,
+		controllerutils.NewInfrastructureError(
+			"ProfileCacheLookupFailed",
+			"Failed to resolve the Shared AIMProfileCache",
+			nil,
+		),
+	)
+
+	got := cm.Get(aimv1alpha2.AIMProfileConditionRuntimeProjected)
+	if got == nil || got.Status != prior.Status || got.Reason != prior.Reason || got.Message != prior.Message {
+		t.Fatalf("RuntimeProjected condition = %+v, want prior condition preserved", got)
+	}
+}
+
+func TestRecoveredRuntimeProjectionElectionConditionIsRemoved(t *testing.T) {
+	cm := controllerutils.NewConditionManager([]metav1.Condition{{
+		Type:   runtimeProjectionElectionReadyCondition,
+		Status: metav1.ConditionFalse,
+		Reason: "InfrastructureError",
+	}})
+
+	clearRecoveredRuntimeProjectionElectionCondition(cm, nil)
+
+	if got := cm.Get(runtimeProjectionElectionReadyCondition); got != nil {
+		t.Fatalf("recovered election condition was not removed: %+v", got)
+	}
+}
+
 func TestSourceDerivedProfileMissingContractKeepsExistingProjectionUntouched(t *testing.T) {
 	spec := aimv1alpha2.AIMProfileSpecCommon{
 		AimId:   "org/model",
@@ -879,6 +921,86 @@ func TestClusterProfilePlanResources_ReducedModelSlugPrimary(t *testing.T) {
 		if _, ok := o.(*corev1.ConfigMap); ok {
 			t.Errorf("bare model-slug ClusterServingRuntime must not project a ConfigMap")
 		}
+	}
+}
+
+func TestExhaustiveModeMaintainsRetainedNamespaceModelSlugRuntime(t *testing.T) {
+	spec := primaryGPUSpec()
+	spec.Image = "registry.example.com/updated-after-mode-flip:2.0.0"
+	profile := &aimv1alpha2.AIMProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "retained-model-slug", Namespace: "team-a"},
+		Spec:       aimv1alpha2.AIMProfileSpec{AIMProfileSpecCommon: spec},
+	}
+	profile.Status.ProjectedModelSlugRuntimeName = serving.ModelSlugRuntimeName(spec.AimId)
+
+	r := &ProfileReconciler{ProjectionMode: aimv1alpha2.RuntimeProjectionModeExhaustive}
+	reconcileCtx := controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile}
+	obs := r.ComposeState(
+		context.Background(),
+		reconcileCtx,
+		ProfileFetchResult{profile: profile},
+	)
+	if obs.projectable {
+		t.Fatal("test precondition: retained profile must be gate-false without matching GPU nodes")
+	}
+	if obs.projectionErr != nil {
+		t.Fatalf("compose retained model-slug projection: %v", obs.projectionErr)
+	}
+	if err := obs.yamlContract.Validate(); err != nil {
+		t.Fatalf("retained namespace model-slug projection must compose its YAML contract: %v", err)
+	}
+
+	plan := r.PlanResources(context.Background(), reconcileCtx, obs)
+	if got := countServingRuntimes(plan.GetToApplyWithForce()); got != 1 {
+		t.Fatalf("Exhaustive must maintain one retained model-slug runtime, got %d", got)
+	}
+	runtime := findServingRuntime(t, plan.GetToApplyWithForce())
+	if runtime.Name != profile.Status.ProjectedModelSlugRuntimeName {
+		t.Fatalf("maintained runtime name = %q, want retained %q", runtime.Name, profile.Status.ProjectedModelSlugRuntimeName)
+	}
+	if got := runtime.Spec.Containers[0].Image; got != spec.Image {
+		t.Fatalf("maintained runtime image = %q, want current profile image %q", got, spec.Image)
+	}
+	if shouldMaintainNamespaceModelSlugRuntime(
+		aimv1alpha2.RuntimeProjectionModeReduced, profile, true, false,
+	) {
+		t.Fatal("active model-slug mode must honor a lost election instead of retaining the old owner")
+	}
+}
+
+func TestExhaustiveModeMaintainsRetainedClusterModelSlugRuntime(t *testing.T) {
+	spec := primaryGPUSpec()
+	spec.Image = "registry.example.com/updated-cluster-after-mode-flip:2.0.0"
+	profile := &aimv1alpha2.AIMClusterProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "retained-cluster-model-slug"},
+		Spec:       aimv1alpha2.AIMClusterProfileSpec{AIMProfileSpecCommon: spec},
+	}
+	profile.Status.ProjectedModelSlugRuntimeName = serving.ModelSlugRuntimeName(spec.AimId)
+
+	r := &ClusterProfileReconciler{ProjectionMode: aimv1alpha2.RuntimeProjectionModeExhaustive}
+	reconcileCtx := controllerutils.ReconcileContext[*aimv1alpha2.AIMClusterProfile]{Object: profile}
+	obs := r.ComposeState(
+		context.Background(),
+		reconcileCtx,
+		ClusterProfileFetchResult{profile: profile},
+	)
+	if obs.projectable {
+		t.Fatal("test precondition: retained cluster profile must be gate-false without matching GPU nodes")
+	}
+	if obs.projectionErr != nil {
+		t.Fatalf("compose retained cluster model-slug projection: %v", obs.projectionErr)
+	}
+
+	plan := r.PlanResources(context.Background(), reconcileCtx, obs)
+	if got := countClusterServingRuntimes(plan.GetToApplyWithForce()); got != 1 {
+		t.Fatalf("Exhaustive must maintain one retained model-slug ClusterServingRuntime, got %d", got)
+	}
+	runtime := findClusterServingRuntime(t, plan.GetToApplyWithForce())
+	if runtime.Name != profile.Status.ProjectedModelSlugRuntimeName {
+		t.Fatalf("maintained runtime name = %q, want retained %q", runtime.Name, profile.Status.ProjectedModelSlugRuntimeName)
+	}
+	if got := runtime.Spec.Containers[0].Image; got != spec.Image {
+		t.Fatalf("maintained runtime image = %q, want current profile image %q", got, spec.Image)
 	}
 }
 

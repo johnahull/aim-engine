@@ -4,11 +4,11 @@
 # ping-ponging managedFields ownership of the same namespace ServingRuntime.
 #
 # Scenario:
-#   1. Operator in --runtime-projection-mode=Reduced. A non-primary namespace
-#      AIMProfile gets NO eager per-profile runtime, so a referencing AIMService's
-#      runtime aim-flip-ns-profile-bba2ad9c is materialized ONLY by the always-on
-#      lazy InferenceService-watch projection — a shadow marked
-#      aim.eai.amd.com/runtime-projection: lazy.
+#   1. Operator in --runtime-projection-mode=Reduced. A primary namespace
+#      AIMProfile gets an eager model-slug runtime but NO eager per-profile
+#      runtime, so a referencing AIMService's runtime
+#      aim-flip-ns-profile-bba2ad9c is materialized ONLY by the always-on lazy
+#      projection — a shadow marked aim.eai.amd.com/runtime-projection: lazy.
 #   2. Flip the operator to Exhaustive. The eager per-profile projection now turns
 #      on for the SAME hashed name (hashing does NOT separate the two
 #      projectors — both target the same object). Before the fix, both controllers
@@ -18,7 +18,9 @@
 #      overwrites it with aim.eai.amd.com/runtime-projection: eager, so
 #      the lazy path defers; and the object's resourceVersion STABILIZES (sampled
 #      twice with a delay, required unchanged) — a single settled owner.
-#   4. Restore Reduced, patch the profile, and assert the retained eager pair gets
+#   4. While still Exhaustive, patch the profile and assert the model-slug
+#      runtime retained from Reduced is refreshed instead of abandoned.
+#   5. Restore Reduced, patch the profile, and assert the retained eager pair gets
 #      a new matching content hash. Reduced must maintain an existing eager
 #      projection even though it would not create that per-profile runtime anew.
 #
@@ -58,8 +60,9 @@ spec:
   steps:
     - name: Apply the namespace profile and wait for Ready
       description: |
-        A non-primary, no-accelerator, deployable namespace AIMProfile. It reaches
-        Ready under Reduced even though it projects no eager runtime.
+        A primary, no-accelerator, deployable namespace AIMProfile. It reaches
+        Ready under Reduced and publishes only its eager model-slug runtime, not
+        the per-profile runtime used by the AIMService below.
       try:
         - apply:
             file: profile.yaml
@@ -72,6 +75,21 @@ spec:
                 name: flip-ns-profile
               status:
                 status: Ready
+                projectedModelSlugRuntimeName: aim-qwen-qwen3-0-6b
+
+    - name: Assert the eager model-slug runtime exists before the mode flip
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-qwen-qwen3-0-6b
+                labels:
+                  aim.eai.amd.com/runtime-projection: eager
+                  aim.eai.amd.com/profile: flip-ns-profile
+                (ownerReferences[?kind == 'AIMProfile']):
+                  - name: flip-ns-profile
 
     - name: Assert NO eager per-profile ServingRuntime exists before the service
       description: |
@@ -261,6 +279,52 @@ spec:
                 | grep -c '"manager": "aim-runtime-projection-controller"' || true)"
               echo "lazy field-manager entries on the SR: ${owners}"
               echo "resourceVersion stable at ${rv1} — ownership settled on the eager manager"
+        - script:
+            timeout: 150s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              SR=aim-qwen-qwen3-0-6b
+              IMAGE=registry.example.com/aim-cpu-exhaustive:8.8.8
+
+              before="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" \
+                -o jsonpath='{.metadata.annotations.aim\.eai\.amd\.com/runtime-projection-content-hash}')"
+              if [ -z "${before}" ]; then
+                echo "retained model-slug ServingRuntime has no baseline content hash" >&2
+                exit 1
+              fi
+
+              kubectl -n "$NAMESPACE" patch aimprofile flip-ns-profile \
+                --type=merge \
+                -p "{\"spec\":{\"image\":\"${IMAGE}\"}}"
+
+              deadline=$(( $(date +%s) + 90 ))
+              while [ "$(date +%s)" -lt "${deadline}" ]; do
+                image="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" \
+                  -o jsonpath='{.spec.containers[0].image}')"
+                after="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" \
+                  -o jsonpath='{.metadata.annotations.aim\.eai\.amd\.com/runtime-projection-content-hash}')"
+                cm_hash="$(kubectl -n "$NAMESPACE" get configmap "$SR" \
+                  -o jsonpath='{.metadata.annotations.aim\.eai\.amd\.com/runtime-projection-content-hash}')"
+                marker="$(kubectl -n "$NAMESPACE" get servingruntime "$SR" \
+                  -o jsonpath='{.metadata.labels.aim\.eai\.amd\.com/runtime-projection}')"
+                if [ "${image}" = "${IMAGE}" ] &&
+                   [ -n "${after}" ] &&
+                   [ "${after}" != "${before}" ] &&
+                   [ "${cm_hash}" = "${after}" ] &&
+                   [ "${marker}" = "eager" ]; then
+                  echo "retained model-slug runtime converged in Exhaustive: ${before} -> ${after}"
+                  exit 0
+                fi
+                sleep 2
+              done
+
+              echo "retained model-slug runtime did not converge after profile drift in Exhaustive" >&2
+              kubectl -n "$NAMESPACE" get aimprofile flip-ns-profile -o yaml >&2
+              kubectl -n "$NAMESPACE" get servingruntime "$SR" -o yaml >&2
+              exit 1
       finally:
         - script:
             timeout: 210s

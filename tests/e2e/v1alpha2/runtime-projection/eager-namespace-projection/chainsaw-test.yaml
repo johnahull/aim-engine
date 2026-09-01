@@ -8,6 +8,9 @@
 # ServingRuntime named aim-<profile.Name> plus its colocated ConfigMap of the
 # same name, both owner-ref'd by the profile and force-applied (reserved aim-
 # prefix). The runtime mounts the colocated ConfigMap as the aim-profile volume.
+# The test also edits and deletes that ConfigMap to prove the profile controller
+# watches both eager projection siblings and restores them without another
+# profile event.
 #
 # No accelerator and no cache/PVC, so this reaches the projection contract in any
 # cluster with no special infrastructure.
@@ -88,6 +91,86 @@ spec:
                     image: registry.example.com/aim-cpu-base:0.12.0
                 (volumes[?configMap.name == 'aim-test-eager-sr-638eae33']):
                   - name: aim-profile
+
+    - name: Drift the eager ConfigMap and assert its profile data is restored
+      description: |
+        Change the managed profile YAML to a bogus value without touching the
+        AIMProfile or ServingRuntime. The ConfigMap ownership watch must enqueue
+        the profile, whose force-apply restores the original data.
+      try:
+        - script:
+            timeout: 120s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              CM=aim-test-eager-sr-638eae33
+              KEY=vllm-none-bf16-tp0-latency.yaml
+              original_hash="$(
+                kubectl -n "$NAMESPACE" get configmap "$CM" \
+                  -o go-template='{{ index .data "vllm-none-bf16-tp0-latency.yaml" }}' |
+                  sha256sum | awk '{print $1}'
+              )"
+
+              kubectl -n "$NAMESPACE" patch configmap "$CM" --type=merge \
+                -p '{"data":{"vllm-none-bf16-tp0-latency.yaml":"bogus-eager-configmap-drift"}}'
+
+              for _ in $(seq 1 60); do
+                current_hash="$(
+                  kubectl -n "$NAMESPACE" get configmap "$CM" \
+                    -o go-template='{{ index .data "vllm-none-bf16-tp0-latency.yaml" }}' 2>/dev/null |
+                    sha256sum | awk '{print $1}'
+                )"
+                if [ "$current_hash" = "$original_hash" ]; then
+                  echo "eager ConfigMap drift restored"
+                  exit 0
+                fi
+                sleep 2
+              done
+
+              echo "ERROR: eager ConfigMap data was not restored" >&2
+              exit 1
+
+    - name: Delete the eager ConfigMap and assert it is recreated
+      description: |
+        Delete only the ConfigMap and wait for the same-name projection sibling
+        to return with a new UID. No profile mutation is made to trigger this;
+        recreation must come from the owned ConfigMap delete watch.
+      try:
+        - script:
+            timeout: 120s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              CM=aim-test-eager-sr-638eae33
+              old_uid="$(kubectl -n "$NAMESPACE" get configmap "$CM" -o jsonpath='{.metadata.uid}')"
+              kubectl -n "$NAMESPACE" delete configmap "$CM" --wait=false
+
+              for _ in $(seq 1 60); do
+                new_uid="$(kubectl -n "$NAMESPACE" get configmap "$CM" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+                if [ -n "$new_uid" ] && [ "$new_uid" != "$old_uid" ]; then
+                  echo "eager ConfigMap recreated: $old_uid -> $new_uid"
+                  exit 0
+                fi
+                sleep 2
+              done
+
+              echo "ERROR: eager ConfigMap was not recreated with a new UID" >&2
+              exit 1
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-test-eager-sr-638eae33
+                (ownerReferences[?kind == 'AIMProfile']):
+                  - name: test-eager-sr
+              data:
+                (keys(@)):
+                  - vllm-none-bf16-tp0-latency.yaml
 
     - name: Delete the profile and assert the ServingRuntime is garbage-collected
       try:

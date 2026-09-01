@@ -58,8 +58,9 @@ import (
 )
 
 const (
-	reasonFetchError           = "FetchError"
-	serviceControllerNameLabel = constants.AimLabelDomain + "/service.name"
+	reasonFetchError               = "FetchError"
+	reasonProfileRuntimeConverging = "ProfileRuntimeConverging"
+	serviceControllerNameLabel     = constants.AimLabelDomain + "/service.name"
 )
 
 // ProfileServiceReconciler implements the domain logic for profile-based
@@ -437,7 +438,7 @@ func (obs ServiceObservation) getProfileRuntimeHealth() controllerutils.Componen
 	}
 	if !obs.profileRuntimeCurrent() {
 		health.State = constants.AIMStatusProgressing
-		health.Reason = "ProfileRuntimeConverging"
+		health.Reason = reasonProfileRuntimeConverging
 		health.Message = "Waiting for the profile ServingRuntime and ConfigMap to reflect the current profile and cache state"
 		return health
 	}
@@ -883,8 +884,16 @@ func (obs *ServiceObservation) profileRuntimeCurrent() bool {
 		return false
 	}
 
+	observedHash, err := serving.RuntimeProjectionContentHash(
+		obs.profileRuntime.Value,
+		obs.profileRuntimeConfigMap.Value,
+	)
+	if err != nil {
+		return false
+	}
 	expectedHash := obs.desiredProfileRuntime.GetAnnotations()[constants.AnnotationRuntimeProjectionContentHash]
 	return expectedHash != "" &&
+		observedHash == expectedHash &&
 		obs.desiredProfileRuntimeConfigMap.GetAnnotations()[constants.AnnotationRuntimeProjectionContentHash] == expectedHash &&
 		obs.profileRuntime.Value.GetAnnotations()[constants.AnnotationRuntimeProjectionContentHash] == expectedHash &&
 		obs.profileRuntimeConfigMap.Value.GetAnnotations()[constants.AnnotationRuntimeProjectionContentHash] == expectedHash &&

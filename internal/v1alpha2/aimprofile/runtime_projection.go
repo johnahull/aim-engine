@@ -24,6 +24,7 @@ package aimprofile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,8 +40,10 @@ import (
 )
 
 const (
-	runtimeProjectionComponent      = "RuntimeProjection"
-	runtimeProjectionReadyCondition = runtimeProjectionComponent + controllerutils.ComponentConditionSuffix
+	runtimeProjectionComponent              = "RuntimeProjection"
+	runtimeProjectionReadyCondition         = runtimeProjectionComponent + controllerutils.ComponentConditionSuffix
+	runtimeProjectionElectionComponent      = "RuntimeProjectionElection"
+	runtimeProjectionElectionReadyCondition = runtimeProjectionElectionComponent + controllerutils.ComponentConditionSuffix
 )
 
 // runtimeProjectable reports whether a profile should have a runtime projected.
@@ -154,7 +157,7 @@ func validateNamespaceRuntimeProjection(
 			return fmt.Errorf("build per-profile ServingRuntime: %w", err)
 		}
 	}
-	if mode.ProjectsModelSlug() && modelSlugProjectable(spec, obs.projectable, obs.modelSlugWinner) {
+	if shouldMaintainNamespaceModelSlugRuntime(mode, profile, obs.projectable, obs.modelSlugWinner) {
 		input.Name = serving.ModelSlugRuntimeName(spec.AimId)
 		if _, _, err := serving.BuildNamespaceServingRuntime(input); err != nil {
 			return fmt.Errorf("build model-slug ServingRuntime: %w", err)
@@ -183,7 +186,7 @@ func validateClusterRuntimeProjection(
 			return fmt.Errorf("build per-profile ClusterServingRuntime: %w", err)
 		}
 	}
-	if mode.ProjectsModelSlug() && modelSlugProjectable(spec, obs.projectable, obs.modelSlugWinner) {
+	if shouldMaintainClusterModelSlugRuntime(mode, profile, obs.projectable, obs.modelSlugWinner) {
 		input.Name = serving.ModelSlugRuntimeName(spec.AimId)
 		if _, err := serving.BuildClusterServingRuntime(input); err != nil {
 			return fmt.Errorf("build model-slug ClusterServingRuntime: %w", err)
@@ -204,16 +207,20 @@ func validateClusterRuntimeProjection(
 // <profile>-cache-<hash> and never flips the profile's caching flag, yet it must
 // still be mounted here or a Shared-mode service resolving to a namespace profile
 // would cold-pull weights on every pod start (an outright failure air-gapped).
-// A list error is logged and treated as "no cache yet" so a transient API hiccup
-// defers the mount to the next reconcile — driven by the AIMProfileCache watch —
-// rather than failing the whole projection.
-func fetchMountableCache(ctx context.Context, c client.Client, profile *aimv1alpha2.AIMProfile) *aimv1alpha2.AIMProfileCache {
+// A list error must remain distinguishable from "no Ready cache": treating an
+// unknown result as nil would force-apply a cacheless runtime and remove a
+// working PVC mount. The caller reports the infrastructure failure and skips
+// projection apply, preserving the last known-good runtime.
+func fetchMountableCache(
+	ctx context.Context,
+	c client.Client,
+	profile *aimv1alpha2.AIMProfile,
+) (*aimv1alpha2.AIMProfileCache, error) {
 	cache, err := profilecache.FindReadyShared(ctx, c, profile.Namespace, profile.Name, aimv1alpha1.AIMResolutionScopeNamespace)
 	if err != nil {
-		log.FromContext(ctx).V(1).Info("failed to resolve profile cache for runtime projection", "profile", profile.Name, "error", err)
-		return nil
+		return nil, err
 	}
-	return cache
+	return cache, nil
 }
 
 // planNamespaceRuntime appends the eager ServingRuntime (+ colocated profile
@@ -385,18 +392,20 @@ func shouldMaintainClusterRuntime(
 // guessable, so the per-profile hashed-name "cannot collide by accident" argument
 // (see serving.RuntimeName) does NOT cover this path — and does not need to.
 //
-// Unlike the per-profile path there is no asymmetric-teardown re-apply here: the
-// primary is published while the profile is projectable and left untouched
-// otherwise (never deleted; GC'd on profile delete). onPrimaryUnavailable
-// (degrade vs repoint) is out of scope for this slice.
+// Projection mode controls first publication and active winner election. Once
+// status records this profile as the model-slug owner, a mode that disables
+// model-slug publication still reasserts the existing runtime so its eager marker
+// cannot strand stale content. When model-slug publication is active, the live
+// election remains authoritative and a losing profile stops applying the name.
 func planNamespaceModelSlugRuntime(
 	ctx context.Context,
 	plan *controllerutils.PlanResult,
+	mode aimv1alpha2.RuntimeProjectionMode,
 	profile *aimv1alpha2.AIMProfile,
 	obs ProfileObservation,
 ) {
 	spec := profile.Spec.AIMProfileSpecCommon
-	if !modelSlugProjectable(spec, obs.projectable, obs.modelSlugWinner) {
+	if !shouldMaintainNamespaceModelSlugRuntime(mode, profile, obs.projectable, obs.modelSlugWinner) {
 		return
 	}
 	runtime, configMap, err := serving.BuildNamespaceServingRuntime(serving.NamespaceRuntimeInput{
@@ -420,6 +429,21 @@ func planNamespaceModelSlugRuntime(
 	plan.ApplyWithForce(configMap)
 }
 
+func shouldMaintainNamespaceModelSlugRuntime(
+	mode aimv1alpha2.RuntimeProjectionMode,
+	profile *aimv1alpha2.AIMProfile,
+	projectable, modelSlugWinner bool,
+) bool {
+	if profile == nil {
+		return false
+	}
+	if mode.ProjectsModelSlug() {
+		return modelSlugProjectable(profile.Spec.AIMProfileSpecCommon, projectable, modelSlugWinner)
+	}
+	return profile.Status.ProjectedModelSlugRuntimeName ==
+		serving.ModelSlugRuntimeName(profile.Spec.AimId)
+}
+
 // planClusterModelSlugRuntime appends the Reduced/Both model-slug primary
 // ClusterServingRuntime for the elected cluster primary. The bare CSR (no
 // colocated ConfigMap) is named aim-<model-slug>; autoSelect stays OFF (native
@@ -433,11 +457,12 @@ func planNamespaceModelSlugRuntime(
 func planClusterModelSlugRuntime(
 	ctx context.Context,
 	plan *controllerutils.PlanResult,
+	mode aimv1alpha2.RuntimeProjectionMode,
 	profile *aimv1alpha2.AIMClusterProfile,
 	obs ClusterProfileObservation,
 ) {
 	spec := profile.Spec.AIMProfileSpecCommon
-	if !modelSlugProjectable(spec, obs.projectable, obs.modelSlugWinner) {
+	if !shouldMaintainClusterModelSlugRuntime(mode, profile, obs.projectable, obs.modelSlugWinner) {
 		return
 	}
 
@@ -454,6 +479,21 @@ func planClusterModelSlugRuntime(
 	}
 
 	plan.ApplyWithForce(runtime)
+}
+
+func shouldMaintainClusterModelSlugRuntime(
+	mode aimv1alpha2.RuntimeProjectionMode,
+	profile *aimv1alpha2.AIMClusterProfile,
+	projectable, modelSlugWinner bool,
+) bool {
+	if profile == nil {
+		return false
+	}
+	if mode.ProjectsModelSlug() {
+		return modelSlugProjectable(profile.Spec.AIMProfileSpecCommon, projectable, modelSlugWinner)
+	}
+	return profile.Status.ProjectedModelSlugRuntimeName ==
+		serving.ModelSlugRuntimeName(profile.Spec.AimId)
 }
 
 // recordProjectedRuntimeNames publishes the projected runtime name(s) on status
@@ -489,7 +529,8 @@ func recordProjectedRuntimeNames(
 }
 
 // decorateProjectionCondition records the RuntimeProjected condition for the
-// mode in effect. A builder error always records False/RuntimeProjectionFailed.
+// mode in effect. A builder error records False/RuntimeProjectionFailed, while
+// an infrastructure error preserves the prior informational condition.
 // Otherwise per-profile modes (Exhaustive/Both) reflect this profile's own
 // projection. Reduced-only mode has no per-profile runtime, so it reflects the
 // condition only for the elected primary profile (the one that publishes the
@@ -502,6 +543,11 @@ func decorateProjectionCondition(
 	projectionErr error,
 ) {
 	if projectionErr != nil {
+		var categorized controllerutils.StateEngineError
+		if errors.As(projectionErr, &categorized) &&
+			categorized.Category() == controllerutils.ErrorCategoryInfrastructure {
+			return
+		}
 		cm.MarkFalse(
 			aimv1alpha2.AIMProfileConditionRuntimeProjected,
 			aimv1alpha2.AIMProfileReasonRuntimeProjectionFailed,

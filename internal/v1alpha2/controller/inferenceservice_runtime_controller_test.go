@@ -109,6 +109,20 @@ func makeManagedConfigMap(name, namespace string) *corev1.ConfigMap {
 	}
 }
 
+func recordLazyFieldOwner(obj client.Object) {
+	apiVersion := corev1.SchemeGroupVersion.String()
+	if _, ok := obj.(*kservev1alpha1.ServingRuntime); ok {
+		apiVersion = kservev1alpha1.SchemeGroupVersion.String()
+	}
+	obj.SetManagedFields([]metav1.ManagedFieldsEntry{{
+		Manager:    runtimeProjectionFieldOwner,
+		Operation:  metav1.ManagedFieldsOperationApply,
+		APIVersion: apiVersion,
+		FieldsType: "FieldsV1",
+		FieldsV1:   &metav1.FieldsV1{Raw: []byte(`{"f:metadata":{"f:labels":{"f:app.kubernetes.io/managed-by":{}}}}`)},
+	}})
+}
+
 func makeClusterProfileWithAimID(name, aimID string) *aimv1alpha2.AIMClusterProfile {
 	return &aimv1alpha2.AIMClusterProfile{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -126,6 +140,21 @@ func makeProfileCache(name, namespace, profileName string, scope aimv1alpha1.AIM
 	}
 }
 
+type patchRecordingClient struct {
+	client.Client
+	patchCalls int
+}
+
+func (c *patchRecordingClient) Patch(
+	ctx context.Context,
+	obj client.Object,
+	patch client.Patch,
+	opts ...client.PatchOption,
+) error {
+	c.patchCalls++
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
 // newRuntimeProjectionClient builds a fake client that mirrors the production
 // InferenceService ServingRuntime/ClusterServingRuntime-name index the mapping
 // handlers rely on.
@@ -135,6 +164,7 @@ func newRuntimeProjectionClient(t *testing.T, objs ...client.Object) client.Clie
 		WithScheme(runtimeProjectionScheme(t)).
 		WithObjects(objs...).
 		WithIndex(&servingv1beta1.InferenceService{}, inferenceServiceRuntimeIndexKey, indexInferenceServiceRuntime).
+		WithReturnManagedFields().
 		Build()
 }
 
@@ -680,13 +710,14 @@ func TestInferenceServiceProjectionPredicate(t *testing.T) {
 }
 
 // makeShadowServingRuntime builds a complete-looking managed ServingRuntime.
-// When lazy is true it carries the lazy-projection marker label (this
-// controller's own shadow); when false it stands in for a hand-authored
-// ServingRuntime (no marker) that must be deferred to.
+// When lazy is true it carries both identities left by this controller's SSA;
+// when false it stands in for a hand-authored ServingRuntime that must be
+// deferred to.
 func makeShadowServingRuntime(name, namespace string, lazy bool) *kservev1alpha1.ServingRuntime {
 	sr := makeManagedServingRuntime(name, namespace)
 	if lazy {
 		sr.Labels[constants.LabelRuntimeProjection] = constants.LabelValueRuntimeProjectionLazy
+		recordLazyFieldOwner(sr)
 	}
 	return sr
 }
@@ -705,11 +736,14 @@ func TestOwnedByLazyProjection(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		label string
-		want  bool
+		name       string
+		label      string
+		fieldOwner string
+		want       bool
 	}{
 		{name: "lazy-projection marker is our shadow", label: constants.LabelValueRuntimeProjectionLazy, want: true},
+		{name: "lazy field manager survives a removed marker", fieldOwner: runtimeProjectionFieldOwner, want: true},
+		{name: "explicit eager marker wins over stale lazy field ownership", label: constants.LabelValueRuntimeProjectionEager, fieldOwner: runtimeProjectionFieldOwner, want: false},
 		{name: "eager-projection marker is not ours (defer)", label: constants.LabelValueRuntimeProjectionEager, want: false},
 		{name: "no marker is a hand-authored ServingRuntime (defer)", label: "", want: false},
 	}
@@ -720,6 +754,9 @@ func TestOwnedByLazyProjection(t *testing.T) {
 			if tc.label != "" {
 				sr.Labels[constants.LabelRuntimeProjection] = tc.label
 			}
+			if tc.fieldOwner != "" {
+				sr.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: tc.fieldOwner}}
+			}
 			if got := ownedByLazyProjection(sr); got != tc.want {
 				t.Fatalf("ownedByLazyProjection() = %v, want %v", got, tc.want)
 			}
@@ -727,19 +764,18 @@ func TestOwnedByLazyProjection(t *testing.T) {
 	}
 }
 
-// TestNamespaceRuntimeComplete guards the self-heal fix: an existing complete
-// ServingRuntime that is our own lazy shadow (carries the marker) must NOT be
-// treated as "complete" (so the reconcile re-applies it and reasserts drift, a
-// late cache, or profile changes), while a complete ServingRuntime materialized
-// by the profile controller's eager projection or a hand-authored ServingRuntime
-// (no marker) is deferred to. The marker check — not ownerRef kind — is
-// load-bearing because a namespace-AIMProfile lazy shadow and a namespace
-// AIMProfile eager projection carry the same AIMProfile ownerReference.
+// TestNamespaceRuntimeComplete guards the self-heal fix: this controller's lazy
+// shadow must NOT be treated as complete, even after both marker labels are
+// removed, while eager and hand-authored pairs remain deferred to.
 func TestNamespaceRuntimeComplete(t *testing.T) {
 	t.Parallel()
 
 	name := serving.RuntimeName("p1")
 	ns := testNamespace
+	unmarkedLazySR := makeShadowServingRuntime(name, ns, true)
+	delete(unmarkedLazySR.Labels, constants.LabelRuntimeProjection)
+	unmarkedLazyCM := makeLazyConfigMap(name, ns)
+	delete(unmarkedLazyCM.Labels, constants.LabelRuntimeProjection)
 
 	tests := []struct {
 		name string
@@ -755,6 +791,11 @@ func TestNamespaceRuntimeComplete(t *testing.T) {
 			name: "eager projection (eager marker) is deferred to",
 			objs: []client.Object{makeEagerServingRuntime(name, ns), makeManagedConfigMap(name, ns)},
 			want: true,
+		},
+		{
+			name: "our lazy shadow remains managed when both markers are removed",
+			objs: []client.Object{unmarkedLazySR, unmarkedLazyCM},
+			want: false,
 		},
 		{
 			name: "hand-authored (no marker) is deferred to",
@@ -1140,6 +1181,9 @@ func TestProfileCacheProjectionPredicate(t *testing.T) {
 	becameDedicated.Generation++
 	becameDedicated.Spec.Mode = aimv1alpha2.ProfileCacheModeDedicated
 
+	statusCaughtUp := base.DeepCopy()
+	statusCaughtUp.Status.ObservedGeneration++
+
 	cosmetic := base.DeepCopy()
 
 	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: becameReady}) {
@@ -1147,6 +1191,9 @@ func TestProfileCacheProjectionPredicate(t *testing.T) {
 	}
 	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: becameDedicated}) {
 		t.Error("Update should fire when a spec change removes the cache from shared runtime projection")
+	}
+	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: statusCaughtUp}) {
+		t.Error("Update should fire when cache status catches up to its spec generation")
 	}
 	if p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: cosmetic}) {
 		t.Error("Update should be filtered for a cosmetic cache write")
@@ -1173,6 +1220,7 @@ func lazyProfileOwner(profile runtimeprojection.BackingProfile) metav1.OwnerRefe
 func makeLazyConfigMap(name, namespace string) *corev1.ConfigMap {
 	cm := makeManagedConfigMap(name, namespace)
 	cm.Labels[constants.LabelRuntimeProjection] = constants.LabelValueRuntimeProjectionLazy
+	recordLazyFieldOwner(cm)
 	return cm
 }
 
@@ -1209,6 +1257,8 @@ func TestProfileFanoutIncludesInactiveOwnedShadowsAndDedupes(t *testing.T) {
 	inactiveSR.OwnerReferences = []metav1.OwnerReference{owner}
 	inactiveCM := makeLazyConfigMap(slugName, "team-b")
 	inactiveCM.OwnerReferences = []metav1.OwnerReference{owner}
+	delete(inactiveSR.Labels, constants.LabelRuntimeProjection)
+	delete(inactiveCM.Labels, constants.LabelRuntimeProjection)
 
 	staleOwner := owner
 	staleOwner.UID = "profile-old"
@@ -1237,6 +1287,7 @@ func TestCacheFanoutIncludesInactiveModelSlugShadow(t *testing.T) {
 	active := makeConsumerISVC("active", testNamespace, perProfileName)
 	inactiveSlug := makeShadowServingRuntime(slugName, testNamespace, true)
 	inactiveSlug.OwnerReferences = []metav1.OwnerReference{owner}
+	delete(inactiveSlug.Labels, constants.LabelRuntimeProjection)
 	elsewhere := makeShadowServingRuntime(slugName, "team-b", true)
 	elsewhere.OwnerReferences = []metav1.OwnerReference{owner}
 
@@ -1288,6 +1339,109 @@ func TestResolveState_OwnerFromEitherPartialLazySibling(t *testing.T) {
 				t.Fatalf("partial deletion must recreate both siblings, got servingRuntime=%v configMap=%v", desired.Runtime, desired.ConfigMap)
 			}
 		})
+	}
+}
+
+func TestResolveState_RepairsLazyPairAfterMarkersRemoved(t *testing.T) {
+	t.Parallel()
+
+	profile := makeClusterProfileWithAimID("p1", "Qwen/Qwen3-0.6B")
+	profile.UID = currentProfileUID
+	runtimeName := serving.RuntimeName(profile.Name)
+	owner := lazyProfileOwner(profile)
+
+	sr := makeShadowServingRuntime(runtimeName, testNamespace, true)
+	sr.OwnerReferences = []metav1.OwnerReference{owner}
+	delete(sr.Labels, constants.LabelRuntimeProjection)
+	cm := makeLazyConfigMap(runtimeName, testNamespace)
+	cm.OwnerReferences = []metav1.OwnerReference{owner}
+	delete(cm.Labels, constants.LabelRuntimeProjection)
+
+	r := &RuntimeProjectionReconciler{Client: newRuntimeProjectionClient(t, profile, sr, cm)}
+	key := client.ObjectKey{Namespace: testNamespace, Name: runtimeName}
+	state, err := r.resolveState(context.Background(), key)
+	if err != nil {
+		t.Fatalf("resolveState() error = %v", err)
+	}
+	if state.ExistingShadowProfile == nil || state.ExistingShadowProfile.GetUID() != profile.UID {
+		t.Fatalf("existing owner = %v, want profile UID %q", state.ExistingShadowProfile, profile.UID)
+	}
+
+	desired, err := runtimeprojection.DesiredForRuntime(key.Namespace, key.Name, state)
+	if err != nil {
+		t.Fatalf("DesiredForRuntime() error = %v", err)
+	}
+	if desired.Runtime == nil || desired.ConfigMap == nil {
+		t.Fatalf("unmarked lazy pair must be repaired, got servingRuntime=%v configMap=%v", desired.Runtime, desired.ConfigMap)
+	}
+	if got := desired.Runtime.Labels[constants.LabelRuntimeProjection]; got != constants.LabelValueRuntimeProjectionLazy {
+		t.Errorf("repaired ServingRuntime marker = %q, want %q", got, constants.LabelValueRuntimeProjectionLazy)
+	}
+	if got := desired.ConfigMap.Labels[constants.LabelRuntimeProjection]; got != constants.LabelValueRuntimeProjectionLazy {
+		t.Errorf("repaired ConfigMap marker = %q, want %q", got, constants.LabelValueRuntimeProjectionLazy)
+	}
+}
+
+func TestReconcile_CacheReadinessUnknownPreservesLazyProjection(t *testing.T) {
+	profile := makeClusterProfileWithAimID("p1", "")
+	profile.UID = currentProfileUID
+	runtimeName := serving.RuntimeName(profile.Name)
+	owner := lazyProfileOwner(profile)
+
+	sr := makeShadowServingRuntime(runtimeName, testNamespace, true)
+	sr.OwnerReferences = []metav1.OwnerReference{owner}
+	sr.Spec.Volumes = []corev1.Volume{{
+		Name: "cached-model",
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "last-known-cache"},
+		},
+	}}
+	cm := makeLazyConfigMap(runtimeName, testNamespace)
+	cm.OwnerReferences = []metav1.OwnerReference{owner}
+
+	cache := makeProfileCache(
+		"cache",
+		testNamespace,
+		profile.Name,
+		aimv1alpha1.AIMResolutionScopeCluster,
+	)
+	cache.Spec.Mode = aimv1alpha2.ProfileCacheModeShared
+	cache.Status.Conditions = []metav1.Condition{{
+		Type:   "DependenciesReachable",
+		Status: metav1.ConditionFalse,
+		Reason: "ListFailed",
+	}}
+
+	recordingClient := &patchRecordingClient{
+		Client: newRuntimeProjectionClient(t, profile, sr, cm, cache),
+	}
+	r := &RuntimeProjectionReconciler{
+		Client: recordingClient,
+		Scheme: runtimeProjectionScheme(t),
+	}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: client.ObjectKey{Namespace: testNamespace, Name: runtimeName},
+	})
+	if err == nil {
+		t.Fatal("Reconcile() error = nil, want cache readiness error")
+	}
+	if recordingClient.patchCalls != 0 {
+		t.Fatalf("Patch() calls = %d, want 0 while cache readiness is unknown", recordingClient.patchCalls)
+	}
+
+	var got kservev1alpha1.ServingRuntime
+	if err := recordingClient.Get(
+		context.Background(),
+		client.ObjectKey{Namespace: testNamespace, Name: runtimeName},
+		&got,
+	); err != nil {
+		t.Fatalf("get existing ServingRuntime: %v", err)
+	}
+	if len(got.Spec.Volumes) != 1 ||
+		got.Spec.Volumes[0].PersistentVolumeClaim == nil ||
+		got.Spec.Volumes[0].PersistentVolumeClaim.ClaimName != "last-known-cache" {
+		t.Fatalf("existing cache volume changed while readiness was unknown: %#v", got.Spec.Volumes)
 	}
 }
 

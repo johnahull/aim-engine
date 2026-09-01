@@ -140,7 +140,8 @@ func (pr *PlanResult) ApplyWithoutOwnerRef(obj client.Object) {
 // ForceOwnership. Use this for objects AIM Engine is authoritative over — e.g.
 // projected runtimes named under the reserved aim- prefix — to reassert managed
 // fields and reconcile drift; the object still gets an owner reference and is
-// garbage collected with the owner.
+// garbage collected with the owner. The force bucket applies ConfigMaps first
+// and stops on the first apply error.
 func (pr *PlanResult) ApplyWithForce(obj client.Object) {
 	pr.toApplyWithForce = append(pr.toApplyWithForce, obj)
 }
@@ -465,7 +466,9 @@ func (p *Pipeline[T, S, F, Obs]) Run(ctx context.Context, obj T) (ctrl.Result, e
 
 		// Apply force-owned resources (with owner references, SSA + ForceOwnership)
 		if applyErr == nil && len(planResult.toApplyWithForce) > 0 {
-			applyErr = ApplyDesiredStateWithForce(ctx, p.Client, p.GetFullName(), p.Scheme, planResult.toApplyWithForce, obj)
+			applyErr = ApplyDesiredStateWithForceFailFast(
+				ctx, p.Client, p.GetFullName(), p.Scheme, planResult.toApplyWithForce, obj,
+			)
 			if applyErr != nil {
 				applyErr = fmt.Errorf("failed to force-apply owned resources: %w", applyErr)
 			}

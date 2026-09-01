@@ -107,6 +107,23 @@ Replaces v1alpha1's `CacheReady`. Tracks the `AIMProfileCache` lifecycle.
 | `False` | `CacheFailed` | Cache download failed |
 | `False` | `CacheLost` | Previously-ready cache is no longer available |
 
+### ProfileRuntimeReady
+
+Tracks the namespaced profile `ServingRuntime` and its same-name ConfigMap
+before AIM Engine creates or updates the InferenceService.
+
+| Status | Reason | Description |
+|---|---|---|
+| `True` | `ProfileRuntimeReady` | Both projection siblings match the current profile and cache content hash |
+| `False` | `ProfileRuntimeMaterializing` | One or both projection siblings do not exist yet |
+| `False` | `ProfileRuntimeConverging` | Both siblings exist, but one or both have not converged to the expected content hash |
+| `False` | `FetchError` | AIM Engine could not read one of the projection siblings |
+
+`ProfileRuntimeConverging` can be transient because the two resources are
+updated independently. If it persists, check for unsupported out-of-band
+changes to generated `aim-*` resources. See
+[Consistency and rollout guarantees](../guides/bring-your-own-kserve.md#consistency-and-rollout-guarantees).
+
 ### InferenceServiceReady
 
 | Status | Reason | Description |
@@ -260,14 +277,31 @@ Reports whether the profile is currently projecting a native KServe runtime (`Se
 |---|---|---|
 | `True` | `RuntimeProjected` | A runtime is projected for this profile |
 | `False` | `RuntimeDegraded` | The projection gate is no longer satisfied (e.g. matching nodes drained, or the profile is no longer deployable), but a previously-projected runtime is **kept, not deleted** |
+| `False` | `RuntimeProjectionFailed` | AIM Engine could not construct a valid projected runtime from the profile |
 
-The condition is silent (absent) when the profile has never projected a runtime, and during a transient node-list failure (so an API hiccup doesn't flap it to `Degraded`).
+The condition is silent (absent) when the profile has never projected a runtime. Transient node-list or shared-cache lookup failures preserve its prior value; those outages are reported through framework dependency health instead of being mislabeled as runtime build failures.
 
 :::{admonition} Degraded without garbage collection
 :class: note
 
 Projection is additive with **asymmetric teardown**: a runtime is created only while the profile is projectable, but is never deleted merely because the gate later flips — only when the profile itself is deleted (owner-reference GC). So a runtime object can persist while its profile reports `RuntimeProjected=False / RuntimeDegraded`. This deliberately avoids yanking a runtime out from under a native `InferenceService` that references it. The `aim.eai.amd.com/runtime-projection-state` label on the runtime object marks provenance (`projected`) and does not currently flip to `degraded`, so this condition on the profile is the authoritative degraded signal; the runtime's ownerRef / `aim.eai.amd.com/projected.profile` annotation is the way back to it.
 :::
+
+### RuntimeProjectionReady
+
+Appears only while runtime construction or its shared-cache lookup is failing,
+and gates aggregate `Ready`. It is removed after recovery.
+
+| Status | Reason | Description |
+|---|---|---|
+| `False` | `RuntimeProjectionFailed` | The profile could not be converted into a valid projected runtime |
+| `False` | `ProfileCacheLookupFailed` | Shared-cache readiness is temporarily unknown; AIM Engine leaves the last-known runtime untouched and retries |
+
+### RuntimeProjectionElectionReady
+
+Appears only when AIM Engine cannot list the profiles needed to elect a
+model-slug runtime winner, and gates aggregate `Ready`. The reason reflects the
+categorized dependency error. It is removed after election succeeds.
 
 ## AIMProfileCache conditions
 

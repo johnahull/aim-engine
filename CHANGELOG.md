@@ -26,12 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`s3://` downloads against a custom `AWS_ENDPOINT_URL` now sign with Signature V4 by default**, where the previous `s3cmd`-based downloader forced Signature V2. Backends that only accept V2 need `AIM_S3_SIGNATURE_VERSION=s3`. (#158)
 
 ### Fixed
+- Runtime projection now preserves the last-known cache mount when artifact listing or cache readiness is temporarily unknown, instead of interpreting the outage as cache absence. Initial force-owned projection applies the ConfigMap before the consuming runtime and stops on the first failure.
 - Runtime profile ConfigMaps now reproduce the source profile's versioned YAML contract instead of always emitting a fixed union of known fields. AIM Engine keeps one canonical `AIMProfile` API, records the source codec and field presence, preserves unmodeled metadata/top-level extensions, and propagates that contract through profile-set/custom-model derivation, service overlays, and eager/lazy projection without parsing image tags. Generated and hand-authored profiles default to the strict canonical schema.
 - `AIM_S3_LOG_LEVEL=DEBUG` now increases only downloader-package verbosity; botocore, boto3, s3transfer, urllib3, and the process root remain at `WARNING`, preventing SDK wire logs from emitting signed headers or temporary credential responses.
 - S3 object transfers now verify every downloaded object's listed size before atomic publication, so truncated or partial transfers are never published.
 - Typed S3 connections now separate administrator RuntimeConfig environment from artifact-level environment. RuntimeConfig can still select infrastructure proxies and credential providers, while `AIMArtifact.spec.env` is limited to validated downloader tuning; proxy, process, trust, and credential-source overrides are rejected with `ConfigValid=False`.
 - Generated-model `NoCompatibleRuntime` conditions and warning events now explain why each configured fallback was rejected, including missing accelerator labels, model/request mismatches, and insufficient per-node resources such as `nvidia.com/gpu requested 1, allocatable 0`. Diagnostics are bounded for large clusters instead of collapsing every mismatch into the generic "no runtime matches" message.
 - S3 authentication failures are now classified as auth errors rather than an invalid spec. `AccessDenied` and botocore's "Unable to locate credentials" matched none of the existing patterns, so a credentials problem surfaced as `ConfigValid=False`/`InvalidSpec` and pointed at the artifact's `sourceUri`. Missing buckets and empty prefixes still classify as source problems. (#158)
+
+### Known limitations
+- ServingRuntime and ConfigMap projection updates are eventually consistent; Kubernetes does not provide a transaction across the pair.
+- ConfigMap-only profile changes do not guarantee a KServe pod rollout. Restart affected predictor pods when the serving process must reload configuration immediately.
+- Out-of-band mutation of generated `aim-*` runtimes or their same-name ConfigMaps is unsupported. Server-side apply can reclaim desired fields but does not necessarily prune extra fields owned by another manager.
+- Retained model-slug aliases are best-effort while their profile is unprojectable or model-slug election is disabled; they can retain a previous revision or winner until projectability or election resumes.
 
 ## [0.2.5] - 2026-07-09
 

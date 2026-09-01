@@ -24,6 +24,7 @@ package aimprofile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -85,7 +86,8 @@ type ProfileFetchResult struct {
 	// AIMService in Shared mode. Contributes the cache mount on the projected
 	// runtime; resolved identically to the lazy shadow so serving does not depend
 	// on the projection mode. Nil when no Ready Shared cache exists.
-	profileCache *aimv1alpha2.AIMProfileCache
+	profileCache    *aimv1alpha2.AIMProfileCache
+	profileCacheErr error
 }
 
 // ClusterProfileFetchResult holds fetched resources for cluster-scoped profiles.
@@ -125,7 +127,7 @@ func (r *ProfileReconciler) FetchRemoteState(
 	// The cache mount is needed by both the per-profile runtime and the model-slug
 	// primary, so resolve it whenever the mode projects either.
 	if r.ProjectionMode.ProjectsPerProfile() || r.ProjectionMode.ProjectsModelSlug() {
-		result.profileCache = fetchMountableCache(ctx, c, profile)
+		result.profileCache, result.profileCacheErr = fetchMountableCache(ctx, c, profile)
 	}
 
 	return result
@@ -230,12 +232,25 @@ func (r *ProfileReconciler) ComposeState(
 	obs.origin = DeriveProfileOrigin(fetch.profile)
 	obs.baseImage = BaseImageFromProfile(fetch.profile, fetch.profile.Status.BaseImage)
 	obs.projectable = runtimeProjectable(spec, obs.deployable, obs.matchResult)
-	if runtimeProjectionNeedsContract(r.ProjectionMode, spec, obs.projectable, obs.modelSlugWinner) ||
-		shouldMaintainNamespaceRuntime(r.ProjectionMode, fetch.profile, obs.projectable) {
-		obs.yamlContract, obs.projectionErr = profileyaml.ForProfile(fetch.profile.Annotations, obs.origin, &spec)
-		if obs.projectionErr == nil {
-			obs.projectionErr = validateNamespaceRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
-		}
+	projectionNeeded := runtimeProjectionNeedsContract(r.ProjectionMode, spec, obs.projectable, obs.modelSlugWinner) ||
+		shouldMaintainNamespaceRuntime(r.ProjectionMode, fetch.profile, obs.projectable) ||
+		shouldMaintainNamespaceModelSlugRuntime(
+			r.ProjectionMode, fetch.profile, obs.projectable, obs.modelSlugWinner,
+		)
+	if !projectionNeeded {
+		return obs
+	}
+	if fetch.profileCacheErr != nil {
+		obs.projectionErr = controllerutils.NewInfrastructureError(
+			"ProfileCacheLookupFailed",
+			fmt.Sprintf("Failed to resolve the Shared AIMProfileCache for runtime projection %q", fetch.profile.Name),
+			fetch.profileCacheErr,
+		)
+		return obs
+	}
+	obs.yamlContract, obs.projectionErr = profileyaml.ForProfile(fetch.profile.Annotations, obs.origin, &spec)
+	if obs.projectionErr == nil {
+		obs.projectionErr = validateNamespaceRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
 	}
 	return obs
 }
@@ -264,7 +279,10 @@ func (r *ClusterProfileReconciler) ComposeState(
 		if obs.projectionErr == nil {
 			obs.projectionErr = validateClusterRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
 		}
-	} else if shouldMaintainClusterRuntime(r.ProjectionMode, fetch.profile, obs.projectable) {
+	} else if shouldMaintainClusterRuntime(r.ProjectionMode, fetch.profile, obs.projectable) ||
+		shouldMaintainClusterModelSlugRuntime(
+			r.ProjectionMode, fetch.profile, obs.projectable, obs.modelSlugWinner,
+		) {
 		// A bare ClusterServingRuntime does not consume profile YAML, so a
 		// retained projection can be rebuilt directly after its gate flips.
 		obs.projectionErr = validateClusterRuntimeProjection(r.ProjectionMode, fetch.profile, obs)
@@ -318,8 +336,10 @@ func (r *ProfileReconciler) PlanResources(
 		if shouldMaintainNamespaceRuntime(r.ProjectionMode, profile, obs.projectable) {
 			planNamespaceRuntime(ctx, &plan, r.ProjectionMode, profile, obs)
 		}
-		if r.ProjectionMode.ProjectsModelSlug() {
-			planNamespaceModelSlugRuntime(ctx, &plan, profile, obs)
+		if shouldMaintainNamespaceModelSlugRuntime(
+			r.ProjectionMode, profile, obs.projectable, obs.modelSlugWinner,
+		) {
+			planNamespaceModelSlugRuntime(ctx, &plan, r.ProjectionMode, profile, obs)
 		}
 	}
 
@@ -346,8 +366,10 @@ func (r *ClusterProfileReconciler) PlanResources(
 		if shouldMaintainClusterRuntime(r.ProjectionMode, profile, obs.projectable) {
 			planClusterRuntime(ctx, &plan, r.ProjectionMode, profile, obs)
 		}
-		if r.ProjectionMode.ProjectsModelSlug() {
-			planClusterModelSlugRuntime(ctx, &plan, profile, obs)
+		if shouldMaintainClusterModelSlugRuntime(
+			r.ProjectionMode, profile, obs.projectable, obs.modelSlugWinner,
+		) {
+			planClusterModelSlugRuntime(ctx, &plan, r.ProjectionMode, profile, obs)
 		}
 	}
 	return plan
@@ -369,6 +391,7 @@ func (r *ProfileReconciler) DecorateStatus(
 		obs.resolvedResources, obs.nodeErr, obs.matchResult,
 		obs.deployable, obs.sourceModel, obs.origin, obs.baseImage,
 	)
+	clearRecoveredRuntimeProjectionElectionCondition(cm, obs.modelSlugElectionErr)
 	decorateProjectionCondition(cm, r.ProjectionMode, obs.modelSlugWinner, obs.projectable, obs.nodeErr, obs.projectionErr)
 	if obs.projectionErr == nil {
 		recordProjectedRuntimeNames(
@@ -394,6 +417,7 @@ func (r *ClusterProfileReconciler) DecorateStatus(
 		obs.resolvedResources, obs.nodeErr, obs.matchResult,
 		obs.deployable, obs.sourceModel, obs.origin, obs.baseImage,
 	)
+	clearRecoveredRuntimeProjectionElectionCondition(cm, obs.modelSlugElectionErr)
 	decorateProjectionCondition(cm, r.ProjectionMode, obs.modelSlugWinner, obs.projectable, obs.nodeErr, obs.projectionErr)
 	if obs.projectionErr == nil {
 		recordProjectedRuntimeNames(
@@ -539,10 +563,19 @@ func appendRuntimeProjectionElectionHealth(
 		return health
 	}
 	return append(health, controllerutils.ComponentHealth{
-		Component:      "RuntimeProjectionElection",
+		Component:      runtimeProjectionElectionComponent,
 		Errors:         []error{err},
 		DependencyType: controllerutils.DependencyTypeUpstream,
 	})
+}
+
+func clearRecoveredRuntimeProjectionElectionCondition(
+	cm *controllerutils.ConditionManager,
+	err error,
+) {
+	if err == nil {
+		cm.Delete(runtimeProjectionElectionReadyCondition)
+	}
 }
 
 func appendProjectionComponentHealth(
@@ -551,6 +584,13 @@ func appendProjectionComponentHealth(
 ) []controllerutils.ComponentHealth {
 	if projectionErr == nil {
 		return health
+	}
+	var categorized controllerutils.StateEngineError
+	if errors.As(projectionErr, &categorized) {
+		return append(health, controllerutils.ComponentHealth{
+			Component: runtimeProjectionComponent,
+			Errors:    []error{projectionErr},
+		})
 	}
 	return append(health, controllerutils.ComponentHealth{
 		Component: runtimeProjectionComponent,

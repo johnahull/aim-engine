@@ -132,7 +132,7 @@ func (r *RuntimeProjectionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	objects := []client.Object{desired.Runtime, desired.ConfigMap}
-	if err := controllerutils.ApplyDesiredStateWithForce(
+	if err := controllerutils.ApplyDesiredStateWithForceFailFast(
 		ctx, r.Client, runtimeProjectionFieldOwner, r.Scheme, objects, desired.Owner,
 	); err != nil {
 		return ctrl.Result{}, err
@@ -263,9 +263,9 @@ func backingProfileScope(profile runtimeprojection.BackingProfile) aimv1alpha1.A
 // A complete ServingRuntime this controller materialized itself (its lazy
 // shadow) does NOT count: it must be re-applied on every reconcile so a drift
 // edit, a late-Ready cache, or backing-profile changes are reasserted by the
-// authoritative force-apply. Only a complete ServingRuntime materialized by
-// something else — a profile reconciler's eager projection or a hand-authored
-// ServingRuntime — is deferred to.
+// authoritative force-apply. The lazy marker identifies the shadow normally;
+// its SSA field manager preserves that identity if the marker is removed.
+// Eager projections and hand-authored pairs are deferred to.
 func (r *RuntimeProjectionReconciler) namespaceRuntimeComplete(
 	ctx context.Context,
 	namespace, name string,
@@ -278,18 +278,31 @@ func (r *RuntimeProjectionReconciler) namespaceRuntimeComplete(
 }
 
 // ownedByLazyProjection reports whether the object is a shadow this controller
-// materialized, keyed on the exact lazy-projection marker value.
+// materialized. The marker is the primary identity; the SSA field manager is
+// durable fallback evidence when an out-of-band edit removes that marker.
 //
-// The marker (not the ownerReference kind) is load-bearing: a
+// The marker (not the ownerReference kind alone) is load-bearing: a
 // namespace-profile-backed shadow and that profile's eager per-profile
 // projection share the same AIMProfile ownerRef, so the kind can't distinguish
-// them, and adopting an eager object would hot-loop against the profile
-// controller's force-apply. Only the exact lazy value is ours; the eager value
-// and unmarked hand-authored ServingRuntimes are deferred to — which is how
-// ownership settles once a mode flip has the eager force-apply overwrite the
-// lazy marker.
+// them. An explicit eager marker therefore always wins, even if stale managed
+// fields still mention this controller. Unmarked hand-authored objects have
+// neither the lazy marker nor this controller's field manager and remain
+// deferred to.
 func ownedByLazyProjection(obj client.Object) bool {
-	return obj.GetLabels()[constants.LabelRuntimeProjection] == constants.LabelValueRuntimeProjectionLazy
+	switch obj.GetLabels()[constants.LabelRuntimeProjection] {
+	case constants.LabelValueRuntimeProjectionEager:
+		return false
+	case constants.LabelValueRuntimeProjectionLazy:
+		return true
+	}
+	// Keep managedFields enabled in the manager cache: without it, a removed
+	// marker would make this controller's existing shadow look hand-authored.
+	for _, entry := range obj.GetManagedFields() {
+		if entry.Manager == runtimeProjectionFieldOwner {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *RuntimeProjectionReconciler) profileFromLazySiblings(
@@ -875,8 +888,9 @@ func inferenceServiceProjectionPredicate() predicate.Predicate {
 
 // managedRuntimeObjectPredicate restricts SR/ConfigMap events to lazy shadows.
 // Testing both update sides preserves a reconcile when drift removes the lazy
-// marker itself. Creates are ignored because the producing reconcile already
-// force-applied both siblings.
+// marker itself; the field-manager fallback keeps subsequent events visible
+// until the marker is restored. Creates are ignored because the producing
+// reconcile already force-applied both siblings.
 func managedRuntimeObjectPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(_ event.CreateEvent) bool { return false },
@@ -968,11 +982,13 @@ func profileProjectionChanged(oldGen, newGen int64, oldStatus, newStatus *aimv1a
 }
 
 // profileCacheProjectionPredicate fires when a cache's spec generation,
-// readiness, or resolved artifacts change — the signals that add, remove, or
-// retarget the profile-owned cache mount on the shadow. Generation is
-// load-bearing: profileName, profileScope, and mode all live in spec, and an
-// update handler maps both the old and new cache objects to their affected
-// runtime keys. Cosmetic status writes are filtered to avoid hot-loops.
+// observed generation, readiness, or resolved artifacts change — the signals
+// that add, remove, or retarget the profile-owned cache mount on the shadow.
+// Generation is load-bearing: profileName, profileScope, and mode all live in
+// spec, and an update handler maps both the old and new cache objects to their
+// affected runtime keys. ObservedGeneration re-enqueues projections when status
+// catches up to a spec change. Cosmetic status writes are filtered to avoid
+// hot-loops.
 func profileCacheProjectionPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc:  func(_ event.CreateEvent) bool { return true },
@@ -985,6 +1001,9 @@ func profileCacheProjectionPredicate() predicate.Predicate {
 				return true
 			}
 			if oldCache.Generation != newCache.Generation {
+				return true
+			}
+			if oldCache.Status.ObservedGeneration != newCache.Status.ObservedGeneration {
 				return true
 			}
 			if oldCache.Status.Status != newCache.Status.Status {

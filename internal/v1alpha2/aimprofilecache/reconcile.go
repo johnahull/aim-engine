@@ -221,6 +221,11 @@ func (r *ProfileCacheReconciler) ComposeState(
 	if len(modelSources) == 0 {
 		return obs
 	}
+	if !fetch.artifacts.OK() {
+		// Unknown artifact state is not evidence that caches are missing.
+		// Fetch health reports the infrastructure error and retries.
+		return obs
+	}
 
 	obs.BestArtifacts = map[string]aimv1alpha1.AIMArtifact{}
 
@@ -370,6 +375,15 @@ func (r *ProfileCacheReconciler) DecorateStatus(
 	cm *controllerutils.ConditionManager,
 	obs ProfileCacheObservation,
 ) {
+	if obs.profileCache != nil {
+		status.ObservedGeneration = obs.profileCache.Generation
+	}
+	if !obs.artifacts.OK() {
+		// Keep the last known artifact/PVC projection while the list is
+		// unavailable. Fetch health records the dependency failure.
+		return
+	}
+
 	// Must run ahead of the early returns below: an artifact this cache advertised
 	// until now has to stop being advertised, PVC included, the moment it starts
 	// being deleted.

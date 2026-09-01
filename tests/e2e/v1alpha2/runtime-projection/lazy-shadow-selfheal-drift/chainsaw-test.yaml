@@ -80,3 +80,47 @@ spec:
                 name: aim-test-selfheal-drift-a41c39a9
               spec:
                 (containers[?name == 'kserve-container'].image | [0]): registry.example.com/aim-cpu-base:0.12.0
+
+    - name: Remove both lazy projection markers
+      description: |
+        Removing both markers reproduces the stale-read race: the watch fires
+        from the old objects, while reconciliation reads a complete unmarked
+        pair. The ServingRuntime is temporarily marked eager so the first
+        ConfigMap edit cannot be repaired before the second edit lands. The
+        lazy SSA field manager must keep the final pair identifiable.
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              name=aim-test-selfheal-drift-a41c39a9
+              kubectl label -n "$NAMESPACE" servingruntime/"$name" \
+                aim.eai.amd.com/runtime-projection=eager --overwrite
+              kubectl label -n "$NAMESPACE" configmap/"$name" \
+                aim.eai.amd.com/runtime-projection=eager --overwrite
+              kubectl label -n "$NAMESPACE" configmap/"$name" \
+                aim.eai.amd.com/runtime-projection-
+              kubectl label -n "$NAMESPACE" servingruntime/"$name" \
+                aim.eai.amd.com/runtime-projection-
+
+    - name: Assert both lazy projection markers are restored
+      try:
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-selfheal-drift-a41c39a9
+                labels:
+                  aim.eai.amd.com/runtime-projection: lazy
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: aim-test-selfheal-drift-a41c39a9
+                labels:
+                  aim.eai.amd.com/runtime-projection: lazy

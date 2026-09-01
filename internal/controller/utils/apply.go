@@ -39,6 +39,8 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 )
 
+const coreConfigMapKind = "ConfigMap"
+
 // ApplyDesiredState applies the desired set of objects via Server-Side Apply (SSA).
 // Objects are applied in deterministic order: by GVK, then namespace, then name.
 // If owner is provided, owner references will be set on all objects before applying.
@@ -50,7 +52,7 @@ func ApplyDesiredState(
 	desired []client.Object,
 	owner client.Object,
 ) error {
-	return applyDesiredState(ctx, k8sClient, fieldOwner, scheme, desired, owner, false)
+	return applyDesiredState(ctx, k8sClient, fieldOwner, scheme, desired, owner, false, false)
 }
 
 // ApplyDesiredStateWithForce behaves like ApplyDesiredState but applies each
@@ -66,7 +68,23 @@ func ApplyDesiredStateWithForce(
 	desired []client.Object,
 	owner client.Object,
 ) error {
-	return applyDesiredState(ctx, k8sClient, fieldOwner, scheme, desired, owner, true)
+	return applyDesiredState(ctx, k8sClient, fieldOwner, scheme, desired, owner, true, false)
+}
+
+// ApplyDesiredStateWithForceFailFast applies authoritative projection batches.
+// ConfigMaps are applied before other force-owned objects and the first failure
+// stops the batch. This prevents initial publication of a projected runtime
+// whose required ConfigMap was not created. Updates remain eventually
+// consistent because Kubernetes does not transact across objects.
+func ApplyDesiredStateWithForceFailFast(
+	ctx context.Context,
+	k8sClient client.Client,
+	fieldOwner string,
+	scheme *runtime.Scheme,
+	desired []client.Object,
+	owner client.Object,
+) error {
+	return applyDesiredState(ctx, k8sClient, fieldOwner, scheme, desired, owner, true, true)
 }
 
 func applyDesiredState(
@@ -77,6 +95,7 @@ func applyDesiredState(
 	desired []client.Object,
 	owner client.Object,
 	force bool,
+	orderedFailFast bool,
 ) error {
 	if len(desired) == 0 {
 		return nil
@@ -103,14 +122,22 @@ func applyDesiredState(
 		}
 	}
 
-	// Sort deterministically
+	// Sort deterministically. Force-owned projection batches put their
+	// ConfigMaps first so a failed prerequisite prevents runtime publication.
 	sorted := sortObjects(desired)
+	if orderedFailFast {
+		sort.SliceStable(sorted, func(i, j int) bool {
+			iGVK := sorted[i].GetObjectKind().GroupVersionKind()
+			jGVK := sorted[j].GetObjectKind().GroupVersionKind()
+			iConfigMap := iGVK.Group == "" && iGVK.Kind == coreConfigMapKind
+			jConfigMap := jGVK.Group == "" && jGVK.Kind == coreConfigMapKind
+			return iConfigMap && !jConfigMap
+		})
+	}
 
-	// Apply each object via SSA. We accumulate errors across all objects
-	// rather than returning on the first failure: a single transient
-	// conflict on one resource should not hide a real misconfiguration
-	// on a sibling, and the framework's InfrastructureError unwrap
-	// surfaces every collected error to the categorizer.
+	// Apply each object via SSA. Standard batches accumulate errors so one
+	// transient conflict does not hide a sibling's misconfiguration. Ordered
+	// projection batches fail fast to preserve their prerequisite ordering.
 	// Use Server-Side Apply (SSA) to create/update desired objects.
 	// The FieldOwner parameter ensures this controller owns only the fields it manages.
 	// Without ForceOwnership, SSA cooperates with kubectl and other controllers:
@@ -132,7 +159,11 @@ func applyDesiredState(
 			client.Apply,
 			patchOpts...,
 		); err != nil {
-			applyErrs = append(applyErrs, fmt.Errorf("failed to apply %s %s/%s: %w", gvk.Kind, key.Namespace, key.Name, err))
+			applyErr := fmt.Errorf("failed to apply %s %s/%s: %w", gvk.Kind, key.Namespace, key.Name, err)
+			if orderedFailFast {
+				return applyErr
+			}
+			applyErrs = append(applyErrs, applyErr)
 		}
 	}
 	if len(applyErrs) == 1 {
