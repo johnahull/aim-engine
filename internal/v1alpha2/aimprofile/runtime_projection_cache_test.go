@@ -68,14 +68,19 @@ func TestEagerProjection_MountsServiceDrivenSharedCache(t *testing.T) {
 	// The service-driven Shared cache: hashed object name (as GenerateProfileCacheName
 	// produces), spec.profileName pointing back at the profile, Shared + Ready.
 	serviceCache := &aimv1alpha2.AIMProfileCache{
-		ObjectMeta: metav1.ObjectMeta{Name: "qwen3-32b-cpu-cache-fe2d5ebc", Namespace: "team-a"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "qwen3-32b-cpu-cache-fe2d5ebc",
+			Namespace:  "team-a",
+			Generation: 1,
+		},
 		Spec: aimv1alpha2.AIMProfileCacheSpec{
 			ProfileName:  profile.Name,
 			ProfileScope: aimv1alpha1.AIMResolutionScopeNamespace,
 			Mode:         aimv1alpha2.ProfileCacheModeShared,
 		},
 		Status: aimv1alpha2.AIMProfileCacheStatus{
-			Status: constants.AIMStatusReady,
+			ObservedGeneration: 1,
+			Status:             constants.AIMStatusReady,
 			Artifacts: map[string]aimv1alpha1.AIMResolvedArtifact{
 				"qwen3-32b": {
 					Name:                  "qwen3-32b",
@@ -284,6 +289,129 @@ func TestEagerProjection_CacheUncertaintySkipsProjectionApply(t *testing.T) {
 	failedPlan := r.PlanResources(context.Background(), reconcileCtx, obs)
 	if got := len(failedPlan.GetToApplyWithForce()); got != 0 {
 		t.Fatalf("cache lookup failure must preserve the last known-good projection; got %d force-applied objects", got)
+	}
+}
+
+func TestEagerProjection_UnobservedCacheDefersWithoutProfileFailure(t *testing.T) {
+	for _, alreadyProjected := range []bool{false, true} {
+		name := "before first projection"
+		if alreadyProjected {
+			name = "after successful projection"
+		}
+		t.Run(name, func(t *testing.T) {
+			profile := &aimv1alpha2.AIMProfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "cached-cpu", Namespace: "team-a"},
+				Spec: aimv1alpha2.AIMProfileSpec{
+					AIMProfileSpecCommon: aimv1alpha2.AIMProfileSpecCommon{
+						AimId: "qwen/qwen3-32b",
+						Image: "registry.io/qwen3-32b:1.0.0",
+						ModelSources: []aimv1alpha1.AIMModelSource{
+							{ModelID: "qwen/qwen3-32b", SourceURI: "hf://qwen/qwen3-32b"},
+						},
+					},
+				},
+			}
+			if alreadyProjected {
+				profile.Status.ProjectedRuntimeName = serving.RuntimeName(profile.Name)
+				profile.Status.Conditions = []metav1.Condition{{
+					Type:   aimv1alpha2.AIMProfileConditionRuntimeProjected,
+					Status: metav1.ConditionTrue,
+					Reason: aimv1alpha2.AIMProfileReasonRuntimeProjected,
+				}, {
+					Type:   runtimeProjectionReadyCondition,
+					Status: metav1.ConditionFalse,
+					Reason: "ProfileCacheLookupFailed",
+				}}
+			}
+
+			unobserved := &aimv1alpha2.AIMProfileCache{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "cached-cpu-shared",
+					Namespace:  profile.Namespace,
+					Generation: 1,
+				},
+				Spec: aimv1alpha2.AIMProfileCacheSpec{
+					ProfileName:  profile.Name,
+					ProfileScope: aimv1alpha1.AIMResolutionScopeNamespace,
+					Mode:         aimv1alpha2.ProfileCacheModeShared,
+				},
+				Status: aimv1alpha2.AIMProfileCacheStatus{
+					Status: constants.AIMStatusReady,
+				},
+			}
+
+			c := newProfileTestClient(t, profile, unobserved)
+			r := &ProfileReconciler{
+				Client:         c,
+				ProjectionMode: aimv1alpha2.RuntimeProjectionModeExhaustive,
+			}
+			reconcileCtx := controllerutils.ReconcileContext[*aimv1alpha2.AIMProfile]{Object: profile}
+			fetch := r.FetchRemoteState(context.Background(), c, reconcileCtx)
+			if fetch.profileCacheErr == nil {
+				t.Fatal("unobserved cache status must defer cache selection")
+			}
+
+			obs := r.ComposeState(context.Background(), reconcileCtx, fetch)
+			if !obs.projectionDeferred {
+				t.Fatal("unobserved cache status must defer runtime projection")
+			}
+			if obs.projectionErr != nil {
+				t.Fatalf("unobserved cache status became a profile failure: %v", obs.projectionErr)
+			}
+
+			health := obs.GetComponentHealth(context.Background(), nil)
+			var projectionHealth *controllerutils.ComponentHealth
+			for i := range health {
+				if health[i].Component == runtimeProjectionComponent {
+					projectionHealth = &health[i]
+					break
+				}
+			}
+			if alreadyProjected {
+				if projectionHealth != nil {
+					t.Fatalf("existing projection became unhealthy while cache catches up: %+v", projectionHealth)
+				}
+			} else if projectionHealth == nil ||
+				projectionHealth.State != constants.AIMStatusProgressing ||
+				len(projectionHealth.Errors) != 0 {
+				t.Fatalf("first projection health = %+v, want non-error Progressing", projectionHealth)
+			}
+
+			plan := r.PlanResources(context.Background(), reconcileCtx, obs)
+			if got := len(plan.GetToApplyWithForce()); got != 0 {
+				t.Fatalf("deferred projection planned %d force-applied objects, want 0", got)
+			}
+			if plan.RequeueAfter == 0 {
+				t.Fatal("deferred projection must request a follow-up reconcile")
+			}
+
+			status := profile.Status
+			cm := controllerutils.NewConditionManager(profile.Status.Conditions)
+			r.DecorateStatus(&status, cm, obs)
+			if alreadyProjected {
+				if status.ProjectedRuntimeName != profile.Status.ProjectedRuntimeName {
+					t.Fatalf(
+						"projected runtime name = %q, want retained %q",
+						status.ProjectedRuntimeName,
+						profile.Status.ProjectedRuntimeName,
+					)
+				}
+				if condition := cm.Get(aimv1alpha2.AIMProfileConditionRuntimeProjected); condition == nil ||
+					condition.Status != metav1.ConditionTrue {
+					t.Fatalf("last successful projection condition was not preserved: %+v", condition)
+				}
+				if condition := cm.Get(runtimeProjectionReadyCondition); condition != nil {
+					t.Fatalf("stale cache lookup failure condition was not cleared: %+v", condition)
+				}
+			} else {
+				if status.ProjectedRuntimeName != "" {
+					t.Fatalf("deferred first projection published runtime name %q", status.ProjectedRuntimeName)
+				}
+				if condition := cm.Get(aimv1alpha2.AIMProfileConditionRuntimeProjected); condition != nil {
+					t.Fatalf("deferred first projection claimed success: %+v", condition)
+				}
+			}
+		})
 	}
 }
 

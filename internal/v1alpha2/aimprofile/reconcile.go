@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,8 +38,11 @@ import (
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
 	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profilecache"
 	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/profileyaml"
 )
+
+const profileCacheReconcilingReason = "ProfileCacheReconciling"
 
 // ============================================================================
 // RECONCILERS
@@ -174,8 +178,10 @@ type ProfileObservation struct {
 	yamlContract      profileyaml.Contract
 	// projectable reports whether a runtime should be projected for this profile
 	// (deployable, has an image, and hardware is available — freshly computed).
-	projectable   bool
-	projectionErr error
+	projectable        bool
+	projectionDeferred bool
+	projectionWaiting  bool
+	projectionErr      error
 }
 
 // GetComponentHealth returns health of all components for automatic status management.
@@ -186,6 +192,15 @@ func (obs ProfileObservation) GetComponentHealth(_ context.Context, _ kubernetes
 		obs.matchResult,
 	)
 	health = appendRuntimeProjectionElectionHealth(health, obs.modelSlugElectionErr)
+	if obs.projectionWaiting {
+		health = append(health, controllerutils.ComponentHealth{
+			Component:      runtimeProjectionComponent,
+			State:          constants.AIMStatusProgressing,
+			Reason:         profileCacheReconcilingReason,
+			Message:        fmt.Sprintf("Waiting for AIMProfileCache status to catch up: %v", obs.profileCacheErr),
+			DependencyType: controllerutils.DependencyTypeDownstream,
+		})
+	}
 	return appendProjectionComponentHealth(health, obs.projectionErr)
 }
 
@@ -241,6 +256,12 @@ func (r *ProfileReconciler) ComposeState(
 		return obs
 	}
 	if fetch.profileCacheErr != nil {
+		var staleCacheStatus *profilecache.StatusStaleError
+		if errors.As(fetch.profileCacheErr, &staleCacheStatus) {
+			obs.projectionDeferred = true
+			obs.projectionWaiting = !hasRecordedNamespaceProjection(fetch.profile)
+			return obs
+		}
 		obs.projectionErr = controllerutils.NewInfrastructureError(
 			"ProfileCacheLookupFailed",
 			fmt.Sprintf("Failed to resolve the Shared AIMProfileCache for runtime projection %q", fetch.profile.Name),
@@ -332,6 +353,11 @@ func (r *ProfileReconciler) PlanResources(
 		plan.Apply(buildProfileOwnedCache(profile))
 	}
 
+	if obs.projectionDeferred {
+		plan.RequestRequeueAfter(time.Second)
+		return plan
+	}
+
 	if obs.projectionErr == nil {
 		if shouldMaintainNamespaceRuntime(r.ProjectionMode, profile, obs.projectable) {
 			planNamespaceRuntime(ctx, &plan, r.ProjectionMode, profile, obs)
@@ -392,6 +418,12 @@ func (r *ProfileReconciler) DecorateStatus(
 		obs.deployable, obs.sourceModel, obs.origin, obs.baseImage,
 	)
 	clearRecoveredRuntimeProjectionElectionCondition(cm, obs.modelSlugElectionErr)
+	if obs.projectionDeferred {
+		if !obs.projectionWaiting {
+			cm.Delete(runtimeProjectionReadyCondition)
+		}
+		return
+	}
 	decorateProjectionCondition(cm, r.ProjectionMode, obs.modelSlugWinner, obs.projectable, obs.nodeErr, obs.projectionErr)
 	if obs.projectionErr == nil {
 		recordProjectedRuntimeNames(
@@ -403,6 +435,12 @@ func (r *ProfileReconciler) DecorateStatus(
 			obs.modelSlugWinner,
 		)
 	}
+}
+
+func hasRecordedNamespaceProjection(profile *aimv1alpha2.AIMProfile) bool {
+	return profile != nil &&
+		(profile.Status.ProjectedRuntimeName != "" ||
+			profile.Status.ProjectedModelSlugRuntimeName != "")
 }
 
 func (r *ClusterProfileReconciler) DecorateStatus(

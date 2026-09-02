@@ -30,12 +30,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	aimv1alpha1 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha1"
 	aimv1alpha2 "github.com/amd-enterprise-ai/aim-engine/api/v1alpha2"
 	"github.com/amd-enterprise-ai/aim-engine/internal/constants"
+	controllerutils "github.com/amd-enterprise-ai/aim-engine/internal/controller/utils"
+	"github.com/amd-enterprise-ai/aim-engine/internal/v1alpha2/aimprofilecache"
 )
 
 // newProfileCacheTestReconciler mirrors the production wiring, including the
@@ -93,6 +98,59 @@ func ownedByProfileCache(pc *aimv1alpha2.AIMProfileCache) metav1.OwnerReference 
 		Kind:       "AIMProfileCache",
 		Name:       pc.Name,
 		UID:        pc.UID,
+	}
+}
+
+func TestProfileCacheReconcileWritesObservedGenerationWhenAddingFinalizer(t *testing.T) {
+	scheme := runtimeProjectionScheme(t)
+	pc := makeSharedProfileCache("cache-first-pass")
+	pc.Generation = 1
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&aimv1alpha2.AIMProfileCache{}).
+		WithObjects(pc).
+		Build()
+	domainReconciler := &aimprofilecache.ProfileCacheReconciler{Scheme: scheme}
+	recorder := record.NewFakeRecorder(20)
+	r := &AIMProfileCacheReconciler{
+		Client:     c,
+		Scheme:     scheme,
+		Recorder:   recorder,
+		reconciler: domainReconciler,
+		pipeline: controllerutils.Pipeline[
+			*aimv1alpha2.AIMProfileCache,
+			*aimv1alpha2.AIMProfileCacheStatus,
+			aimprofilecache.ProfileCacheFetchResult,
+			aimprofilecache.ProfileCacheObservation,
+		]{
+			Client:         c,
+			StatusClient:   c.Status(),
+			Recorder:       recorder,
+			ControllerName: profileCacheName,
+			Reconciler:     domainReconciler,
+			Scheme:         scheme,
+		},
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pc)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var got aimv1alpha2.AIMProfileCache
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pc), &got); err != nil {
+		t.Fatalf("get reconciled AIMProfileCache: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&got, finalizerProfileCacheArtifactCleanup) {
+		t.Fatal("first reconcile did not add the artifact cleanup finalizer")
+	}
+	if got.Status.ObservedGeneration != got.Generation {
+		t.Fatalf(
+			"first reconcile observedGeneration = %d, want metadata generation %d",
+			got.Status.ObservedGeneration,
+			got.Generation,
+		)
 	}
 }
 

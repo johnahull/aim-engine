@@ -145,7 +145,9 @@ func (r *AIMProfileCacheReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			}
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		// Continue through the pipeline with the patched object so status,
+		// including observedGeneration, is initialized on the first successful
+		// reconciliation. The metadata patch updates pc's resourceVersion.
 	}
 
 	return r.pipeline.Run(ctx, &pc)

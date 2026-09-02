@@ -41,6 +41,27 @@ import (
 	"github.com/amd-enterprise-ai/aim-engine/internal/utils"
 )
 
+// StatusStaleError reports that a matching cache exists, but its status has not
+// caught up to the current spec generation. Callers should preserve their last
+// known-good projection and retry rather than treating this convergence state
+// as an infrastructure failure or as proof that no cache exists.
+type StatusStaleError struct {
+	Namespace          string
+	Name               string
+	Generation         int64
+	ObservedGeneration int64
+}
+
+func (e *StatusStaleError) Error() string {
+	return fmt.Sprintf(
+		"AIMProfileCache %s/%s status has not observed metadata generation %d (observedGeneration=%d)",
+		e.Namespace,
+		e.Name,
+		e.Generation,
+		e.ObservedGeneration,
+	)
+}
+
 // FindReadyShared returns a Ready, profile-owned (Shared) AIMProfileCache in
 // namespace that caches the profile named profileName at the given scope, or nil
 // when none exists. It returns an error instead of nil when a matching cache's
@@ -82,9 +103,16 @@ func FindReadyShared(
 
 	var ready *aimv1alpha2.AIMProfileCache
 	var unknown *aimv1alpha2.AIMProfileCache
+	var stale *aimv1alpha2.AIMProfileCache
 	for i := range caches.Items {
 		cache := &caches.Items[i]
 		if !matchesShared(cache, profileName, scope) {
+			continue
+		}
+		if !cacheStatusCurrent(cache) {
+			if stale == nil || cache.Name < stale.Name {
+				stale = cache
+			}
 			continue
 		}
 		if cacheReadinessUnknown(cache) {
@@ -103,10 +131,18 @@ func FindReadyShared(
 	}
 	if unknown != nil {
 		return nil, fmt.Errorf(
-			"AIMProfileCache %s/%s readiness is unknown because its status is stale or reconciliation has an active error condition",
+			"AIMProfileCache %s/%s readiness is unknown because reconciliation has an active error condition",
 			unknown.Namespace,
 			unknown.Name,
 		)
+	}
+	if stale != nil {
+		return nil, &StatusStaleError{
+			Namespace:          stale.Namespace,
+			Name:               stale.Name,
+			Generation:         stale.Generation,
+			ObservedGeneration: stale.Status.ObservedGeneration,
+		}
 	}
 	return nil, nil
 }
@@ -126,9 +162,6 @@ func matchesShared(
 }
 
 func cacheReadinessUnknown(cache *aimv1alpha2.AIMProfileCache) bool {
-	if !cacheStatusCurrent(cache) {
-		return true
-	}
 	for _, conditionType := range []string{
 		controllerutils.ConditionTypeDependenciesReachable,
 		controllerutils.ConditionTypeAuthValid,

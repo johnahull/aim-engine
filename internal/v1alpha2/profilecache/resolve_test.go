@@ -24,6 +24,7 @@ package profilecache
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,13 +59,16 @@ func newScheme(t *testing.T) *runtime.Scheme {
 // service-driven Shared cache (hashed name) still resolves by profileName.
 func cache(name, profileName string, scope aimv1alpha1.AIMResolutionScope, mode aimv1alpha2.AIMProfileCacheMode, status constants.AIMStatus) *aimv1alpha2.AIMProfileCache {
 	return &aimv1alpha2.AIMProfileCache{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, Generation: 1},
 		Spec: aimv1alpha2.AIMProfileCacheSpec{
 			ProfileName:  profileName,
 			ProfileScope: scope,
 			Mode:         mode,
 		},
-		Status: aimv1alpha2.AIMProfileCacheStatus{Status: status},
+		Status: aimv1alpha2.AIMProfileCacheStatus{
+			ObservedGeneration: 1,
+			Status:             status,
+		},
 	}
 }
 
@@ -228,8 +232,49 @@ func TestFindReadyShared_ReturnsErrorWhenReadyStatusIsStale(t *testing.T) {
 	if err == nil {
 		t.Fatal("FindReadyShared() error = nil, want stale-status error")
 	}
+	var staleErr *StatusStaleError
+	if !errors.As(err, &staleErr) {
+		t.Fatalf("FindReadyShared() error = %T %v, want *StatusStaleError", err, err)
+	}
 	if got != nil {
 		t.Fatalf("FindReadyShared() = %q, want nil for stale Ready status", got.Name)
+	}
+}
+
+func TestFindReadyShared_ReturnsPendingWhenObservedGenerationIsMissing(t *testing.T) {
+	t.Parallel()
+
+	const profile = "qwen3-32b-mi300x"
+	unobserved := cache(
+		profile+"-cache",
+		profile,
+		aimv1alpha1.AIMResolutionScopeNamespace,
+		aimv1alpha2.ProfileCacheModeShared,
+		constants.AIMStatusReady,
+	)
+	unobserved.Generation = 1
+	unobserved.Status.ObservedGeneration = 0
+
+	got, err := FindReadyShared(
+		context.Background(),
+		newClient(t, unobserved),
+		testNamespace,
+		profile,
+		aimv1alpha1.AIMResolutionScopeNamespace,
+	)
+	var staleErr *StatusStaleError
+	if !errors.As(err, &staleErr) {
+		t.Fatalf("FindReadyShared() error = %T %v, want *StatusStaleError", err, err)
+	}
+	if got != nil {
+		t.Fatalf("FindReadyShared() = %q, want nil while cache status catches up", got.Name)
+	}
+	if staleErr.Generation != 1 || staleErr.ObservedGeneration != 0 {
+		t.Fatalf(
+			"StatusStaleError generations = %d/%d, want generation=1 observedGeneration=0",
+			staleErr.Generation,
+			staleErr.ObservedGeneration,
+		)
 	}
 }
 
@@ -293,6 +338,30 @@ func TestSelectBestShared_IgnoresStaleStatus(t *testing.T) {
 
 	if got := SelectBestShared([]aimv1alpha2.AIMProfileCache{*stale}, profile, scope); got != nil {
 		t.Fatalf("SelectBestShared() = %q, want nil when only stale status exists", got.Name)
+	}
+}
+
+func TestSelectBestShared_IgnoresMissingObservedGeneration(t *testing.T) {
+	t.Parallel()
+
+	const profile = "qwen3-32b-mi300x"
+	unobserved := cache(
+		"unobserved-ready",
+		profile,
+		aimv1alpha1.AIMResolutionScopeNamespace,
+		aimv1alpha2.ProfileCacheModeShared,
+		constants.AIMStatusReady,
+	)
+	unobserved.Generation = 1
+	unobserved.Status.ObservedGeneration = 0
+
+	got := SelectBestShared(
+		[]aimv1alpha2.AIMProfileCache{*unobserved},
+		profile,
+		aimv1alpha1.AIMResolutionScopeNamespace,
+	)
+	if got != nil {
+		t.Fatalf("SelectBestShared() = %q, want nil while cache status catches up", got.Name)
 	}
 }
 

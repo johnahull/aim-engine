@@ -14,10 +14,11 @@
 # cold-pulled its weights — while the same service worked in Reduced mode via the
 # lazy shadow. The mount is now resolved identically on both paths.
 #
-# The cache is applied LATE and frozen to Ready (apply-with-status.sh) so the test
-# also exercises the AIMProfileCache watch on the profile controller: the eager
-# runtime is first projected WITHOUT the PVC volume, then gains it once the cache
-# reaches Ready, with no manual re-reconcile.
+# The cache is applied LATE and frozen to Ready (apply-with-status.sh), first
+# without observedGeneration. A forced profile reconcile proves that stale cache
+# status preserves the existing cacheless runtime instead of degrading the
+# profile. Once observedGeneration catches up, the AIMProfileCache watch
+# reprojects the eager runtime with the PVC volume.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -61,7 +62,7 @@ spec:
                   - name: aim-profile
                 (volumes[?persistentVolumeClaim] | length(@)): 0
 
-    - name: Seed a Ready, Shared, namespace-scope AIMProfileCache (hashed name, caching.enabled unset)
+    - name: Seed a Ready Shared cache whose status has not observed its generation
       try:
         - apply:
             file: profile-cache.yaml
@@ -73,6 +74,11 @@ spec:
             content: |
               set -eu
               apply-with-status.sh profile-cache.yaml --status-only -n "$NAMESPACE"
+              observed="$(kubectl -n "$NAMESPACE" get aimprofilecache test-eager-cache-cache-5e1f0a3b -o jsonpath='{.status.observedGeneration}')"
+              if [ -n "$observed" ]; then
+                echo "expected observedGeneration to be omitted, got $observed"
+                exit 1
+              fi
         - assert:
             resource:
               apiVersion: aim.eai.amd.com/v1alpha2
@@ -80,6 +86,76 @@ spec:
               metadata:
                 name: test-eager-cache-cache-5e1f0a3b
               status:
+                status: Ready
+
+    - name: Reconcile the profile while cache status is stale and preserve its runtime
+      description: |
+        Changing a valid profile field increments metadata.generation, giving
+        the test an observable proof that the profile controller reconciled
+        after the unobserved cache appeared. The profile must remain Ready,
+        ProfileCacheLookupFailed must not be emitted, and the existing runtime
+        must remain untouched until cache status catches up.
+      try:
+        - script:
+            timeout: 60s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              kubectl -n "$NAMESPACE" patch aimprofile test-eager-cache --type=merge \
+                -p '{"spec":{"metric":"throughput"}}'
+              generation="$(kubectl -n "$NAMESPACE" get aimprofile test-eager-cache -o jsonpath='{.metadata.generation}')"
+              attempts=0
+              while [ "$attempts" -lt 60 ]; do
+                observed="$(kubectl -n "$NAMESPACE" get aimprofile test-eager-cache -o jsonpath='{.status.observedGeneration}')"
+                if [ "$observed" = "$generation" ]; then
+                  exit 0
+                fi
+                attempts=$((attempts + 1))
+                sleep 1
+              done
+              kubectl -n "$NAMESPACE" get aimprofile test-eager-cache -o yaml
+              exit 1
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfile
+              metadata:
+                name: test-eager-cache
+              status:
+                status: Ready
+                (conditions[?reason == 'ProfileCacheLookupFailed'] | length(@)): 0
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1alpha1
+              kind: ServingRuntime
+              metadata:
+                name: aim-test-eager-cache-6d4bb9bf
+              spec:
+                (volumes[?persistentVolumeClaim] | length(@)): 0
+
+    - name: Mark the current cache generation observed
+      try:
+        - script:
+            timeout: 60s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -eu
+              generation="$(kubectl -n "$NAMESPACE" get aimprofilecache test-eager-cache-cache-5e1f0a3b -o jsonpath='{.metadata.generation}')"
+              kubectl -n "$NAMESPACE" patch aimprofilecache test-eager-cache-cache-5e1f0a3b \
+                --subresource=status --type=merge \
+                -p "{\"status\":{\"observedGeneration\":$generation}}"
+        - assert:
+            resource:
+              apiVersion: aim.eai.amd.com/v1alpha2
+              kind: AIMProfileCache
+              metadata:
+                name: test-eager-cache-cache-5e1f0a3b
+              status:
+                observedGeneration: 1
                 status: Ready
 
     - name: Assert the eager ServingRuntime gains the PVC cache volume, mount, and redirect env

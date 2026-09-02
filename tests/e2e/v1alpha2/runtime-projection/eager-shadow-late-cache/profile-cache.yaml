@@ -7,7 +7,9 @@
 #
 # Frozen to Ready with a resolved artifact (PVC + mount point) via
 # apply-with-status.sh, and paused so the AIMProfileCache controller does not
-# overwrite the status. No real download or storage class is needed.
+# overwrite the status. observedGeneration is deliberately omitted so the test
+# can exercise profile reconciliation while cache status is catching up.
+# No real download or storage class is needed.
 apiVersion: aim.eai.amd.com/v1alpha2
 kind: AIMProfileCache
 metadata:
@@ -19,7 +21,6 @@ spec:
   profileScope: Namespace
   mode: Shared
 status:
-  observedGeneration: 1
   status: Ready
   conditions:
     - type: ProfileFound
