@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- Populate this section during release-prep, then rename to the release version -->
 
+## [0.2.6] - 2026-09-15
+
 ### Added
 - **NVIDIA GPU serving end to end.** `AIMProfile`/`AIMClusterProfile` gain `spec.acceleratorVendor` (`amd` | `nvidia`), which resolves both the node-affinity term (`feature.node.kubernetes.io/aim-accelerator.vendor.GPU.<VENDOR>`) and the device-plugin resource (`amd.com/gpu` vs `nvidia.com/gpu`). A generic NVIDIA profile can omit `acceleratorModel` and match any NVIDIA GPU node. Empty vendor keeps the previous AMD behaviour, so existing profiles are unaffected. The accelerator detector's vendor labels, previously published for discovery only, are now consumed by the operator. `acceleratorVendor` is also available on profile selectors and on `AIMService.spec.profile.overrides`.
 - **Direct upstream vLLM runtime contract.** A profile with `acceleratorVendor: nvidia` and `engine: vllm` is projected as a `vllm serve` invocation against the mounted artifact — AIM Engine generates the model path, `--served-model-name`, `--host`, `--port` and `--tensor-parallel-size`, promotes `engineEnv` to container env, and forces Hugging Face offline mode. `engineArgs` becomes optional tuning. These runtimes expose vLLM's native OpenAI API and do not declare KServe protocol v2. AMD AIM images keep their baked entrypoint and the existing AIM-runtime env contract.
